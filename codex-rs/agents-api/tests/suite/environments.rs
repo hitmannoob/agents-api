@@ -327,6 +327,10 @@ async fn executor_and_worker_loss_never_replay_commands_and_recover() -> anyhow:
             (&failed["status"], &failed["error"], &failed["required_actions"]),
             (&json!("failed"), &json!("the service restarted while input waited for the environment; that input was dropped"), &json!([]))
         );
+        // An executor connected before the restart, so the environment reads
+        // as disconnected rather than pending.
+        let environment = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?;
+        assert_eq!(environment["status"], json!("disconnected"));
         let mut stream = client.get(format!("{url}/events")).bearer_auth(TOKEN).send().await?.error_for_status()?;
         let _running = executor(&format!("{origin}/registry"), &environment_id)?;
         until_event(&mut stream, "agent.session.environment.connected").await?;
@@ -552,6 +556,9 @@ async fn input_waiting_past_the_connection_wait_fails_the_session() -> anyhow::R
         assert_eq!((&failed["status"], &failed["error"], &failed["required_actions"]), (&json!("failed"), &json!(timed_out), &json!([])));
         let turns = request(&client, reqwest::Method::GET, &format!("{url}/turns"), Value::Null).await?;
         assert_eq!(turns["data"], json!([]));
+        // The environment reads as failed, as its event reported.
+        let environment = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{}", environment_id.as_str().context("environment id")?), Value::Null).await?;
+        assert_eq!(environment["status"], json!("failed"));
         Ok::<_, anyhow::Error>(())
     })
     .await?

@@ -220,7 +220,7 @@ original payloads moved to `/v1/prototype/agents`. New session routes are:
 | GET | `/v1/agents/sessions/{id}/items` | Saved messages, reasoning and function records |
 | GET | `/v1/agents/sessions/{id}/turns` | Saved outcomes |
 | GET | `/v1/agents/sessions/{id}/turns/{turn_id}` | One saved outcome |
-| GET | `/v1/agents/environments/{id}` | A self-hosted environment's status (`pending`, `connected`, `disconnected`) |
+| GET | `/v1/agents/environments/{id}` | A self-hosted environment's status: `pending` until an executor first connects, then `connected` or `disconnected` (kept across restarts); `failed` after input timed out waiting for one, until one connects. Self-hosted environments never expire |
 | POST / GET | `/v1/agents/environments/{id}/files` | Write an inline or `file_id` file into, or list files in, a connected environment's workspace |
 | POST / GET | `/v1/files` | Upload (multipart, at most 50 MiB, optional `expires_after`) or list files |
 | GET / DELETE | `/v1/files/{id}` | Retrieve or delete an uploaded file; `/content` streams it after checking its SHA-256 |

@@ -146,18 +146,28 @@ pub(crate) async fn retrieve(
     Extract(state): Extract<Arc<State>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let session_id: Option<String> =
-        sqlx::query_scalar("SELECT session_id FROM environments WHERE id = ?")
+    let row: Option<(String, bool, bool)> =
+        sqlx::query_as("SELECT session_id, connected_once, failed FROM environments WHERE id = ?")
             .bind(&id)
             .fetch_optional(&state.store.0)
             .await
             .map_err(anyhow::Error::from)?;
-    let session_id = session_id
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "environment not found".into()))?;
+    let (session_id, connected_once, failed) =
+        row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "environment not found".into()))?;
+    // A connected executor wins; input that timed out waiting for one leaves
+    // the environment failed until one connects. Self-hosted environments have
+    // no lifetime of their own, so they never expire.
+    let status = match state.registry.status(&id) {
+        "connected" => "connected",
+        _ if failed => "failed",
+        "disconnected" => "disconnected",
+        _ if connected_once => "disconnected",
+        _ => "pending",
+    };
     let skills = crate::session_skills::installed(&state, &session_id).await?;
     Ok(Json(
         json!({"id": id, "object": "agent.environment", "type": "self_hosted",
-            "status": state.registry.status(&id), "files": [], "plugins": [], "skills": skills}),
+            "status": status, "files": [], "plugins": [], "skills": skills}),
     ))
 }
 
@@ -191,6 +201,17 @@ pub(crate) fn watch(state: &Arc<State>, session_id: String, environment_id: Stri
             };
             if now != connected {
                 connected = now;
+                if now {
+                    let recorded = sqlx::query(
+                        "UPDATE environments SET connected_once = 1, failed = 0 WHERE id = ?",
+                    )
+                    .bind(&environment_id)
+                    .execute(&state.store.0)
+                    .await;
+                    if let Err(error) = recorded {
+                        tracing::warn!(error = %error, "environment connection not recorded");
+                    }
+                }
                 let status = if now { "connected" } else { "disconnected" };
                 emit(
                     &state,
@@ -362,6 +383,13 @@ async fn wait(state: Weak<State>, session_id: String, environment_id: String, ge
     }
     drop(admission);
     if !connected {
+        let recorded = sqlx::query("UPDATE environments SET failed = 1 WHERE id = ?")
+            .bind(&environment_id)
+            .execute(&state.store.0)
+            .await;
+        if let Err(error) = recorded {
+            tracing::warn!(error = %error, "environment failure not recorded");
+        }
         let error = json!({"type": "environment_error", "code": "environment_connection_timeout", "message": TIMED_OUT});
         emit(&state, &session_id, &environment_id, "failed", Some(error));
         return;
