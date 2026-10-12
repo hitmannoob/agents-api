@@ -102,9 +102,10 @@ pub(crate) async fn register(
 /// `subagent.created` event.
 pub(crate) fn activity_item(owner: &Owner, subagent_id: &str, activity: &Value) -> Option<Value> {
     match activity["kind"].as_str()? {
+        // Codex resolves the subagent's model and effort when it spawns it.
         "started" => Some(
             json!({"type":"create_subagent_call","agent_id":owner.agent_id,"content":[],
-            "model":null,"reasoning_effort":null}),
+            "model":activity["model"],"reasoning_effort":activity["reasoningEffort"]}),
         ),
         "interacted" => Some(
             json!({"type":"send_subagent_input_call","sender_agent_id":owner.agent_id,
