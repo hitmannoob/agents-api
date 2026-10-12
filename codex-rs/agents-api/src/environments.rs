@@ -68,7 +68,7 @@ pub(crate) fn parse(params: &Value) -> Result<Environment, ApiError> {
     if let Some(unknown) = fields.keys().find(|key| {
         !matches!(
             key.as_str(),
-            "type" | "workspace_directory" | "capability_directories"
+            "type" | "workspace_directory" | "capability_directories" | "skills"
         )
     }) {
         return Err(invalid(format!(
@@ -139,31 +139,25 @@ pub(crate) async fn create(
     Ok(public)
 }
 
-/// Whether a session owns this environment, so executors may register for it.
-pub(crate) async fn exists(state: &State, environment_id: &str) -> anyhow::Result<bool> {
-    Ok(
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM environments WHERE id = ?)")
-            .bind(environment_id)
-            .fetch_one(&state.store.0)
-            .await?,
-    )
-}
-
-/// An environment's safe metadata and connection status. Installed files,
-/// plugins, and skills describe hosted environments; a self-hosted one has none.
+/// An environment's safe metadata and connection status. Installed files and
+/// plugins describe hosted environments, so a self-hosted one has none; its
+/// skills are the Skills API versions pinned to its session.
 pub(crate) async fn retrieve(
     Extract(state): Extract<Arc<State>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if !exists(&state, &id).await? {
-        return Err(ApiError(
-            StatusCode::NOT_FOUND,
-            "environment not found".into(),
-        ));
-    }
+    let session_id: Option<String> =
+        sqlx::query_scalar("SELECT session_id FROM environments WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.store.0)
+            .await
+            .map_err(anyhow::Error::from)?;
+    let session_id = session_id
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "environment not found".into()))?;
+    let skills = crate::session_skills::installed(&state, &session_id).await?;
     Ok(Json(
         json!({"id": id, "object": "agent.environment", "type": "self_hosted",
-            "status": state.registry.status(&id), "files": [], "plugins": [], "skills": []}),
+            "status": state.registry.status(&id), "files": [], "plugins": [], "skills": skills}),
     ))
 }
 

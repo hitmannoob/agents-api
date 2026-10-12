@@ -444,8 +444,16 @@ pub(crate) async fn start_turn(
     )
     .await?;
     let loaded = state.loaded_threads()?;
-    if let Environment::SelfHosted { id, .. } = &session.environment {
-        crate::environments::attach(state, id).await?;
+    let mut skills_root = None;
+    if let Environment::SelfHosted {
+        id: environment_id,
+        cwd,
+        ..
+    } = &session.environment
+    {
+        crate::environments::attach(state, environment_id).await?;
+        crate::session_skills::install(state, id, environment_id).await?;
+        skills_root = crate::session_skills::root(state, id, cwd).await?;
     }
     // The caller's own compute is the boundary for a self-hosted environment,
     // which runs commands unsandboxed. Resuming does not keep the thread's
@@ -478,11 +486,14 @@ pub(crate) async fn start_turn(
             Environment::Local { cwd } => json!([{"environmentId": "local", "cwd": cwd}]),
             Environment::SelfHosted { id, cwd, .. } => json!([{"environmentId": id, "cwd": cwd}]),
         };
-        // Skills in the caller's capability directories, found on the executor.
-        // Codex keeps the selection when the thread resumes.
-        let capability_roots = match &session.environment {
+        // Skills in the caller's capability directories and the session's
+        // installed Skills API skills, found on the executor. Codex keeps the
+        // selection when the thread resumes.
+        let capability_roots: Vec<Value> = match &session.environment {
             Environment::SelfHosted { id, capability_directories, .. } => capability_directories.iter().enumerate()
-                .map(|(index, path)| json!({"id": format!("capability-{index}"),
+                .map(|(index, path)| (format!("capability-{index}"), path.as_str()))
+                .chain(skills_root.as_deref().map(|path| ("skills".to_owned(), path)))
+                .map(|(root, path)| json!({"id": root,
                     "location": {"type": "environment", "environmentId": id, "path": path}}))
                 .collect(),
             Environment::None | Environment::Local { .. } => Vec::new(),

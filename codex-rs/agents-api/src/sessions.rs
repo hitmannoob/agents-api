@@ -236,6 +236,7 @@ pub(crate) async fn delete(
         .map_err(anyhow::Error::from)?;
     for statement in [
         "DELETE FROM session_credentials WHERE session_id = ?",
+        "DELETE FROM session_skills WHERE session_id = ?",
         "DELETE FROM environments WHERE session_id = ?",
         "DELETE FROM public_records WHERE session_id = ?",
         "DELETE FROM tool_calls WHERE session_id = ?",
@@ -264,6 +265,7 @@ pub(crate) async fn delete(
     tx.commit().await.map_err(anyhow::Error::from)?;
     drop(admission);
     crate::credentials::forget(&state, &id, credential_labels).await;
+    crate::session_skills::forget(&state, &id).await;
     crate::lock(&state.started_turns).remove(&id);
     state
         .secrets

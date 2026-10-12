@@ -698,3 +698,92 @@ async fn project_environment_keys_connect_only_their_projects_environments() -> 
     })
     .await?
 }
+
+/// Skills API skills named in a self-hosted environment are pinned when the
+/// session is created, installed on the executor before its turns, and offered
+/// to the model like capability-directory skills.
+#[tokio::test]
+async fn self_hosted_sessions_install_their_pinned_skills() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let workspace_directory = workspace_path.to_str().context("workspace path")?;
+        let provider = create_mock_responses_server_sequence_unchecked(vec![
+            create_final_assistant_message_sse_response("first")?,
+            create_final_assistant_message_sse_response("second")?,
+        ]).await;
+        MockResponsesConfig::new(&provider.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        let client = reqwest::Client::new();
+        let sessions = format!("{base}/agents/sessions");
+
+        let first = skills::skill_zip("report-writer", "Writes quarterly reports. Use for reports.", &[("templates/outline.md", b"# Outline")])?;
+        let skill = skills::upload(&client, &format!("{base}/skills"), TOKEN, &[], &[("report-writer.zip", &first)]).await?
+            .error_for_status()?.json::<Value>().await?;
+        let skill_id = skill["id"].as_str().context("skill id")?.to_owned();
+        let environment = |skills: Value| json!({"agent":{"model":"mock-model"},
+            "environment":{"type":"self_hosted","workspace_directory":workspace_directory,"skills":skills}});
+
+        // References resolve in the caller's project when the session is created.
+        let reference = json!({"type":"skill_reference","skill_id":skill_id});
+        for (skills, message) in [
+            (json!([{"type":"skill_reference","skill_id":"skill_missing"}]), "skill skill_missing not found".to_owned()),
+            (json!([{"type":"skill_reference","skill_id":skill_id,"version":"7"}]), format!("skill {skill_id} has no version 7")),
+            (json!([{"type":"skill_reference","skill_id":skill_id,"version":"two"}]), format!("skill {skill_id} has no version two")),
+            (json!([reference, reference]), "environment.skills names two skills called report-writer".to_owned()),
+            (json!([{"type":"inline","name":"x","description":"x","source":{"type":"base64","media_type":"application/zip","data":""}}]),
+                "inline skills are not supported for self_hosted environments; upload the skill with the Skills API and reference it".to_owned()),
+        ] {
+            let response = client.post(&sessions).bearer_auth(TOKEN).json(&environment(skills)).send().await?;
+            let status = response.status().as_u16();
+            let body: Value = response.json().await?;
+            assert_eq!((status, body["error"]["message"].as_str().unwrap_or_default()), (400, message.as_str()));
+        }
+
+        let session = request(&client, reqwest::Method::POST, &sessions, environment(json!([reference]))).await?;
+        let session_id = session["id"].as_str().context("session id")?.to_owned();
+        let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
+        // The session keeps version 1 after a new default replaces it and it is
+        // deleted.
+        let second = skills::skill_zip("report-writer", "A later version.", &[])?;
+        skills::upload(&client, &format!("{base}/skills/{skill_id}/versions"), TOKEN, &[("default", "true")], &[("v2.zip", &second)]).await?.error_for_status()?;
+        request(&client, reqwest::Method::DELETE, &format!("{base}/skills/{skill_id}/versions/1"), Value::Null).await?;
+        let environment_url = format!("{base}/agents/environments/{environment_id}");
+        assert_eq!(request(&client, reqwest::Method::GET, &environment_url, Value::Null).await?["skills"],
+            json!([{"type":"skill_reference","skill_id":skill_id,"version":"1","name":"report-writer",
+                "description":"Writes quarterly reports. Use for reports."}]));
+
+        let url = format!("{sessions}/{session_id}");
+        let mut stream = client.get(format!("{url}/events")).bearer_auth(TOKEN).send().await?.error_for_status()?;
+        let _running = executor(&format!("{origin}/registry"), &environment_id)?;
+        until_event(&mut stream, "agent.session.environment.connected").await?;
+        assert_eq!(send(&client, &url, message("write the report")).await?, reqwest::StatusCode::ACCEPTED);
+        until_idle(&mut stream).await?;
+        let installed = workspace_path.join(".agents-api/skills/report-writer");
+        assert_eq!(std::fs::read_to_string(installed.join("SKILL.md"))?,
+            "---\nname: report-writer\ndescription: Writes quarterly reports. Use for reports.\n---\n# report-writer\n");
+        assert_eq!(std::fs::read_to_string(installed.join("templates/outline.md"))?, "# Outline");
+        let offered = provider.received_requests().await.context("requests")?.into_iter().next().context("model request")?;
+        let offered = String::from_utf8_lossy(&offered.body).into_owned();
+        assert!(offered.contains("Writes quarterly reports. Use for reports."), "the pinned skill was not offered");
+
+        // A wiped installation is written again before the next turn.
+        std::fs::remove_dir_all(workspace_path.join(".agents-api"))?;
+        assert_eq!(send(&client, &url, message("again")).await?, reqwest::StatusCode::ACCEPTED);
+        until_idle(&mut stream).await?;
+        assert_eq!(std::fs::read_to_string(installed.join("templates/outline.md"))?, "# Outline");
+
+        // Deleting the session removes its pins; the executor's copy is the
+        // caller's.
+        request(&client, reqwest::Method::DELETE, &url, Value::Null).await?;
+        assert!(!data.path().join("skill_pins").join(&session_id).exists());
+        assert_eq!(leftover_rows(data.path(), &session_id).await?, Vec::new());
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}

@@ -42,13 +42,13 @@ const WALK: WalkOptions = WalkOptions {
 };
 
 /// A connected environment's workspace and filesystem.
-struct Workspace {
-    root: PathUri,
-    files: Arc<dyn ExecutorFileSystem>,
+pub(crate) struct Workspace {
+    pub(crate) root: PathUri,
+    pub(crate) files: Arc<dyn ExecutorFileSystem>,
 }
 
 impl Workspace {
-    async fn open(state: &State, environment_id: &str) -> Result<Self, ApiError> {
+    pub(crate) async fn open(state: &State, environment_id: &str) -> Result<Self, ApiError> {
         let data: Option<String> = sqlx::query_scalar("SELECT data FROM environments WHERE id = ?")
             .bind(environment_id)
             .fetch_optional(&state.store.0)
@@ -114,7 +114,7 @@ impl Workspace {
 }
 
 /// An absolute path on the executor, with dot segments resolved.
-fn path_uri(path: &str) -> Option<PathUri> {
+pub(crate) fn path_uri(path: &str) -> Option<PathUri> {
     if path.contains('\0') {
         return None;
     }

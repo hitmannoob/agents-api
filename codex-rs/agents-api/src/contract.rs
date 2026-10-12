@@ -140,6 +140,7 @@ async fn create(
     // Checked here rather than by deserialization, so errors name the public
     // environment types instead of the prototype's.
     let mut environment = Environment::None;
+    let mut skill_references = Vec::new();
     match params.environment["type"].as_str() {
         Some("none")
             if params
@@ -154,6 +155,7 @@ async fn create(
         }
         Some("self_hosted") => {
             environment = crate::environments::parse(&params.environment)?;
+            skill_references = crate::session_skills::references(&params.environment["skills"])?;
             if state.registry.harness_url().is_none() {
                 return Err(ApiError(
                     StatusCode::NOT_IMPLEMENTED,
@@ -237,6 +239,8 @@ async fn create(
     let vault_ids =
         crate::credentials::vaults(&state, &principal.project_id, params.vault_ids).await?;
     let credentials = crate::credentials::resolve(&state, &saved.config, &vault_ids).await?;
+    let skills =
+        crate::session_skills::resolve(&state, &principal.project_id, skill_references).await?;
     let session = state
         .store
         .create_session(
@@ -275,6 +279,7 @@ async fn create(
     crate::records::create_session(&state.store.0, &principal.project_id, &public).await?;
     let snapshot = async {
         crate::credentials::snapshot(&state, &session.id, credentials).await?;
+        crate::session_skills::pin(&state, &session.id, &skills).await?;
         let name = crate::stdio_env::session_name(&session.id);
         crate::stdio_env::save(&state, name, &stdio_env).await
     };
