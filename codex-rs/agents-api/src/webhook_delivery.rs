@@ -7,9 +7,9 @@ use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
 use crate::contract::now;
+use crate::egress::Refusal;
 use anyhow::Context;
 use axum::http::StatusCode;
-use axum::http::Uri;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hmac::Hmac;
@@ -96,39 +96,15 @@ pub(crate) async fn destination(
     state: &State,
     url: &str,
 ) -> Result<(String, Vec<SocketAddr>), ApiError> {
-    let uri: Uri = url
-        .parse()
-        .map_err(|_| invalid("url must be an absolute https URL"))?;
-    let host = uri
-        .host()
-        .unwrap_or_default()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
-    let allowed = crate::lock(&state.webhook_hosts).contains(&host);
-    let https = uri.scheme_str() == Some("https");
-    if host.is_empty()
-        || url.len() > 2048
-        || !(https || (allowed && uri.scheme_str() == Some("http")))
-    {
-        return Err(invalid("url must be an absolute https URL"));
-    }
-    let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
-    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+    crate::egress::destination(url, &state.webhook_hosts)
         .await
-        .map_err(|_| invalid(format!("webhook host {host} did not resolve")))?
-        .collect();
-    if addresses.is_empty()
-        || (!allowed
-            && !addresses
-                .iter()
-                .all(|address| crate::mcp::public(&address.ip())))
-    {
-        return Err(invalid(
-            "url resolves to a non-public address; the operator must allow its host",
-        ));
-    }
-    Ok((host, addresses))
+        .map_err(|refusal| match refusal {
+            Refusal::Url => invalid("url must be an absolute https URL"),
+            Refusal::Unresolved(host) => invalid(format!("webhook host {host} did not resolve")),
+            Refusal::NonPublic => {
+                invalid("url resolves to a non-public address; the operator must allow its host")
+            }
+        })
 }
 
 /// Make one delivery attempt and return the receiver's status code. Redirects

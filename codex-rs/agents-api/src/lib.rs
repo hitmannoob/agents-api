@@ -5,10 +5,12 @@ mod capabilities;
 mod configuration;
 mod contract;
 mod credentials;
+mod egress;
 mod environment_files;
 mod environments;
 mod files;
 mod gates;
+mod images;
 mod input;
 mod mcp;
 mod otlp;
@@ -85,6 +87,7 @@ struct State {
     mcp_hosts: Mutex<HashSet<String>>,
     /// Lower-case webhook hosts the operator allows to be internal or plain http.
     webhook_hosts: Mutex<HashSet<String>>,
+    image_hosts: Mutex<HashSet<String>>,
     /// Encrypted credential values, available once the operator supplies a passphrase.
     secrets: secrets::Secrets,
     /// Wakes the webhook dispatcher after a commit that may have queued deliveries.
@@ -243,6 +246,7 @@ impl AgentsApi {
             streams: streaming::Streams::default(),
             mcp_hosts: Mutex::default(),
             webhook_hosts: Mutex::default(),
+            image_hosts: Mutex::default(),
             secrets: secrets::Secrets::default(),
             webhook_wake: tokio::sync::Notify::new(),
             registry: registry::Registry::default(),
@@ -404,6 +408,13 @@ impl AgentsApi {
     /// loopback, private, or link-local addresses, or use plain http.
     pub fn allow_webhook_hosts(&self, hosts: impl IntoIterator<Item = String>) {
         lock(&self.state.webhook_hosts)
+            .extend(hosts.into_iter().map(|host| host.to_ascii_lowercase()));
+    }
+
+    /// Allow input images from these hosts even when they resolve to
+    /// loopback, private, or link-local addresses, or use plain http.
+    pub fn allow_image_hosts(&self, hosts: impl IntoIterator<Item = String>) {
+        lock(&self.state.image_hosts)
             .extend(hosts.into_iter().map(|host| host.to_ascii_lowercase()));
     }
 

@@ -178,7 +178,11 @@ async fn create(
     let input = match params.input {
         None | Some(Value::Null) => None,
         Some(Value::Array(items)) if items.is_empty() => None,
-        Some(input) => Some(crate::input::message(input)?),
+        Some(input) => {
+            let mut items = crate::input::message(input)?;
+            crate::images::inline(&state, &mut items).await?;
+            Some(items)
+        }
     };
     let self_hosted = matches!(environment, Environment::SelfHosted { .. });
     if input.is_none() && !self_hosted {

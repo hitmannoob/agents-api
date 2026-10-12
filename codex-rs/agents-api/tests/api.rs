@@ -498,3 +498,6 @@ mod web_search;
 
 #[path = "suite/limits.rs"]
 mod limits;
+
+#[path = "suite/images.rs"]
+mod images;

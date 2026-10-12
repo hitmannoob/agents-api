@@ -289,8 +289,15 @@ failure; earlier events stay applied. An unknown call returns 400 with code
 `invalid_request_error` and message `Unknown pending tool call: <call_id>`,
 which the pinned SDK retries because a call's item event can arrive before the
 call is registered. A message holds `input_text` parts totalling at most 1 MiB
-plus `input_image` parts. Images must be `data:image/` URLs: Codex rejects
-remote image URLs, and invalid image data is left to Codex's image preparation.
+plus `input_image` parts. Images are `data:image/` URLs or https URLs. Codex
+accepts only inline images, so the service fetches a remote image before
+dispatching the input (at most 20 MiB, an `image/*` content type, no
+redirects, 15 seconds) and passes it on as a data URL; a fetch that fails
+refuses the input with 400. Fetches follow the egress rules for webhooks:
+public addresses only, unless the operator allows the host with repeated
+`--allow-image-host <host>` flags or `AgentsApi::allow_image_hosts`, which
+also permits plain http. Invalid image data is left to Codex's image
+preparation.
 
 `Idempotency-Key` (1–255 visible ASCII characters) is scoped to one session and
 retained for 24 hours:

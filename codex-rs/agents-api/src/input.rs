@@ -109,10 +109,14 @@ pub(crate) fn message(input: Value) -> Result<Vec<Value>, ApiError> {
                 json!({"type": "text", "text": text})
             }
             Content::Image { image_url } => {
-                // Codex prepares inline images itself and rejects remote URLs.
-                if !image_url.starts_with("data:image/") {
+                // Codex prepares inline images itself; remote ones are fetched
+                // before the input is dispatched (see `crate::images`).
+                if !image_url.starts_with("data:image/")
+                    && !image_url.starts_with("https://")
+                    && !image_url.starts_with("http://")
+                {
                     return Err(invalid(
-                        "input_image requires a data:image URL; remote image URLs are not supported",
+                        "input_image requires a data:image URL or an absolute https URL",
                     ));
                 }
                 substantive = true;
@@ -183,6 +187,17 @@ fn plan(events: Vec<Input>) -> Result<Vec<Event>, ApiError> {
 
 /// Check the session state every event relies on, so a batch that cannot be
 /// accepted is rejected before anything reaches the worker.
+/// Fetch the message's remote images, then check the session can take the
+/// events. A replayed request skips both.
+async fn prepare(state: &State, id: &str, events: &mut [Event]) -> Result<(), ApiError> {
+    for event in events.iter_mut() {
+        if let Event::Message(items) = event {
+            crate::images::inline(state, items).await?;
+        }
+    }
+    check(state, id, events).await
+}
+
 async fn check(state: &State, id: &str, events: &[Event]) -> Result<(), ApiError> {
     if !state.connected() {
         return Err(crate::disconnected_error());
@@ -349,17 +364,17 @@ pub(crate) async fn create(
         .transpose()?;
     let Inputs { events } =
         serde_json::from_value(request.clone()).map_err(|e| invalid(e.to_string()))?;
-    let events = plan(events)?;
+    let mut events = plan(events)?;
     crate::records::session(&state, &id).await?;
     let Some(key) = key else {
-        check(&state, &id, &events).await?;
+        prepare(&state, &id, &mut events).await?;
         execute(&state, &id, events).await?;
         return Ok(StatusCode::ACCEPTED);
     };
     if let Claim::Replay(outcome) = claim(&state, &id, &key, &request).await? {
         return outcome;
     }
-    if let Err(error) = check(&state, &id, &events).await {
+    if let Err(error) = prepare(&state, &id, &mut events).await {
         // Nothing was dispatched, so the key stays free for a corrected retry.
         sqlx::query("DELETE FROM input_requests WHERE session_id = ? AND key = ?")
             .bind(&id)

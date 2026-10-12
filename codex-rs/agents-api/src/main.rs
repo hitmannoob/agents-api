@@ -50,6 +50,10 @@ struct Args {
     /// or plain http. Repeat for each host.
     #[arg(long = "allow-webhook-host")]
     allow_webhook_hosts: Vec<String>,
+    /// Input image host the API may fetch from even when it is internal or
+    /// plain http. Repeat for each host.
+    #[arg(long = "allow-image-host")]
+    allow_image_hosts: Vec<String>,
     /// Passphrase that encrypts vault credentials in the data directory.
     /// Vault credentials are unavailable without it.
     #[arg(
@@ -279,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
         let api = AgentsApi::new(AppServerClient::Remote(client), directory, token).await?;
         api.allow_mcp_hosts(args.allow_mcp_hosts);
         api.allow_webhook_hosts(args.allow_webhook_hosts);
+        api.allow_image_hosts(args.allow_image_hosts);
         if let Some(passphrase) = args.vault_passphrase {
             api.configure_vault(passphrase).await?;
         }
