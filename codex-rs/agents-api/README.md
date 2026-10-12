@@ -103,12 +103,42 @@ The API neither stops nor deletes that external worker or socket. The socket fla
 cannot be combined with managed executable/home flags.
 
 The API listens on `127.0.0.1:4501`. Every request requires
-`Authorization: Bearer $CODEX_AGENTS_API_TOKEN`.
+`Authorization: Bearer <key>`, where the key is the operator token
+(`$CODEX_AGENTS_API_TOKEN`) or a project API key.
+
+### Projects and API keys
+
+Each API key belongs to one project and holds a set of permissions. The
+operator token authenticates as the default project (`proj_default`) with
+every permission. Manage projects and keys with the CLI; it can run while the
+server serves the same data directory, and changes apply on the next request:
+
+```sh
+codex-agents-api projects create --data-directory DATA --name Research
+codex-agents-api projects list --data-directory DATA
+codex-agents-api keys create --data-directory DATA --project proj_... \
+  --name ci --permission api.agents.read --permission api.agents.write
+codex-agents-api keys create --data-directory DATA --project proj_... --all-permissions
+codex-agents-api keys list --data-directory DATA [--project proj_...]
+codex-agents-api keys revoke --data-directory DATA key_...
+```
+
+`keys create` prints the secret (`sk-proj-...`) once; only its SHA-256 is
+stored. Permissions are `api.agents.read`, `api.agents.write`,
+`api.responses.write` (also required to create sessions and post session
+events), `api.vaults.read`, `api.vaults.write`, `api.files.read`,
+`api.files.write`, `api.webhooks.read`, and `api.webhooks.write`. An unknown
+or revoked key gets 401, and a key missing an operation's permission gets 403.
+
+Resource isolation between projects is in progress (G13 slices 2-4). Until it
+lands, a project key can read and change every project's resources within its
+permissions, so do not hand keys to mutually untrusted callers yet.
 
 ## Operating the service
 
-- **Authentication:** one operator bearer token (at least 32 bytes) grants
-  the whole API; there is no project or user scoping. The environment key
+- **Authentication:** the operator bearer token (at least 32 bytes) grants
+  the whole API as the default project; project API keys grant their
+  permissions (see [Projects and API keys](#projects-and-api-keys)). The environment key
   grants only the `/registry/` routes executors use, and the worker's harness
   token never leaves the process. Pass secrets through
   `CODEX_AGENTS_API_TOKEN`, `CODEX_AGENTS_API_VAULT_PASSPHRASE`, and

@@ -13,7 +13,11 @@ use std::time::Duration;
 use std::time::Instant;
 
 #[derive(Parser)]
+#[command(subcommand_negates_reqs = true)]
 struct Args {
+    /// Manage projects and API keys instead of serving.
+    #[command(subcommand)]
+    command: Option<Command>,
     #[arg(long, default_value = "127.0.0.1:4501")]
     listen: SocketAddr,
     /// Connect to a caller-owned worker instead of starting a managed worker.
@@ -27,10 +31,17 @@ struct Args {
     codex_home: Option<PathBuf>,
     #[arg(long, default_value_t = 30)]
     worker_startup_timeout_secs: u64,
-    #[arg(long)]
-    data_directory: PathBuf,
-    #[arg(long, env = "CODEX_AGENTS_API_TOKEN", hide_env_values = true)]
-    token: String,
+    #[arg(long, required = true)]
+    data_directory: Option<PathBuf>,
+    /// Operator token. It authenticates as the default project with every
+    /// permission.
+    #[arg(
+        long,
+        env = "CODEX_AGENTS_API_TOKEN",
+        hide_env_values = true,
+        required = true
+    )]
+    token: Option<String>,
     /// MCP server host the API may reach even when it is internal or plain
     /// http. Repeat for each host.
     #[arg(long = "allow-mcp-host")]
@@ -69,18 +80,149 @@ struct Args {
     otel_environment: String,
 }
 
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Create and list projects.
+    Projects {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+    /// Create, list, and revoke project API keys.
+    Keys {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ProjectCommand {
+    /// Create a project and print it as JSON.
+    Create {
+        #[arg(long)]
+        data_directory: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
+    /// Print every project as JSON, oldest first.
+    List {
+        #[arg(long)]
+        data_directory: PathBuf,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum KeyCommand {
+    /// Create a key and print it as JSON. The secret `value` is shown only once.
+    Create {
+        #[arg(long)]
+        data_directory: PathBuf,
+        #[arg(long)]
+        project: String,
+        #[arg(long, default_value = "")]
+        name: String,
+        /// A permission the key holds. Repeat for each permission.
+        #[arg(long = "permission", required_unless_present = "all_permissions")]
+        permissions: Vec<String>,
+        /// Grant every permission.
+        #[arg(long, conflicts_with = "permissions")]
+        all_permissions: bool,
+    },
+    /// Print keys as JSON, oldest first, without their secrets.
+    List {
+        #[arg(long)]
+        data_directory: PathBuf,
+        /// Only this project's keys.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Revoke a key. Requests that present it fail from then on.
+    Revoke {
+        #[arg(long)]
+        data_directory: PathBuf,
+        id: String,
+    },
+}
+
+/// Run one administration command against a data directory. It may run while
+/// the server serves the same directory.
+async fn administer(command: Command) -> anyhow::Result<()> {
+    use codex_agents_api::projects::Admin;
+    let open = |directory: PathBuf| async {
+        Admin::open(AbsolutePathBuf::relative_to_current_dir(directory)?).await
+    };
+    let output = match command {
+        Command::Projects {
+            command:
+                ProjectCommand::Create {
+                    data_directory,
+                    name,
+                },
+        } => serde_json::to_value(open(data_directory).await?.create_project(&name).await?)?,
+        Command::Projects {
+            command: ProjectCommand::List { data_directory },
+        } => serde_json::to_value(open(data_directory).await?.projects().await?)?,
+        Command::Keys {
+            command:
+                KeyCommand::Create {
+                    data_directory,
+                    project,
+                    name,
+                    permissions,
+                    all_permissions,
+                },
+        } => {
+            let permissions = if all_permissions {
+                codex_agents_api::projects::PERMISSIONS
+                    .iter()
+                    .map(|&permission| permission.to_owned())
+                    .collect()
+            } else {
+                permissions
+            };
+            serde_json::to_value(
+                open(data_directory)
+                    .await?
+                    .create_key(&project, &name, &permissions)
+                    .await?,
+            )?
+        }
+        Command::Keys {
+            command:
+                KeyCommand::List {
+                    data_directory,
+                    project,
+                },
+        } => serde_json::to_value(open(data_directory).await?.keys(project.as_deref()).await?)?,
+        Command::Keys {
+            command: KeyCommand::Revoke { data_directory, id },
+        } => {
+            open(data_directory).await?.revoke_key(&id).await?;
+            serde_json::json!({"id": id, "revoked": true})
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(command) = args.command {
+        return administer(command).await;
+    }
+    // Clap requires both when no subcommand is given.
+    let (Some(data_directory), Some(token)) = (args.data_directory, args.token) else {
+        anyhow::bail!("--data-directory and --token are required to serve");
+    };
     anyhow::ensure!(
         args.listen.ip().is_loopback(),
         "initial API supports loopback listeners only"
     );
     anyhow::ensure!(
-        args.token.len() >= 32,
+        token.len() >= 32,
         "API token must contain at least 32 bytes"
     );
-    let directory = AbsolutePathBuf::relative_to_current_dir(args.data_directory)?;
+    let directory = AbsolutePathBuf::relative_to_current_dir(data_directory)?;
     let telemetry = exporters::install(exporters::Export {
         endpoint: args.otlp_endpoint,
         headers: args.otlp_headers,
@@ -134,7 +276,7 @@ async fn main() -> anyhow::Result<()> {
             result = &mut stopping => return result,
         };
         exporters::elapsed(exporters::WORKER_STARTUP_DURATION, starting.elapsed(), &[("reason", "start")]);
-        let api = AgentsApi::new(AppServerClient::Remote(client), directory, args.token).await?;
+        let api = AgentsApi::new(AppServerClient::Remote(client), directory, token).await?;
         api.allow_mcp_hosts(args.allow_mcp_hosts);
         api.allow_webhook_hosts(args.allow_webhook_hosts);
         if let Some(passphrase) = args.vault_passphrase {

@@ -12,6 +12,7 @@ mod gates;
 mod input;
 mod mcp;
 mod otlp;
+pub mod projects;
 mod reconcile;
 mod records;
 mod registry;

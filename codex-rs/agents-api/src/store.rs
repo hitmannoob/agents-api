@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// Migration `0001` adopts the pre-migration schema in place; later migrations
 /// evolve it. Each runs in its own transaction, so a partial upgrade resumes
 /// from the last committed migration.
-static MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations");
+pub(crate) static MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations");
 
 /// The store owns one API data directory. The second tuple field is an advisory
 /// lock held for the store's lifetime so a second API process cannot open the

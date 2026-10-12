@@ -486,3 +486,6 @@ mod errors;
 
 #[path = "suite/concurrency.rs"]
 mod concurrency;
+
+#[path = "suite/projects.rs"]
+mod projects;

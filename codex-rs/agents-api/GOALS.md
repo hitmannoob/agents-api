@@ -1785,11 +1785,18 @@ implementing):
 
 Checklist:
 
-- [ ] **Slice 1: projects, keys, and auth.** Migration for `projects` and
+- [x] **Slice 1: projects, keys, and auth.** Migration for `projects` and
   `api_keys`; key-resolving middleware with 401/403; default-project
   bootstrap from `CODEX_AGENTS_API_TOKEN`; CLI subcommands to create and list
   projects and to create, list, and revoke keys with permissions. Request
   context carries the project ID for later slices.
+  Evidence (2026-10-12): migration `0015_projects`, `src/projects.rs`, and the
+  `projects`/`keys` subcommands. `projects::tests::*` cover the permission
+  mapping and key lifecycle; `projects::project_keys_authenticate_and_hold_only_their_permissions`
+  covers 401/403 in the public error shape, `api.responses.write` on session
+  creation, the operator token, and revocation without a restart. Resources
+  are not yet isolated: until slices 2-4 land, any valid key reaches every
+  project's rows within its permissions.
 - [ ] **Slice 2: agents and sessions.** `project_id` on agents and sessions,
   every query and list scoped, inherited checks for turns, items, subagents,
   artifacts, events, and traces. Add a two-project isolation sweep driven by

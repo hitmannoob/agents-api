@@ -83,7 +83,7 @@ async fn health(Extract(state): Extract<Arc<State>>) -> Response {
 
 async fn authorize(
     Extract(state): Extract<Arc<State>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     // Executors and the worker's harness present their own credentials, which
@@ -100,19 +100,42 @@ async fn authorize(
             .get("openai-beta")
             .and_then(|h| h.to_str().ok())
             == Some("agents=v1");
-    let expected = format!("Bearer {}", state.token);
-    if request
+    let secret = request
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        != Some(expected.as_str())
-    {
-        let error = ApiError(StatusCode::UNAUTHORIZED, "bearer token required".into());
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let principal = match secret {
+        Some(secret) => crate::projects::resolve(&state, secret).await?,
+        None => None,
+    };
+    let rejection = match &principal {
+        None => Some(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "bearer token required".into(),
+        )),
+        Some(principal) => principal
+            .missing(crate::projects::required(
+                request.method(),
+                request.uri().path(),
+            ))
+            .map(|permission| {
+                ApiError(
+                    StatusCode::FORBIDDEN,
+                    format!("this API key lacks the {permission} permission"),
+                )
+            }),
+    };
+    if let Some(error) = rejection {
         return if compatible {
             Ok(error.public_response())
         } else {
             Err(error)
         };
+    }
+    // Later handlers scope their reads and writes to this caller's project.
+    if let Some(principal) = principal {
+        request.extensions_mut().insert(principal);
     }
     let response = next.run(request).await;
     if compatible && (response.status().is_client_error() || response.status().is_server_error()) {
