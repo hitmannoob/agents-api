@@ -186,3 +186,7 @@ Amendments under the same `openai==3.17.0` pin:
   accepts 1-32 user messages, the only missing create variant. SES-002 moved
   to verified; SES-001 remains partial only for capability execution
   (additive).
+- 2026-10-12: deferred functions and tool search execute (G06). Codex's
+  `model/list` reports `supportsSearchTool`; deferred functions are searched
+  in a `deferred` namespace on capable models and offered up front otherwise.
+  BEH-007 moved to verified (additive).

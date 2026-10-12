@@ -189,12 +189,27 @@ pub(crate) fn validate_execution(
 ) -> Result<(), ApiError> {
     use crate::agent_tools::CapabilityTool;
     use crate::agent_tools::SearchMode;
+    // Deferred functions are discovered only through tool search, as the
+    // functions guide requires.
+    if config
+        .tools
+        .iter()
+        .filter_map(Tool::function)
+        .any(|tool| tool.defer_loading)
+        && !config
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, Tool::Capability(CapabilityTool::ToolSearch)))
+    {
+        return Err(invalid(
+            "functions with defer_loading need a tool_search tool in agent.tools",
+        ));
+    }
     for tool in &config.tools {
         let unsupported = match tool {
-            Tool::Function(tool) if tool.defer_loading => Some("deferred function discovery"),
             Tool::Function(_) => None,
             Tool::Capability(CapabilityTool::ProgrammaticToolCalling { enabled: false }) => None,
-            Tool::Capability(CapabilityTool::ToolSearch) => Some("tool search"),
+            Tool::Capability(CapabilityTool::ToolSearch) => None,
             Tool::Capability(CapabilityTool::ProgrammaticToolCalling { enabled: true }) => {
                 Some("programmatic tool calling")
             }

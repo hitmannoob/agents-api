@@ -92,8 +92,9 @@ def check_saved_agents(client):
         and configured.tools[5].context_size == "medium"
     )
     assert agents.retrieve(agent.id) == configured
-    # Web search executes; the rest are refused before a turn starts.
-    for tool in [tool for tool in tools if tool["type"] != "web_search"]:
+    # Web search and tool search execute; the rest are refused before a turn
+    # starts (a deferred function alone, because it needs tool_search).
+    for tool in [tool for tool in tools if tool["type"] not in ("web_search", "tool_search")]:
         agents.update(agent.id, tools=[tool])
         try:
             client.beta.agents.sessions.create(

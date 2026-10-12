@@ -37,8 +37,8 @@ per-operation detail lives in its `remaining` fields.
 
 **Scorecard:** 67 operations: 55 `verified`, 2 `implemented`, 5 `partial`,
 5 `missing`. The 5 missing (environment templates) are outside the parity
-target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 11 are verified (BEH-001, BEH-003..006, BEH-009,
-BEH-012..016), 5 are partial, and 2 are missing (BEH-011 is out of scope;
+target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 12 are verified (BEH-001, BEH-003..007, BEH-009,
+BEH-012..016), 4 are partial, and 2 are missing (BEH-011 is out of scope;
 BEH-018, provider interoperability, is open).
 
 Two promotion passes on 2026-10-12 moved rows whose only gaps were out of
@@ -64,7 +64,7 @@ only, and there is no Windows evidence. See
 | Streaming | EVT-002 | partial | Lifecycle, item, text and reasoning deltas, content parts, `error`, subagent, environment, and command-output events | Codex sends no command-output deltas for remote commands (output arrives on the item); no replay, by contract |
 | Items and turns | ITM-001, TRN-001..002 | 3 verified | Message, reasoning, function, MCP, web search, command, and subagent create/send/interrupt items (with the subagent's model), and `agent_message` items between agents; `queued` turns while input waits for an executor; turn usage, error codes, and pagination | None. Engine limit: wait/close/resume subagent items |
 | Subagents | SUB-001..006 | 6 verified | Resources, paginated items and turns per subagent, cancellation, restart continuity | None. `instructions` is always null and `closed` never occurs: Codex V2 reports neither, accepted as engine limits (2026-10-12) |
-| Functions | (in EVT/BEH-007) | partial | Tagged functions, result/error flow, content parts, duplicate and race handling | Deferred functions and tool search (G06) |
+| Functions | (in EVT/BEH-007) | verified | Tagged functions, result/error flow, content parts, duplicate and race handling, deferred functions found through tool search (offered up front on models without it) | None |
 | MCP and built-ins | (BEH-008) | partial | HTTP MCP with vault credentials and tool/resource selection; built-in web search with every setting (provider-dependent; mock evidence) | Inline MCP authorization, request metadata, a real-provider web search run, other built-in slices (G07), programmatic tool calling (G08) |
 | Harness features | (BEH-009) | BEH-009 verified | Multi-agent delegation within Codex V2's engine limits | Compaction controls and programmatic tool calling (G08), tracked in AGT-001 and BEH-008 |
 | Environments | ENV-001..003 | 1 verified (ENV-001), 2 implemented | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss | One real-provider run; Windows and cross-OS execution (ENV-002..003). Self-hosted environments never expire |

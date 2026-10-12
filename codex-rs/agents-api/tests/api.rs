@@ -501,3 +501,6 @@ mod limits;
 
 #[path = "suite/images.rs"]
 mod images;
+
+#[path = "suite/tool_search.rs"]
+mod tool_search;

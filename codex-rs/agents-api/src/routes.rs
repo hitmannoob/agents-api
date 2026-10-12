@@ -523,9 +523,7 @@ pub(crate) async fn start_turn(
                     "environments": environments,
                     "selectedCapabilityRoots": capability_roots,
                     "config": config,
-                    "dynamicTools": session.agent.config.tools.iter().filter_map(crate::agent_tools::Tool::function).map(|tool| json!({
-                        "type": "function", "name": tool.name, "description": tool.description, "inputSchema": tool.parameters
-                    })).collect::<Vec<_>>(),
+                    "dynamicTools": crate::capabilities::dynamic_tools(state, &session.agent.config).await?,
                     "approvalPolicy": "never", "sandbox": sandbox, "ephemeral": false,
                     // Messages between agents reach the service only as raw
                     // Responses items; subagent threads inherit the opt-in.

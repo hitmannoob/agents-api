@@ -323,11 +323,18 @@ answering it, so the session starts another turn instead of going idle. A
 cancel sent before Codex has reported the turn it just started (for example,
 right after creating a session with input) still stops that turn.
 
-Deferred functions, tool search, and enabled programmatic calling can be
-saved/retrieved but their execution is rejected. Deferred functions depend on
-model and provider support the worker does not report, so enabling them could
-leave the model silently without the tool. Disabled programmatic calling is
-accepted.
+Enabled programmatic calling can be saved and retrieved, but its execution is
+rejected; disabled programmatic calling is accepted.
+
+A function with `defer_loading: true` needs `{"type": "tool_search"}` in the
+agent's tools. When the worker's `model/list` reports `supportsSearchTool` for
+the model, deferred functions are left out of the model's tools and offered in
+a `deferred` namespace that Codex searches when the model calls `tool_search`;
+the model's call to a found function is an ordinary `function_call` required
+action. Models without tool search (or not in the worker's catalog) would see
+no deferred functions at all, so they get them up front instead: still
+callable, without the context saving. OpenAI documents tool search for
+`gpt-5.4` and later.
 
 `web_search` runs through Codex's built-in search: `mode`, `context_size`,
 `allowed_domains`, and `location` become the thread's `web_search` and

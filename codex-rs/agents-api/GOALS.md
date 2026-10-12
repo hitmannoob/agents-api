@@ -639,7 +639,7 @@ Not covered:
   time.
 - Real-provider accounting (G12).
 
-## G06 — Function tools and limits (complete locally except deferred functions)
+## G06 — Function tools and limits (complete locally)
 
 **Outcome:** function definitions, discovery, invocation, and outputs support the
 full inventoried contract without unsafe execution retries or unbounded context.
@@ -654,8 +654,17 @@ Starting points: `src/actions.rs`, `src/capabilities.rs`, and public input/item 
   the 1,024-byte cap: preserve repository context-size rules and use a supported
   bounded representation or artifact path where the public contract permits it.
   Record unresolved incompatibilities instead of silently truncating content.
-- [ ] Implement deferred definitions and tool search/discovery where required.
+- [x] Implement deferred definitions and tool search/discovery where required.
   Make loaded-tool changes session-scoped and persist the relevant configuration.
+  Evidence (2026-10-12): Codex's `model/list` gained `supportsSearchTool`, the
+  worker-reported support this item waited on. Deferred functions go to Codex
+  as `deferLoading` dynamic tools in a `deferred` namespace (Codex defers only
+  namespaced tools and reserves `functions`); Codex runs the search, and the
+  loaded tools persist in the thread's history. Without model support they are
+  offered up front rather than hidden. `tool_search::deferred_functions_are_found_through_tool_search`
+  covers search, the namespaced call and its result, the fallback, and the
+  rule that deferral needs a `tool_search` tool (mock provider; tool search is
+  documented for gpt-5.4 and later).
 - [x] Extend action transitions for duplicate submissions, simultaneous resolution,
   cancellation, and connection-generation changes, reusing G01/G04 guarantees.
 

@@ -77,6 +77,68 @@ pub(crate) fn identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+/// The worker's catalog entry for `slug`, when it lists one.
+async fn model(state: &State, slug: &str) -> Result<Option<Value>, ApiError> {
+    let mut cursor = Value::Null;
+    // Bound catalog traversal even if an external worker returns a broken cursor.
+    for _ in 0..100 {
+        let page = state
+            .rpc(
+                "model/list",
+                json!({"cursor":cursor,"limit":100,"includeHidden":true}),
+            )
+            .await?;
+        if let Some(model) = page["data"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["model"] == slug))
+        {
+            return Ok(Some(model.clone()));
+        }
+        let next = page["nextCursor"].clone();
+        if next.is_null() || next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    Ok(None)
+}
+
+/// The namespace deferred functions are offered in: Codex defers only
+/// namespaced dynamic tools, and reserves `functions`.
+pub(crate) const DEFERRED_NAMESPACE: &str = "deferred";
+
+/// The `dynamicTools` for a thread. Deferred functions are offered through
+/// tool search when the model supports it. Otherwise Codex would hide them
+/// from the model altogether, so they are offered up front like the others:
+/// still callable, only without the context saving.
+pub(crate) async fn dynamic_tools(state: &State, config: &AgentConfig) -> Result<Value, ApiError> {
+    let functions: Vec<_> = config
+        .tools
+        .iter()
+        .filter_map(crate::agent_tools::Tool::function)
+        .collect();
+    let defer = functions.iter().any(|tool| tool.defer_loading)
+        && model(state, &config.model)
+            .await?
+            .is_some_and(|model| model["supportsSearchTool"] == true);
+    let spec = |tool: &crate::resources::FunctionTool| json!({"type": "function", "name": tool.name, "description": tool.description, "inputSchema": tool.parameters});
+    let mut tools: Vec<Value> = functions
+        .iter()
+        .filter(|tool| !(defer && tool.defer_loading))
+        .map(|tool| spec(tool))
+        .collect();
+    if defer {
+        tools.push(json!({"type": "namespace", "name": DEFERRED_NAMESPACE,
+            "description": "Functions the application provides, found with tool_search.",
+            "tools": functions.iter().filter(|tool| tool.defer_loading).map(|tool| {
+                let mut function = spec(tool);
+                function["deferLoading"] = json!(true);
+                function
+            }).collect::<Vec<_>>()}));
+    }
+    Ok(json!(tools))
+}
+
 pub(crate) async fn overrides(
     state: &State,
     config: &AgentConfig,
@@ -85,31 +147,11 @@ pub(crate) async fn overrides(
     stdio_env: &crate::stdio_env::Values,
 ) -> Result<Value, ApiError> {
     if matches!(config.service_tier.as_deref(), Some("priority" | "fast")) {
-        let mut cursor = Value::Null;
-        let mut supported = false;
-        // Bound catalog traversal even if an external worker returns a broken cursor.
-        for _ in 0..100 {
-            let page = state
-                .rpc(
-                    "model/list",
-                    json!({"cursor":cursor,"limit":100,"includeHidden":true}),
-                )
-                .await?;
-            if let Some(model) = page["data"]
+        let supported = model(state, &config.model).await?.is_some_and(|model| {
+            model["serviceTiers"]
                 .as_array()
-                .and_then(|models| models.iter().find(|model| model["model"] == config.model))
-            {
-                supported = model["serviceTiers"]
-                    .as_array()
-                    .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == "priority"));
-                break;
-            }
-            let next = page["nextCursor"].clone();
-            if next.is_null() || next == cursor {
-                break;
-            }
-            cursor = next;
-        }
+                .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == "priority"))
+        });
         if !supported {
             return Err(crate::contract::invalid(
                 "selected model does not advertise priority service tier support",

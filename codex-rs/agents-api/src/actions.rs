@@ -182,15 +182,21 @@ pub(crate) async fn register(
         .session(&session_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("missing session"))?;
+    // Deferred functions are called in their namespace; the rest without one.
     anyhow::ensure!(
-        params.namespace.is_none()
-            && session
-                .agent
-                .config
-                .tools
-                .iter()
-                .filter_map(crate::agent_tools::Tool::function)
-                .any(|tool| tool.name == params.tool),
+        session
+            .agent
+            .config
+            .tools
+            .iter()
+            .filter_map(crate::agent_tools::Tool::function)
+            .any(|tool| tool.name == params.tool
+                && match params.namespace.as_deref() {
+                    None => true,
+                    Some(namespace) => {
+                        tool.defer_loading && namespace == crate::capabilities::DEFERRED_NAMESPACE
+                    }
+                }),
         "unregistered function"
     );
     anyhow::ensure!(
