@@ -259,6 +259,11 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omit_tools_from: Option<Vec<ToolExposureSurface>>,
 
+    /// Static metadata merged into the `_meta` of every tool call request to this server.
+    /// Keys Codex sets itself take precedence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_meta: Option<serde_json::Map<String, serde_json::Value>>,
+
     /// Reason this server was disabled after applying requirements.
     #[serde(skip)]
     pub disabled_reason: Option<McpServerDisabledReason>,
@@ -415,6 +420,10 @@ pub struct RawMcpServerConfig {
     pub tool_input_schema_max_bytes: Option<NonZeroUsize>,
     #[serde(default)]
     pub omit_tools_from: Option<Vec<ToolExposureSurface>>,
+    /// Static metadata merged into the `_meta` of every tool call request to this server.
+    /// Keys Codex sets itself take precedence.
+    #[serde(default)]
+    pub request_meta: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     pub default_tools_approval_mode: Option<AppToolApproval>,
     #[serde(default)]
@@ -461,6 +470,7 @@ impl TryFrom<RawMcpServerConfig> for McpServerConfig {
             supports_parallel_tool_calls,
             tool_input_schema_max_bytes,
             omit_tools_from,
+            request_meta,
             default_tools_approval_mode,
             enabled_tools,
             disabled_tools,
@@ -582,6 +592,7 @@ impl TryFrom<RawMcpServerConfig> for McpServerConfig {
             supports_parallel_tool_calls: supports_parallel_tool_calls.unwrap_or_default(),
             tool_input_schema_max_bytes,
             omit_tools_from,
+            request_meta,
             disabled_reason: None,
             default_tools_approval_mode,
             enabled_tools,

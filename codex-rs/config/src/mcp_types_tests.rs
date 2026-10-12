@@ -52,6 +52,7 @@ fn deserialize_stdio_command_server_config() {
     assert!(cfg.enabled);
     assert!(!cfg.required);
     assert_eq!(cfg.omit_tools_from, None);
+    assert_eq!(cfg.request_meta, None);
     assert!(cfg.enabled_tools.is_none());
     assert!(cfg.disabled_tools.is_none());
 }
@@ -516,6 +517,52 @@ fn deserialize_server_config_with_parallel_tool_calls() {
 }
 
 #[test]
+fn serialize_round_trips_server_config_with_request_meta() {
+    for transport in ["command = \"echo\"", "url = \"https://example.com/mcp\""] {
+        let config = format!(
+            r#"{transport}
+            [request_meta]
+            tenant = "acme"
+            enabled = true
+            attempts = 3
+            weight = 1.5
+            tags = ["one", "two"]
+            "custom/key" = "value"
+
+            [request_meta.context]
+            region = "west"
+            "#
+        );
+        let cfg: McpServerConfig =
+            toml::from_str(&config).expect("should deserialize static MCP request metadata");
+        assert_eq!(
+            cfg.request_meta,
+            serde_json::json!({
+                "tenant": "acme",
+                "enabled": true,
+                "attempts": 3,
+                "weight": 1.5,
+                "tags": ["one", "two"],
+                "custom/key": "value",
+                "context": { "region": "west" },
+            })
+            .as_object()
+            .cloned()
+        );
+
+        let serialized = toml::to_string(&cfg).expect("should serialize MCP config");
+        let round_tripped: McpServerConfig =
+            toml::from_str(&serialized).expect("should deserialize serialized MCP config");
+        assert_eq!(round_tripped, cfg);
+
+        let serialized = serde_json::to_value(&cfg).expect("should serialize MCP config as JSON");
+        let round_tripped: McpServerConfig =
+            serde_json::from_value(serialized).expect("should deserialize serialized MCP JSON");
+        assert_eq!(round_tripped, cfg);
+    }
+}
+
+#[test]
 fn serialize_round_trips_server_config_with_omitted_tool_exposure_surfaces() {
     for omitted_surfaces in [
         vec![],
@@ -644,6 +691,7 @@ fn deserialize_ignores_unknown_server_fields() {
             supports_parallel_tool_calls: false,
             tool_input_schema_max_bytes: None,
             omit_tools_from: None,
+            request_meta: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,

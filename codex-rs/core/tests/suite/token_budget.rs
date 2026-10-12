@@ -776,6 +776,7 @@ async fn token_budget_context_injects_plain_thread_hint_text() -> Result<()> {
                     supports_parallel_tool_calls: false,
                     tool_input_schema_max_bytes: None,
                     omit_tools_from: None,
+                    request_meta: None,
                     disabled_reason: None,
                     startup_timeout_sec: Some(Duration::from_secs(10)),
                     tool_timeout_sec: None,

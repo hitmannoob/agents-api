@@ -9,6 +9,7 @@ use codex_config::types::McpStartupReadiness;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_config::types::ToolSuggestDiscoverableType;
 use toml_edit::Array as TomlArray;
+use toml_edit::DocumentMut;
 use toml_edit::InlineTable;
 use toml_edit::Item as TomlItem;
 use toml_edit::Table as TomlTable;
@@ -128,6 +129,10 @@ fn serialize_mcp_server_table(config: &McpServerConfig) -> anyhow::Result<TomlTa
     }
     if let Some(omit_tools_from) = &config.omit_tools_from {
         entry["omit_tools_from"] = array_from_iter(omit_tools_from.iter().map(ToString::to_string));
+    }
+    if let Some(request_meta) = &config.request_meta {
+        let request_meta = toml::to_string(request_meta)?.parse::<DocumentMut>()?;
+        entry["request_meta"] = TomlItem::Table(request_meta.into_table());
     }
     if let Some(timeout) = config.startup_timeout_sec {
         entry["startup_timeout_sec"] = value(timeout.as_secs_f64());

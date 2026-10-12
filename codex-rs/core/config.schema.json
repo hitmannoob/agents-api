@@ -3818,6 +3818,12 @@
           },
           "type": "array"
         },
+        "request_meta": {
+          "additionalProperties": true,
+          "default": null,
+          "description": "Static metadata merged into the `_meta` of every tool call request to this server. Keys Codex sets itself take precedence.",
+          "type": "object"
+        },
         "required": {
           "default": null,
           "type": "boolean"

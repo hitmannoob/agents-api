@@ -1084,6 +1084,7 @@ fn blocking_replace_mcp_servers_round_trips() {
             supports_parallel_tool_calls: true,
             tool_input_schema_max_bytes: None,
             omit_tools_from: None,
+            request_meta: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -1119,6 +1120,7 @@ fn blocking_replace_mcp_servers_round_trips() {
             supports_parallel_tool_calls: false,
             tool_input_schema_max_bytes: None,
             omit_tools_from: None,
+            request_meta: None,
             disabled_reason: None,
             startup_timeout_sec: Some(std::time::Duration::from_secs(5)),
             tool_timeout_sec: None,
@@ -1188,6 +1190,53 @@ B = \"2\"
     assert_eq!(raw, expected);
 }
 
+#[test]
+fn blocking_replace_mcp_servers_preserves_request_meta() {
+    for transport in ["command = \"echo\"", "url = \"https://example.com/mcp\""] {
+        for inline in [false, true] {
+            let tmp = tempdir().expect("tmpdir");
+            let codex_home = tmp.path();
+            let config = format!(
+                r#"{transport}
+                [request_meta]
+                tenant = "acme"
+                attempts = 3
+                tags = ["one", "two"]
+                [request_meta.context]
+                enabled = true
+                "#
+            );
+            let server: McpServerConfig = toml::from_str(&config).expect("MCP server config");
+            let servers = BTreeMap::from([("docs".to_string(), server)]);
+            if inline {
+                std::fs::write(
+                    codex_home.join(CONFIG_TOML_FILE),
+                    "[mcp_servers]\ndocs = { command = \"old-server\" } # keep me\n",
+                )
+                .expect("seed inline config");
+            }
+
+            apply_blocking(
+                codex_home,
+                &[ConfigEdit::ReplaceMcpServers(servers.clone())],
+            )
+            .expect("persist");
+
+            let contents =
+                std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
+            let parsed: toml::Value = toml::from_str(&contents).expect("parse persisted config");
+            let round_tripped: BTreeMap<String, McpServerConfig> = parsed["mcp_servers"]
+                .clone()
+                .try_into()
+                .expect("deserialize persisted MCP servers");
+            assert_eq!(round_tripped, servers);
+            if inline {
+                assert!(contents.contains("# keep me"));
+            }
+        }
+    }
+}
+
 #[test_case::test_case(30_000; "positive limit")]
 #[test_case::test_case(usize::MAX; "largest native limit")]
 fn blocking_replace_mcp_servers_serializes_tool_approval_overrides(output_token_limit: usize) {
@@ -1213,6 +1262,7 @@ fn blocking_replace_mcp_servers_serializes_tool_approval_overrides(output_token_
             supports_parallel_tool_calls: false,
             tool_input_schema_max_bytes: None,
             omit_tools_from: None,
+            request_meta: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -1291,6 +1341,7 @@ foo = { command = "cmd" }
             supports_parallel_tool_calls: false,
             tool_input_schema_max_bytes: None,
             omit_tools_from: None,
+            request_meta: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -1345,6 +1396,7 @@ foo = { command = "cmd" } # keep me
             supports_parallel_tool_calls: false,
             tool_input_schema_max_bytes: None,
             omit_tools_from: None,
+            request_meta: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -1398,6 +1450,7 @@ foo = { command = "cmd", args = ["--flag"] } # keep me
             supports_parallel_tool_calls: false,
             tool_input_schema_max_bytes: None,
             omit_tools_from: None,
+            request_meta: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -1452,6 +1505,7 @@ foo = { command = "cmd" }
             supports_parallel_tool_calls: false,
             tool_input_schema_max_bytes: None,
             omit_tools_from: None,
+            request_meta: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,

@@ -1084,7 +1084,24 @@ fn truncate_mcp_tool_result_for_event_bounds_large_error() {
 
 #[tokio::test]
 async fn mcp_tool_call_request_meta_includes_turn_metadata_for_custom_server() {
-    let (_, turn_context) = make_session_and_context().await;
+    let (_, mut turn_context) = make_session_and_context().await;
+    let server_config = serde_json::from_value(serde_json::json!({
+        "command": "custom-server",
+        "request_meta": {
+            "tenant": "acme",
+            "context": { "region": "west", "enabled": true },
+            "callId": "configured-call-id",
+            crate::X_CODEX_TURN_METADATA_HEADER: { "model": "configured-model" },
+        },
+    }))
+    .expect("custom server config");
+    Arc::make_mut(&mut turn_context.config)
+        .mcp_servers
+        .set(HashMap::from([(
+            "custom_server".to_string(),
+            server_config,
+        )]))
+        .expect("set MCP server config");
     let turn_context = Arc::new(turn_context);
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     turn_context
@@ -1143,9 +1160,25 @@ async fn mcp_tool_call_request_meta_includes_turn_metadata_for_custom_server() {
     assert_eq!(
         meta,
         serde_json::json!({
+            "tenant": "acme",
+            "context": { "region": "west", "enabled": true },
             "callId": "call-custom",
             crate::X_CODEX_TURN_METADATA_HEADER: expected_turn_metadata,
         })
+    );
+
+    assert_eq!(
+        build_mcp_tool_call_request_meta(
+            &step_context,
+            "other_server",
+            "call-other",
+            /*metadata*/ None,
+            /*is_host_owned_apps*/ false,
+        ),
+        Some(serde_json::json!({
+            "callId": "call-other",
+            crate::X_CODEX_TURN_METADATA_HEADER: expected_turn_metadata,
+        }))
     );
 }
 
@@ -1547,7 +1580,24 @@ async fn codex_apps_tool_call_request_meta_includes_turn_metadata_and_codex_apps
 
 #[tokio::test]
 async fn codex_apps_tool_call_request_meta_includes_call_id_without_existing_codex_apps_meta() {
-    let (_, turn_context) = make_session_and_context().await;
+    let (_, mut turn_context) = make_session_and_context().await;
+    let server_config = serde_json::from_value(serde_json::json!({
+        "url": "https://example.com/mcp",
+        "request_meta": {
+            "tenant": "acme",
+            "callId": "configured-call-id",
+            crate::X_CODEX_TURN_METADATA_HEADER: "configured-turn-metadata",
+            MCP_TOOL_CODEX_APPS_META_KEY: { "call_id": "configured-call-id" },
+        },
+    }))
+    .expect("Apps server config");
+    Arc::make_mut(&mut turn_context.config)
+        .mcp_servers
+        .set(HashMap::from([(
+            CODEX_APPS_MCP_SERVER_NAME.to_string(),
+            server_config,
+        )]))
+        .expect("set MCP server config");
     let turn_context = Arc::new(turn_context);
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     let expected_turn_metadata = expected_mcp_turn_metadata(&turn_context);
@@ -1561,6 +1611,7 @@ async fn codex_apps_tool_call_request_meta_includes_call_id_without_existing_cod
             /*is_host_owned_apps*/ false
         ),
         Some(serde_json::json!({
+            "tenant": "acme",
             "callId": "call_abc123xyz789",
             crate::X_CODEX_TURN_METADATA_HEADER: expected_turn_metadata,
             MCP_TOOL_CODEX_APPS_META_KEY: {

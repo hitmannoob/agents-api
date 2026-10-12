@@ -1311,7 +1311,14 @@ fn build_mcp_tool_call_request_meta(
     metadata: Option<&McpToolApprovalMetadata>,
     is_host_owned_apps: bool,
 ) -> Option<serde_json::Value> {
-    let mut request_meta = serde_json::Map::new();
+    let mut request_meta = step_context
+        .turn
+        .config
+        .mcp_servers
+        .get()
+        .get(server)
+        .and_then(|server_config| server_config.request_meta.clone())
+        .unwrap_or_default();
     request_meta.insert(
         "callId".to_string(),
         serde_json::Value::String(call_id.to_string()),
