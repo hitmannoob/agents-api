@@ -54,6 +54,7 @@ pub(crate) async fn resolve(
     state: &State,
     config: &AgentConfig,
     vault_ids: &[String],
+    secrets: &crate::stdio_env::Values,
 ) -> Result<Vec<(String, String)>, ApiError> {
     let vaults = json!(vault_ids).to_string();
     let available: Vec<(String, String)> = sqlx::query_as(
@@ -65,6 +66,15 @@ pub(crate) async fn resolve(
     .map_err(anyhow::Error::from)?;
     let mut resolved = Vec::new();
     for (label, url, credential_id) in crate::mcp::credential_targets(config) {
+        if crate::stdio_env::authorization(secrets, label).is_some() {
+            if credential_id.is_some() {
+                return Err(invalid(
+                    "MCP credential_id cannot be combined with transport.authorization",
+                ));
+            }
+            // Inline authorization wins even when several vault credentials match.
+            continue;
+        }
         let chosen = match credential_id {
             Some(credential_id) => {
                 if !available.iter().any(|(id, _)| id == credential_id) {

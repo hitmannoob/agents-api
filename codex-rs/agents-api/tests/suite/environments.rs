@@ -519,7 +519,9 @@ async fn mcp_servers_run_on_the_executor() -> anyhow::Result<()> {
         assert_eq!(send(&client, &url, message("use the tools")).await?, reqwest::StatusCode::ACCEPTED);
         until_idle(&mut stream).await?;
 
-        assert_eq!(*calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner), vec![json!({"tool":"lookup","tenant":"acme"})]);
+        let recorded = calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(json!({"tool":recorded[0]["tool"],"tenant":recorded[0]["tenant"],"authorization":recorded[0]["authorization"]}), json!({"tool":"lookup","tenant":"acme","authorization":null}));
         let outputs: Vec<(String, String)> = provider.received_requests().await.context("requests")?.iter()
             .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
             .flat_map(|body| body["input"].as_array().cloned().unwrap_or_default())

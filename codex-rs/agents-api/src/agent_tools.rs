@@ -37,7 +37,7 @@ pub(crate) enum CapabilityTool {
         #[serde(default, deserialize_with = "default_if_null")]
         connection_origin: ConnectionOrigin,
         credential_id: Option<String>,
-        #[serde(default, deserialize_with = "default_if_null")]
+        #[serde(default)]
         request_metadata: BTreeMap<String, Value>,
         #[serde(default)]
         required: bool,
@@ -61,6 +61,8 @@ fn enabled() -> bool {
 pub(crate) enum McpTransport {
     Http {
         server_url: String,
+        #[serde(default, skip_serializing)]
+        authorization: Option<String>,
         #[serde(default, deserialize_with = "default_if_null")]
         headers: BTreeMap<String, String>,
     },

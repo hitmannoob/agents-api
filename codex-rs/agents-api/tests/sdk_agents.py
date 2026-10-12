@@ -66,7 +66,11 @@ def check_saved_agents(client):
         {
             "type": "mcp",
             "server_label": "http",
-            "transport": {"type": "http", "server_url": "https://example.invalid/mcp"},
+            "transport": {
+                "type": "http",
+                "server_url": "https://example.invalid/mcp",
+                "headers": {"x-tenant": "sdk-tenant"},
+            },
         },
         {
             "type": "mcp",
@@ -79,10 +83,13 @@ def check_saved_agents(client):
     assert [tool.type for tool in configured.tools] == [tool["type"] for tool in tools]
     assert configured.tools[2].enabled is True
     assert configured.tools[3].connection_origin == "service"
-    assert (
-        configured.tools[3].request_metadata == {}
-        and configured.tools[3].transport.headers == {}
-    )
+    # Authorization is write-only; non-secret HTTP headers round trip.
+    assert configured.tools[3].request_metadata == {}
+    assert configured.tools[3].transport.model_dump() == {
+        "type": "http",
+        "server_url": "https://example.invalid/mcp",
+        "headers": {"x-tenant": "sdk-tenant"},
+    }
     assert (
         configured.tools[4].transport.args == []
         and configured.tools[4].transport.env_vars == []

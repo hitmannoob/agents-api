@@ -1,4 +1,4 @@
-//! Literal environment values for stdio MCP servers (`transport.env`). They
+//! Literal MCP secrets (`transport.env` and HTTP `transport.authorization`). They
 //! are secrets: taken out of an agent configuration before it is stored, kept
 //! encrypted in the vault store, and never returned. A saved agent keeps its
 //! own copy; a session copies its values when it is created, as it does with
@@ -9,13 +9,17 @@ use crate::contract::invalid;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Values by server label, then variable name.
+/// Values by server label, then variable name or reserved secret key. Keeping
+/// this layout and the secret names preserves existing stdio env snapshots.
 pub(crate) type Values = BTreeMap<String, BTreeMap<String, String>>;
+
+// This cannot collide with a portable environment variable name.
+const AUTHORIZATION: &str = "!authorization";
 
 const MAX_VARIABLES: usize = 64;
 const MAX_VALUE_BYTES: usize = 8192;
 
-/// Remove `env` from each stdio MCP transport in an agent patch and return the
+/// Remove literal secrets from each MCP transport in an agent patch and return the
 /// values by server label, or `None` when the patch leaves the tools as they
 /// are.
 pub(crate) fn take(patch: &mut Value) -> Result<Option<Values>, ApiError> {
@@ -24,14 +28,35 @@ pub(crate) fn take(patch: &mut Value) -> Result<Option<Values>, ApiError> {
     };
     let mut values = Values::new();
     for tool in tools.as_array_mut().into_iter().flatten() {
+        if tool["type"] != "mcp" {
+            continue;
+        }
         let label = tool["server_label"].as_str().unwrap_or_default().to_owned();
-        let Some(transport) = tool
-            .get_mut("transport")
-            .and_then(Value::as_object_mut)
-            .filter(|transport| transport.get("type") == Some(&Value::from("stdio")))
-        else {
+        let credential = tool.get("credential_id").is_some_and(|id| !id.is_null());
+        let Some(transport) = tool.get_mut("transport").and_then(Value::as_object_mut) else {
             continue;
         };
+        if transport.get("type") == Some(&Value::from("http")) {
+            let authorization = match transport.remove("authorization") {
+                None | Some(Value::Null) => continue,
+                Some(Value::String(value)) => value,
+                Some(_) => return Err(invalid("MCP authorization must be a string or null")),
+            };
+            crate::mcp::validate_authorization(&authorization)?;
+            if credential {
+                return Err(invalid(
+                    "MCP credential_id cannot be combined with transport.authorization",
+                ));
+            }
+            values.insert(
+                label,
+                BTreeMap::from([(AUTHORIZATION.to_owned(), authorization)]),
+            );
+            continue;
+        }
+        if transport.get("type") != Some(&Value::from("stdio")) {
+            continue;
+        }
         let env = match transport.remove("env") {
             None | Some(Value::Null) => continue,
             Some(env) => serde_json::from_value::<BTreeMap<String, String>>(env)
@@ -51,6 +76,23 @@ pub(crate) fn take(patch: &mut Value) -> Result<Option<Values>, ApiError> {
         }
     }
     Ok(Some(values))
+}
+
+/// A server's inline authorization, if it has one.
+pub(crate) fn authorization<'a>(values: &'a Values, label: &str) -> Option<&'a str> {
+    values.get(label)?.get(AUTHORIZATION).map(String::as_str)
+}
+
+pub(crate) fn disabled(values: &Values) -> ApiError {
+    let message = if values
+        .values()
+        .any(|values| values.contains_key(AUTHORIZATION))
+    {
+        "inline MCP authorization requires the operator to configure a vault passphrase"
+    } else {
+        "stdio MCP env values require the operator to configure a vault passphrase; use env_vars to inherit them from the executor"
+    };
+    ApiError(axum::http::StatusCode::NOT_IMPLEMENTED, message.into())
 }
 
 fn hex(value: &str) -> String {

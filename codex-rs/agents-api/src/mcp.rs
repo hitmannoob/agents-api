@@ -6,7 +6,7 @@
 //! allows the host. Stdio servers and environment-origin HTTP connections run on
 //! a self-hosted session's executor, on the caller's compute and network, so
 //! the service's egress policy does not apply to them. Credentials come from
-//! vaults (G11).
+//! vaults (G11) or encrypted inline authorization snapshots.
 use crate::ApiError;
 use crate::State;
 use crate::agent_tools::CapabilityTool;
@@ -52,6 +52,7 @@ struct Server<'a> {
     endpoint: Endpoint<'a>,
     allowed_tools: Option<&'a Vec<String>>,
     required: bool,
+    request_metadata: &'a BTreeMap<String, Value>,
 }
 
 fn servers(config: &AgentConfig) -> impl Iterator<Item = Server<'_>> {
@@ -62,6 +63,7 @@ fn servers(config: &AgentConfig) -> impl Iterator<Item = Server<'_>> {
             connection_origin,
             allowed_tools,
             required,
+            request_metadata,
             ..
         }) => Some(Server {
             label: server_label,
@@ -70,6 +72,7 @@ fn servers(config: &AgentConfig) -> impl Iterator<Item = Server<'_>> {
                     McpTransport::Http {
                         server_url,
                         headers,
+                        ..
                     },
                     ConnectionOrigin::Service,
                 ) => Endpoint::Service {
@@ -80,6 +83,7 @@ fn servers(config: &AgentConfig) -> impl Iterator<Item = Server<'_>> {
                     McpTransport::Http {
                         server_url,
                         headers,
+                        ..
                     },
                     ConnectionOrigin::Environment,
                 ) => Endpoint::Environment {
@@ -104,6 +108,7 @@ fn servers(config: &AgentConfig) -> impl Iterator<Item = Server<'_>> {
             },
             allowed_tools: allowed_tools.as_ref(),
             required: *required,
+            request_metadata,
         }),
         Tool::Capability(_) | Tool::Function(_) => None,
     })
@@ -152,6 +157,8 @@ pub(crate) fn validate(config: &AgentConfig) -> Result<(), ApiError> {
             server_label,
             transport,
             allowed_tools,
+            credential_id,
+            request_metadata,
             ..
         }) = tool
         else {
@@ -171,11 +178,23 @@ pub(crate) fn validate(config: &AgentConfig) -> Result<(), ApiError> {
                 "allowed_tools must list at most 128 unique tool names",
             ));
         }
+        validate_metadata(request_metadata)?;
         let (server_url, headers) = match transport {
             McpTransport::Http {
                 server_url,
                 headers,
-            } => (server_url, headers),
+                authorization,
+            } => {
+                if let Some(authorization) = authorization {
+                    validate_authorization(authorization)?;
+                    if credential_id.is_some() {
+                        return Err(invalid(
+                            "MCP credential_id cannot be combined with transport.authorization",
+                        ));
+                    }
+                }
+                (server_url, headers)
+            }
             McpTransport::Stdio {
                 command,
                 cwd,
@@ -216,10 +235,10 @@ pub(crate) fn validate(config: &AgentConfig) -> Result<(), ApiError> {
                 .map_err(|_| invalid(format!("invalid MCP header name {name}")))?;
             HeaderValue::try_from(value.as_str())
                 .map_err(|_| invalid(format!("invalid value for MCP header {name}")))?;
-            // Headers are stored and returned as non-secret configuration.
+            // Headers are stored as non-secret configuration; authorization is vaulted.
             if name == axum::http::header::AUTHORIZATION {
                 return Err(invalid(
-                    "MCP authorization must come from a vault credential, not a header",
+                    "MCP authorization must use transport.authorization or a vault credential, not headers",
                 ));
             }
         }
@@ -235,15 +254,67 @@ pub(crate) fn variable_name(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// Why a saved MCP configuration cannot run yet, if it cannot.
-pub(crate) fn unsupported(tool: &CapabilityTool) -> Option<&'static str> {
-    let CapabilityTool::Mcp {
-        request_metadata, ..
-    } = tool
-    else {
-        return None;
-    };
-    (!request_metadata.is_empty()).then_some("MCP request metadata")
+pub(crate) fn validate_authorization(value: &str) -> Result<(), ApiError> {
+    if value.is_empty() || value.len() > 8192 || HeaderValue::try_from(value).is_err() {
+        return Err(invalid(
+            "MCP authorization must be a non-empty valid header value of at most 8192 bytes",
+        ));
+    }
+    Ok(())
+}
+
+/// Inline values are OAuth access tokens by default. Preserve an explicit
+/// auth scheme (such as Bearer or Basic) followed by a space verbatim.
+fn authorization_header(value: &str) -> String {
+    let scheme = value.split_once(' ').is_some_and(|(scheme, _)| {
+        !scheme.is_empty()
+            && scheme
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+    });
+    if scheme {
+        value.to_owned()
+    } else {
+        format!("Bearer {value}")
+    }
+}
+
+fn validate_metadata(metadata: &BTreeMap<String, Value>) -> Result<(), ApiError> {
+    const MAX_BYTES: usize = 16 * 1024;
+    const MAX_KEYS: usize = 128;
+    if serde_json::to_vec(metadata)
+        .map_err(anyhow::Error::from)?
+        .len()
+        > MAX_BYTES
+    {
+        return Err(invalid("MCP request_metadata must be at most 16384 bytes"));
+    }
+    fn keys(value: &Value) -> Result<usize, ApiError> {
+        match value {
+            Value::Null => Err(invalid(
+                "MCP request_metadata cannot contain JSON null; TOML has no null value",
+            )),
+            Value::Object(values) => values
+                .values()
+                .try_fold(values.len(), |count, value| Ok(count + keys(value)?)),
+            Value::Array(values) => values
+                .iter()
+                .try_fold(0, |count, value| Ok(count + keys(value)?)),
+            Value::Number(value) if value.is_u64() && value.as_i64().is_none() => Err(invalid(
+                "MCP request_metadata integers must fit a signed 64-bit TOML integer",
+            )),
+            _ => Ok(0),
+        }
+    }
+    let count = metadata.values().try_fold(metadata.len(), |count, value| {
+        Ok::<_, ApiError>(count + keys(value)?)
+    })?;
+    if count > MAX_KEYS {
+        return Err(invalid(
+            "MCP request_metadata accepts at most 128 keys, including nested keys",
+        ));
+    }
+    Ok(())
 }
 
 /// Check where each server would connect, and that no label shadows a server
@@ -341,18 +412,24 @@ pub(crate) fn public(address: &IpAddr) -> bool {
 pub(crate) fn overrides(
     config: &AgentConfig,
     tokens: &BTreeMap<String, String>,
-    stdio_env: &crate::stdio_env::Values,
+    secrets: &crate::stdio_env::Values,
     environment_id: Option<&str>,
 ) -> Map<String, Value> {
     servers(config)
         .filter_map(|server| {
             let mut entry = json!({"enabled": true, "required": server.required,
                 "default_tools_approval_mode": "approve"});
+            if !server.request_metadata.is_empty() {
+                entry["request_meta"] = json!(server.request_metadata);
+            }
             match server.endpoint {
                 Endpoint::Service { url, headers } | Endpoint::Environment { url, headers } => {
                     entry["url"] = json!(url);
                     let mut headers = headers.clone();
-                    if let Some(token) = tokens.get(server.label) {
+                    // Inline authorization takes precedence over auto-matched credentials.
+                    if let Some(value) = crate::stdio_env::authorization(secrets, server.label) {
+                        headers.insert("Authorization".to_owned(), authorization_header(value));
+                    } else if let Some(token) = tokens.get(server.label) {
                         headers.insert("Authorization".to_owned(), format!("Bearer {token}"));
                     }
                     if !headers.is_empty() {
@@ -373,7 +450,7 @@ pub(crate) fn overrides(
                         .iter()
                         .map(|name| json!({"name": name, "source": "remote"}))
                         .collect();
-                    if let Some(values) = stdio_env.get(server.label) {
+                    if let Some(values) = secrets.get(server.label) {
                         entry["env"] = json!(values);
                     }
                 }

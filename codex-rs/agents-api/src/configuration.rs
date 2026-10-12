@@ -95,6 +95,11 @@ pub(crate) fn configure(mut config: AgentConfig, patch: Value) -> Result<AgentCo
                             .get("type")
                             .and_then(Value::as_str)
                             .ok_or_else(|| invalid("tool type is required"))?;
+                        if kind == "mcp" && tool.get("request_metadata") == Some(&Value::Null) {
+                            return Err(invalid(
+                                "MCP request_metadata cannot contain JSON null; TOML has no null value",
+                            ));
+                        }
                         if kind == "function" {
                             tool.as_object_mut()
                                 .ok_or_else(|| invalid("invalid function"))?
@@ -221,7 +226,7 @@ pub(crate) fn validate_execution(
                     "stdio and environment-origin MCP servers need a self_hosted environment",
                 ));
             }
-            Tool::Capability(tool @ CapabilityTool::Mcp { .. }) => crate::mcp::unsupported(tool),
+            Tool::Capability(CapabilityTool::Mcp { .. }) => None,
             // Codex upgrades cached search to live for an unsandboxed thread,
             // as self-hosted sessions run, so it cannot honor cached there.
             Tool::Capability(CapabilityTool::WebSearch {

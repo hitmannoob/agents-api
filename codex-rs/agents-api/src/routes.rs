@@ -173,9 +173,9 @@ async fn create_agent(
     Json(mut value): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let (name, metadata) = take_agent_details(&mut value, None, Default::default())?;
-    let stdio_env = crate::stdio_env::take(&mut value)?.unwrap_or_default();
-    if !stdio_env.is_empty() && !state.secrets.configured() {
-        return Err(stdio_env_disabled());
+    let mcp_secrets = crate::stdio_env::take(&mut value)?.unwrap_or_default();
+    if !mcp_secrets.is_empty() && !state.secrets.configured() {
+        return Err(crate::stdio_env::disabled(&mcp_secrets));
     }
     let config = crate::contract::configure(AgentConfig::default(), value)?;
     validate_agent(&config)?;
@@ -183,8 +183,12 @@ async fn create_agent(
         .store
         .create_agent(&principal.project_id, config, name, metadata)
         .await?;
-    if let Err(error) =
-        crate::stdio_env::save(&state, crate::stdio_env::agent_name(&agent.id), &stdio_env).await
+    if let Err(error) = crate::stdio_env::save(
+        &state,
+        crate::stdio_env::agent_name(&agent.id),
+        &mcp_secrets,
+    )
+    .await
     {
         state.store.delete_agent(&agent.id).await?;
         return Err(error);
@@ -211,8 +215,12 @@ fn validate_agent(config: &AgentConfig) -> Result<(), ApiError> {
 async fn create_prototype_agent(
     Extract(state): Extract<Arc<State>>,
     Extension(principal): Extension<Principal>,
-    Json(value): Json<Value>,
+    Json(mut value): Json<Value>,
 ) -> Result<(StatusCode, Json<Agent>), ApiError> {
+    let mcp_secrets = crate::stdio_env::take(&mut value)?.unwrap_or_default();
+    if !mcp_secrets.is_empty() && !state.secrets.configured() {
+        return Err(crate::stdio_env::disabled(&mcp_secrets));
+    }
     let config: AgentConfig =
         serde_json::from_value(value).map_err(|e| crate::contract::invalid(e.to_string()))?;
     validate_agent(&config)?;
@@ -220,6 +228,16 @@ async fn create_prototype_agent(
         .store
         .create_agent(&principal.project_id, config, None, Default::default())
         .await?;
+    if let Err(error) = crate::stdio_env::save(
+        &state,
+        crate::stdio_env::agent_name(&agent.id),
+        &mcp_secrets,
+    )
+    .await
+    {
+        state.store.delete_agent(&agent.id).await?;
+        return Err(error);
+    }
     Ok((StatusCode::CREATED, Json(agent)))
 }
 
@@ -233,13 +251,6 @@ async fn read_prototype_agent(
         .await?
         .map(Json)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))
-}
-
-fn stdio_env_disabled() -> ApiError {
-    ApiError(
-        StatusCode::NOT_IMPLEMENTED,
-        "stdio MCP env values require the operator to configure a vault passphrase; use env_vars to inherit them from the executor".into(),
-    )
 }
 
 async fn read_agent(
@@ -341,9 +352,12 @@ async fn update_agent(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))?;
     let (name, metadata) =
         take_agent_details(&mut patch, previous.name.clone(), previous.metadata.clone())?;
-    let stdio_env = crate::stdio_env::take(&mut patch)?;
-    if stdio_env.as_ref().is_some_and(|values| !values.is_empty()) && !state.secrets.configured() {
-        return Err(stdio_env_disabled());
+    let mcp_secrets = crate::stdio_env::take(&mut patch)?;
+    if let Some(values) = &mcp_secrets
+        && !values.is_empty()
+        && !state.secrets.configured()
+    {
+        return Err(crate::stdio_env::disabled(values));
     }
     let config = crate::contract::configure(previous.config.clone(), patch)?;
     let mut updated = previous.clone();
@@ -358,7 +372,7 @@ async fn update_agent(
         ));
     }
     // New tools replace the old ones, and their values with them.
-    if let Some(values) = stdio_env {
+    if let Some(values) = mcp_secrets {
         crate::stdio_env::save(&state, crate::stdio_env::agent_name(&id), &values).await?;
     }
     Ok(Json(public_agent(&updated)))
@@ -446,13 +460,13 @@ pub(crate) async fn start_turn(
     let Json(session) = read_session(Extract(Arc::clone(state)), Path(id.to_owned())).await?;
     crate::configuration::validate_execution(&session.agent.config, &session.environment)?;
     let tokens = crate::credentials::load(state, id).await?;
-    let stdio_env = crate::stdio_env::load(state, crate::stdio_env::session_name(id)).await?;
+    let mcp_secrets = crate::stdio_env::load(state, crate::stdio_env::session_name(id)).await?;
     let config = crate::capabilities::overrides(
         state,
         &session.agent.config,
         &session.environment,
         &tokens,
-        &stdio_env,
+        &mcp_secrets,
     )
     .await?;
     let loaded = state.loaded_threads()?;
