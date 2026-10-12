@@ -52,11 +52,11 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-12) is 42 verified, 2 implemented, 18 partial, and
+The current count (2026-10-12) is 48 verified, 2 implemented, 12 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
-of scope since 2026-10-06. Verified: ART-001..004, SUB-002..006, TRN-002,
-AGT-004..005, SES-004, VLT-001..004, CRD-002, CRD-004, FIL-001..005,
-WHK-001..006, WHK-008, SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
+of scope since 2026-10-06. Verified: ART-001..004, SUB-001..006, TRN-002,
+AGT-004..005, SES-004, VLT-001..004, CRD-001..005, FIL-001..005,
+WHK-001..008, TRC-001, SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
 evidence: ENV-002..003. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
 per-area summary.
 
@@ -154,3 +154,13 @@ Amendments under the same `openai==3.17.0` pin:
   parity target (scope reduction). List cursors are resource IDs and do not
   expire. The third promotion pass moved AGT-004, FIL-001..005, WHK-001,
   WHK-003, WHK-008, BEH-001, and BEH-004 to verified.
+- 2026-10-12: decisions where the docs define nothing or Codex reports
+  nothing. The OTLP trace format, batch and idempotency semantics, and the
+  10,000-byte function result limit are the contract. A failed webhook test
+  is an error, and delivery order is not guaranteed. Subagent task text,
+  close, and `closed` status are Codex engine limits. OAuth token refresh and
+  external key management are out of scope (scope reduction). Webhook events
+  gained environment data and the actual required action, and trace spans
+  the response model (additive). The fourth promotion pass moved WHK-007,
+  TRC-001, SUB-001, CRD-001, CRD-003, CRD-005, BEH-005, BEH-009, BEH-013,
+  BEH-014, and BEH-016 to verified.

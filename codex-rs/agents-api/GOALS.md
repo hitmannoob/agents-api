@@ -1998,6 +1998,31 @@ are verified: 42 verified, 2 implemented, 18 partial, and 5 missing
 operations. `cargo nextest run -p codex-agents-api` passed 72/72, and the 3
 pinned-SDK tests passed with `openai==3.17.0` (mock provider, macOS).
 
+## Contract decisions where nothing upstream defines the answer (2026-10-12)
+
+- [x] **Webhook events carry environment data (BEH-014).** The session
+  webhook guide's `agent.session.created` payload names the environment and,
+  for a self-hosted one, `connect.remote_url`; `action_required` named only
+  `function_call` even when input waited for an executor. Both now follow
+  the guide. The guide promises no delivery order.
+  Evidence: `webhooks::session_events_are_queued_retried_and_survive_restart`
+  checks both payloads for a self-hosted session created with initial input,
+  which also covers that input waiting behind `environment_connection`.
+- [x] **Response models in traces (TRC-001, BEH-016).** Each generation
+  records the model its turn requested, replaced on `model/rerouted`
+  (migration `0021`), and `chat` spans export it as `gen_ai.response.model`.
+  Decision: with no reference schema, this OTLP format is the contract.
+  Evidence: `traces::finished_turns_export_as_otlp_traces`.
+- [x] **Decisions recorded:** WHK-007 (a failed test delivery is an error;
+  the SDK returns results only for completed requests), BEH-005 (batch and
+  idempotency semantics), BEH-007 (10,000-byte result limit), SUB-001 and
+  BEH-009 (subagent task text and close are Codex engine limits), CRD-001,
+  CRD-003, CRD-005, and BEH-013 (OAuth refresh and external key management
+  out of scope; `environment_variable` credentials already were).
+
+Result: 48 verified, 2 implemented, 12 partial, and 5 missing operations; 11
+of 18 behavior rows verified.
+
 ## Immediate next implementation slices
 
 Updated 2026-10-12. G00–G05 slices and the G01/G02 recovery slices that
@@ -2011,7 +2036,8 @@ above and in git.
 3. **Skills API (SKL-001..006, SKV-001..005): complete locally 2026-10-12,**
    including pinned skills for self-hosted sessions (local extension).
 4. **Contract gaps without provider dependencies: done 2026-10-12** (webhook
-   event types, beta header, pagination evidence, cursor expiry, Files scope).
+   event types, beta header, pagination evidence, cursor expiry, Files scope),
+   and a second decision pass the same day.
 5. **Deferred functions and tool search (G06), then built-in capability
    slices (G07).** Both need provider/model support reported by the worker.
 6. **G08 compaction controls and programmatic tool calling.**

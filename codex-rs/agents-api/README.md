@@ -473,7 +473,8 @@ secrets directory.
 - **Credential types:** `static_bearer` and `mcp_oauth` send their token as the
   MCP server's `Authorization: Bearer` header. `mcp_server_url` must use https
   (plain http only for an operator-allowed MCP host). `mcp_oauth` refresh
-  settings are rejected, since the service does not refresh tokens.
+  settings are rejected, since the service does not refresh tokens; rotate
+  the access token through the credentials API instead.
   `environment_variable` credentials need an OpenAI-hosted environment and are
   rejected.
 - **Matching:** a session lists up to 32 `vault_ids`. Each HTTP MCP server
