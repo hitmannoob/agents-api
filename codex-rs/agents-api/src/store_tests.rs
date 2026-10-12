@@ -11,13 +11,24 @@ async fn agent_pages_keep_creation_order_and_sessions_keep_snapshots() -> anyhow
         ..Default::default()
     };
     let first = store
-        .create_agent(config.clone(), None, Default::default())
+        .create_agent(
+            crate::projects::DEFAULT_PROJECT,
+            config.clone(),
+            None,
+            Default::default(),
+        )
         .await?;
     let second = store
-        .create_agent(config.clone(), None, Default::default())
+        .create_agent(
+            crate::projects::DEFAULT_PROJECT,
+            config.clone(),
+            None,
+            Default::default(),
+        )
         .await?;
     let session = store
         .create_session(
+            crate::projects::DEFAULT_PROJECT,
             first.clone(),
             SessionCreateParams {
                 agent_id: first.id.clone(),
@@ -28,16 +39,29 @@ async fn agent_pages_keep_creation_order_and_sessions_keep_snapshots() -> anyhow
     let mut changed = first.clone();
     changed.config.instructions = Some("changed".into());
     assert!(store.update_agent(&first, &changed).await?);
-    let (page, more) = store.list_agents(None, "asc", 1).await?.unwrap();
+    let (page, more) = store
+        .list_agents(crate::projects::DEFAULT_PROJECT, None, "asc", 1)
+        .await?
+        .unwrap();
     assert_eq!(page, vec![changed.clone()]);
     assert!(more);
-    let (page, more) = store.list_agents(Some(&first.id), "asc", 1).await?.unwrap();
+    let (page, more) = store
+        .list_agents(crate::projects::DEFAULT_PROJECT, Some(&first.id), "asc", 1)
+        .await?
+        .unwrap();
     assert_eq!(page, vec![second.clone()]);
     assert!(!more);
     assert!(store.delete_agent(&second.id).await?);
-    let third = store.create_agent(config, None, Default::default()).await?;
+    let third = store
+        .create_agent(
+            crate::projects::DEFAULT_PROJECT,
+            config,
+            None,
+            Default::default(),
+        )
+        .await?;
     let (page, more) = store
-        .list_agents(Some(&first.id), "asc", 10)
+        .list_agents(crate::projects::DEFAULT_PROJECT, Some(&first.id), "asc", 10)
         .await?
         .unwrap();
     assert_eq!(page, vec![third]);
@@ -47,7 +71,41 @@ async fn agent_pages_keep_creation_order_and_sessions_keep_snapshots() -> anyhow
     assert!(store.session(&session.id).await?.is_some());
     assert!(
         store
-            .list_agents(Some(&second.id), "asc", 1)
+            .list_agents(crate::projects::DEFAULT_PROJECT, Some(&second.id), "asc", 1)
+            .await?
+            .is_none()
+    );
+    // Another project neither lists nor resolves this project's agents, and
+    // its cursors are invalid here.
+    let other = store
+        .create_agent(
+            "proj_other",
+            AgentConfig {
+                model: "model-b".into(),
+                ..Default::default()
+            },
+            None,
+            Default::default(),
+        )
+        .await?;
+    assert_eq!(
+        store.project_agent("proj_other", &other.id).await?,
+        Some(other.clone())
+    );
+    assert_eq!(
+        store
+            .project_agent(crate::projects::DEFAULT_PROJECT, &other.id)
+            .await?,
+        None
+    );
+    let (page, _) = store
+        .list_agents("proj_other", None, "asc", 10)
+        .await?
+        .unwrap();
+    assert_eq!(page, vec![other.clone()]);
+    assert!(
+        store
+            .list_agents(crate::projects::DEFAULT_PROJECT, Some(&other.id), "asc", 1)
             .await?
             .is_none()
     );
@@ -61,6 +119,7 @@ async fn empty_sessions_survive_restart_with_independent_configuration() -> anyh
     let store = Store::open(path.clone()).await?;
     let agent = store
         .create_agent(
+            crate::projects::DEFAULT_PROJECT,
             AgentConfig {
                 model: "model-a".into(),
                 instructions: Some("original".into()),
@@ -72,6 +131,7 @@ async fn empty_sessions_survive_restart_with_independent_configuration() -> anyh
         .await?;
     let first = store
         .create_session(
+            crate::projects::DEFAULT_PROJECT,
             agent.clone(),
             SessionCreateParams {
                 agent_id: agent.id.clone(),
@@ -81,6 +141,7 @@ async fn empty_sessions_survive_restart_with_independent_configuration() -> anyh
         .await?;
     let second = store
         .create_session(
+            crate::projects::DEFAULT_PROJECT,
             agent.clone(),
             SessionCreateParams {
                 agent_id: agent.id.clone(),
@@ -118,6 +179,7 @@ async fn migrations_record_a_ledger_and_adopt_a_legacy_database() -> anyhow::Res
     assert!(applied >= 1, "baseline migration must be recorded");
     let agent = store
         .create_agent(
+            crate::projects::DEFAULT_PROJECT,
             AgentConfig {
                 model: "legacy-model".into(),
                 instructions: Some("keep me".into()),
@@ -161,6 +223,8 @@ async fn migrations_record_a_ledger_and_adopt_a_legacy_database() -> anyhow::Res
         "DROP TABLE api_keys",
         "DROP TABLE projects",
         "DROP TABLE public_records",
+        "DROP TABLE sessions",
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, data TEXT NOT NULL, thread_id TEXT UNIQUE)",
         "CREATE TABLE public_records (seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, turn_id TEXT NOT NULL, data TEXT NOT NULL, UNIQUE (session_id, kind, id))",
         "CREATE TABLE public_sessions (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
         "INSERT INTO public_sessions (id, data) VALUES ('legacy-session', '{}')",

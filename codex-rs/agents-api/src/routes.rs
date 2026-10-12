@@ -1,5 +1,6 @@
 use crate::ApiError;
 use crate::State;
+use crate::projects::Principal;
 use crate::resources::Agent;
 use crate::resources::AgentConfig;
 use crate::resources::Environment;
@@ -7,6 +8,7 @@ use crate::resources::InputParams;
 use crate::resources::PageParams;
 use crate::resources::Session;
 use crate::resources::SessionCreateParams;
+use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -114,17 +116,19 @@ async fn authorize(
             StatusCode::UNAUTHORIZED,
             "bearer token required".into(),
         )),
-        Some(principal) => principal
-            .missing(crate::projects::required(
-                request.method(),
-                request.uri().path(),
-            ))
-            .map(|permission| {
-                ApiError(
-                    StatusCode::FORBIDDEN,
-                    format!("this API key lacks the {permission} permission"),
-                )
-            }),
+        Some(principal) => match principal.missing(crate::projects::required(
+            request.method(),
+            request.uri().path(),
+        )) {
+            Some(permission) => Some(ApiError(
+                StatusCode::FORBIDDEN,
+                format!("this API key lacks the {permission} permission"),
+            )),
+            // Another project's resource reads as missing.
+            None => crate::projects::foreign(&state, principal, request.uri().path())
+                .await?
+                .map(|message| ApiError(StatusCode::NOT_FOUND, message.into())),
+        },
     };
     if let Some(error) = rejection {
         return if compatible {
@@ -159,6 +163,7 @@ async fn authorize(
 
 async fn create_agent(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     headers: HeaderMap,
     Json(value): Json<Value>,
 ) -> Result<Response, ApiError> {
@@ -192,7 +197,10 @@ async fn create_agent(
         ));
     }
     crate::capabilities::validate(&config)?;
-    let agent = state.store.create_agent(config, name, metadata).await?;
+    let agent = state
+        .store
+        .create_agent(&principal.project_id, config, name, metadata)
+        .await?;
     if let Err(error) =
         crate::stdio_env::save(&state, crate::stdio_env::agent_name(&agent.id), &stdio_env).await
     {
@@ -277,6 +285,7 @@ struct AgentListParams {
 
 async fn list_agents(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Query(params): Query<AgentListParams>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = params.limit.unwrap_or(20);
@@ -289,7 +298,12 @@ async fn list_agents(
     }
     let (agents, has_more) = state
         .store
-        .list_agents(params.after.as_deref(), order, i64::from(limit))
+        .list_agents(
+            &principal.project_id,
+            params.after.as_deref(),
+            order,
+            i64::from(limit),
+        )
         .await?
         .ok_or_else(|| crate::contract::invalid("invalid agent cursor"))?;
     Ok(Json(json!({
@@ -354,16 +368,22 @@ async fn delete_agent(
 
 async fn create_session(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Json(params): Json<SessionCreateParams>,
 ) -> Result<(StatusCode, Json<Session>), ApiError> {
     let agent = state
         .store
-        .agent(&params.agent_id)
+        .project_agent(&principal.project_id, &params.agent_id)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))?;
     Ok((
         StatusCode::CREATED,
-        Json(state.store.create_session(agent, params).await?),
+        Json(
+            state
+                .store
+                .create_session(&principal.project_id, agent, params)
+                .await?,
+        ),
     ))
 }
 

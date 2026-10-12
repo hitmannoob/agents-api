@@ -1797,11 +1797,20 @@ Checklist:
   creation, the operator token, and revocation without a restart. Resources
   are not yet isolated: until slices 2-4 land, any valid key reaches every
   project's rows within its permissions.
-- [ ] **Slice 2: agents and sessions.** `project_id` on agents and sessions,
+- [x] **Slice 2: agents and sessions.** `project_id` on agents and sessions,
   every query and list scoped, inherited checks for turns, items, subagents,
   artifacts, events, and traces. Add a two-project isolation sweep driven by
   `CONTRACT_INVENTORY.json`, like the existing error-shape sweep: project B
   gets 404 on every project-A ID and never sees A's rows in a list.
+  Evidence (2026-10-12): migration `0016` adds `project_id` to `agents`,
+  `sessions`, and `public_sessions`, with list indexes. The auth middleware
+  answers 404 for an agent or session root owned by another project
+  (`projects::foreign`), which covers everything under a session; a root
+  that does not exist still reaches its handler. Creation stamps the
+  caller's project, lists and cursors are project-scoped, and `agent_id` in
+  session creation resolves only in the caller's project.
+  `projects::projects_cannot_see_or_change_each_others_agents_and_sessions`
+  sweeps every inventoried operation that names an agent or session.
 - [ ] **Slice 3: vaults, files, and environments.** Scope vaults, credentials,
   files, environments, and the executor registry; reject cross-project
   `vault_ids`, `file_id`, and `environment_id`. Extend the isolation sweep.

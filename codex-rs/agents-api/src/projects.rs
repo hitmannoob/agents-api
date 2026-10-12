@@ -43,10 +43,6 @@ pub const PERMISSIONS: [&str; 9] = [
 /// The authenticated caller of one request, stored in the request extensions.
 #[derive(Clone, Debug)]
 pub(crate) struct Principal {
-    #[expect(
-        dead_code,
-        reason = "resource handlers scope by project in G13 slice 2"
-    )]
     pub project_id: String,
     permissions: Vec<String>,
 }
@@ -93,6 +89,48 @@ pub(crate) async fn resolve(state: &State, secret: &str) -> anyhow::Result<Optio
         })
     })
     .transpose()
+}
+
+/// The not-found message for a request whose root resource exists but belongs
+/// to another project, so it reads exactly like a missing ID. Children of a
+/// session (turns, items, subagents, artifacts, events, and traces) are
+/// covered by their session. A root that does not exist passes through, so
+/// its handler keeps its own validation order and errors.
+pub(crate) async fn foreign(
+    state: &State,
+    principal: &Principal,
+    path: &str,
+) -> anyhow::Result<Option<&'static str>> {
+    let Some(rest) = path.strip_prefix("/v1/") else {
+        return Ok(None);
+    };
+    let segments: Vec<&str> = rest.split('/').collect();
+    let (query, id, message) = match segments.as_slice() {
+        ["agents", "sessions", id, ..] => (
+            "SELECT project_id FROM public_sessions WHERE id = ?",
+            *id,
+            "session not found",
+        ),
+        ["agents", "sessions" | "environments", ..] => return Ok(None),
+        ["agents", id, ..] => (
+            "SELECT project_id FROM agents WHERE id = ?",
+            *id,
+            "agent not found",
+        ),
+        ["sessions", id, ..] => (
+            "SELECT project_id FROM sessions WHERE id = ?",
+            *id,
+            "session not found",
+        ),
+        _ => return Ok(None),
+    };
+    let owner: Option<String> = sqlx::query_scalar(query)
+        .bind(id)
+        .fetch_optional(&state.store.0)
+        .await?;
+    Ok(owner
+        .is_some_and(|owner| owner != principal.project_id)
+        .then_some(message))
 }
 
 /// The permissions an operation requires, from its method and path. Reads need

@@ -56,6 +56,7 @@ impl Store {
 
     pub async fn create_agent(
         &self,
+        project_id: &str,
         config: AgentConfig,
         name: Option<String>,
         metadata: std::collections::BTreeMap<String, String>,
@@ -69,9 +70,10 @@ impl Store {
             name,
             metadata,
         };
-        sqlx::query("INSERT INTO agents (id, data) VALUES (?, ?)")
+        sqlx::query("INSERT INTO agents (id, data, project_id) VALUES (?, ?, ?)")
             .bind(&agent.id)
             .bind(serde_json::to_string(&agent)?)
+            .bind(project_id)
             .execute(&self.0)
             .await?;
         Ok(agent)
@@ -87,17 +89,34 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// An agent, only when it belongs to `project_id`.
+    pub async fn project_agent(&self, project_id: &str, id: &str) -> anyhow::Result<Option<Agent>> {
+        let data: Option<String> =
+            sqlx::query_scalar("SELECT data FROM agents WHERE id = ? AND project_id = ?")
+                .bind(id)
+                .bind(project_id)
+                .fetch_optional(&self.0)
+                .await?;
+        data.map(|data| serde_json::from_str(&data))
+            .transpose()
+            .map_err(Into::into)
+    }
+
     pub async fn list_agents(
         &self,
+        project_id: &str,
         after: Option<&str>,
         order: &str,
         limit: i64,
     ) -> anyhow::Result<Option<(Vec<Agent>, bool)>> {
         let cursor: Option<i64> = if let Some(id) = after {
-            match sqlx::query_scalar("SELECT created_seq FROM agents WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&self.0)
-                .await?
+            match sqlx::query_scalar(
+                "SELECT created_seq FROM agents WHERE id = ? AND project_id = ?",
+            )
+            .bind(id)
+            .bind(project_id)
+            .fetch_optional(&self.0)
+            .await?
             {
                 Some(seq) => Some(seq),
                 None => return Ok(None),
@@ -107,16 +126,18 @@ impl Store {
         };
         let rows: Vec<(String,)> = if order == "asc" {
             sqlx::query_as(
-                "SELECT data FROM agents WHERE created_seq > ? ORDER BY created_seq ASC LIMIT ?",
+                "SELECT data FROM agents WHERE project_id = ? AND created_seq > ? ORDER BY created_seq ASC LIMIT ?",
             )
+            .bind(project_id)
             .bind(cursor.unwrap_or(0))
             .bind(limit + 1)
             .fetch_all(&self.0)
             .await?
         } else {
             sqlx::query_as(
-                "SELECT data FROM agents WHERE created_seq < ? ORDER BY created_seq DESC LIMIT ?",
+                "SELECT data FROM agents WHERE project_id = ? AND created_seq < ? ORDER BY created_seq DESC LIMIT ?",
             )
+            .bind(project_id)
             .bind(cursor.unwrap_or(i64::MAX))
             .bind(limit + 1)
             .fetch_all(&self.0)
@@ -165,6 +186,7 @@ impl Store {
 
     pub async fn create_session(
         &self,
+        project_id: &str,
         agent: Agent,
         params: SessionCreateParams,
     ) -> anyhow::Result<Session> {
@@ -176,9 +198,10 @@ impl Store {
             required_actions: Vec::new(),
             unresolved_actions: Vec::new(),
         };
-        sqlx::query("INSERT INTO sessions (id, data) VALUES (?, ?)")
+        sqlx::query("INSERT INTO sessions (id, data, project_id) VALUES (?, ?, ?)")
             .bind(&session.id)
             .bind(serde_json::to_string(&session)?)
+            .bind(project_id)
             .execute(&self.0)
             .await?;
         Ok(session)

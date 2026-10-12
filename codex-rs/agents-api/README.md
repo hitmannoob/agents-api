@@ -130,9 +130,12 @@ events), `api.vaults.read`, `api.vaults.write`, `api.files.read`,
 `api.files.write`, `api.webhooks.read`, and `api.webhooks.write`. An unknown
 or revoked key gets 401, and a key missing an operation's permission gets 403.
 
-Resource isolation between projects is in progress (G13 slices 2-4). Until it
-lands, a project key can read and change every project's resources within its
-permissions, so do not hand keys to mutually untrusted callers yet.
+Agents and sessions, with everything under a session, are isolated by
+project: another project's IDs read as not found and never appear in lists.
+Isolation for vaults, files, environments, and webhooks is in progress (G13
+slices 3-4); until it lands, a project key reaches those resources in every
+project within its permissions, so do not hand keys to mutually untrusted
+callers yet.
 
 ## Operating the service
 

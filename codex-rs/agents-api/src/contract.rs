@@ -1,10 +1,12 @@
 //! The text/function subset of the Agents API, pinned to openai-python 3.17.0.
 use crate::ApiError;
 use crate::State;
+use crate::projects::Principal;
 use crate::resources::Agent;
 use crate::resources::AgentConfig;
 use crate::resources::Environment;
 use crate::resources::SessionCreateParams;
+use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::extract::Path;
@@ -131,6 +133,7 @@ struct Create {
 
 async fn create(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     headers: HeaderMap,
     Json(params): Json<Create>,
 ) -> Result<Response, ApiError> {
@@ -180,7 +183,7 @@ async fn create(
     let mut saved = match params.agent_id {
         Some(id) => state
             .store
-            .agent(&id)
+            .project_agent(&principal.project_id, &id)
             .await?
             .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))?,
         None => Agent {
@@ -236,6 +239,7 @@ async fn create(
     let session = state
         .store
         .create_session(
+            &principal.project_id,
             saved,
             SessionCreateParams {
                 agent_id: String::new(),
@@ -267,7 +271,7 @@ async fn create(
     let public = json!({"id":session.id,"object":"agent.session","agent":agent(&session.agent),
         "created_at":now(),"last_active_at":now(),"environment":public_environment,"metadata":metadata,
         "vault_ids":vault_ids,"required_actions":[],"status":status,"error":null,"usage":null});
-    crate::records::create_session(&state.store.0, &public).await?;
+    crate::records::create_session(&state.store.0, &principal.project_id, &public).await?;
     let snapshot = async {
         crate::credentials::snapshot(&state, &session.id, credentials).await?;
         let name = crate::stdio_env::session_name(&session.id);

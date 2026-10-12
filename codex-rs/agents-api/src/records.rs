@@ -27,11 +27,16 @@ pub(crate) async fn disconnected(pool: &sqlx::SqlitePool) -> anyhow::Result<()> 
     Ok(())
 }
 
-pub(crate) async fn create_session(pool: &sqlx::SqlitePool, data: &Value) -> anyhow::Result<()> {
+pub(crate) async fn create_session(
+    pool: &sqlx::SqlitePool,
+    project_id: &str,
+    data: &Value,
+) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
-    sqlx::query("INSERT INTO public_sessions (id,data) VALUES (?,?)")
+    sqlx::query("INSERT INTO public_sessions (id,data,project_id) VALUES (?,?,?)")
         .bind(data["id"].as_str())
         .bind(data.to_string())
+        .bind(project_id)
         .execute(&mut *tx)
         .await?;
     crate::webhook_outbox::enqueue(&mut tx, "agent.session.created", json!({"id":data["id"]}))

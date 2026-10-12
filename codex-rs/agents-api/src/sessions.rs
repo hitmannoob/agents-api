@@ -3,8 +3,10 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
 use crate::resources::Agent;
 use crate::resources::AgentConfig;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::Query;
@@ -30,6 +32,7 @@ pub(crate) struct ListParams {
 
 pub(crate) async fn list(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = params.limit.unwrap_or(/*default*/ 20);
@@ -44,19 +47,20 @@ pub(crate) async fn list(
     let pool = &state.store.0;
     let cursor: Option<i64> = match &params.after {
         Some(after) => Some(
-            sqlx::query_scalar("SELECT created_seq FROM public_sessions WHERE id = ? AND (? IS NULL OR json_extract(data, '$.agent.id') = ?)")
-                .bind(after).bind(&params.agent_id).bind(&params.agent_id)
+            sqlx::query_scalar("SELECT created_seq FROM public_sessions WHERE id = ? AND project_id = ? AND (? IS NULL OR json_extract(data, '$.agent.id') = ?)")
+                .bind(after).bind(&principal.project_id).bind(&params.agent_id).bind(&params.agent_id)
                 .fetch_optional(pool).await.map_err(anyhow::Error::from)?
                 .ok_or_else(|| invalid("invalid session cursor"))?,
         ),
         None => None,
     };
     let query = if ascending {
-        "SELECT id, data FROM public_sessions WHERE (? IS NULL OR json_extract(data, '$.agent.id') = ?) AND created_seq > ? ORDER BY created_seq ASC LIMIT ?"
+        "SELECT id, data FROM public_sessions WHERE project_id = ? AND (? IS NULL OR json_extract(data, '$.agent.id') = ?) AND created_seq > ? ORDER BY created_seq ASC LIMIT ?"
     } else {
-        "SELECT id, data FROM public_sessions WHERE (? IS NULL OR json_extract(data, '$.agent.id') = ?) AND created_seq < ? ORDER BY created_seq DESC LIMIT ?"
+        "SELECT id, data FROM public_sessions WHERE project_id = ? AND (? IS NULL OR json_extract(data, '$.agent.id') = ?) AND created_seq < ? ORDER BY created_seq DESC LIMIT ?"
     };
     let rows: Vec<(String, String)> = sqlx::query_as(query)
+        .bind(&principal.project_id)
         .bind(&params.agent_id)
         .bind(&params.agent_id)
         .bind(cursor.unwrap_or(if ascending { 0 } else { i64::MAX }))
