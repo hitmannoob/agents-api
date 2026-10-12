@@ -52,10 +52,10 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-12) is 54 verified, 2 implemented, 6 partial, and
+The current count (2026-10-12) is 55 verified, 2 implemented, 5 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
 of scope since 2026-10-06. Verified: ART-001..004, SUB-001..006, TRN-002,
-AGT-003..005, SES-004..005, EVT-001, ENV-001, ITM-001, TRN-001, VLT-001..004, CRD-001..005, FIL-001..005,
+AGT-003..005, SES-002, SES-004..005, EVT-001, ENV-001, ITM-001, TRN-001, VLT-001..004, CRD-001..005, FIL-001..005,
 WHK-001..008, TRC-001, SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
 evidence: ENV-002..003. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
 per-area summary.
@@ -182,3 +182,7 @@ Amendments under the same `openai==3.17.0` pin:
 - 2026-10-12: Codex's app-server gains `thread/resume.experimentalRawEvents`,
   so agent messages keep being recorded after a session resumes on a new
   worker connection (additive).
+- 2026-10-12: session configuration audited against the pinned SDK; input
+  accepts 1-32 user messages, the only missing create variant. SES-002 moved
+  to verified; SES-001 remains partial only for capability execution
+  (additive).
