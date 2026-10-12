@@ -288,7 +288,9 @@ before anything runs. Events then run in array order and stop at the first
 failure; earlier events stay applied. An unknown call returns 400 with code
 `invalid_request_error` and message `Unknown pending tool call: <call_id>`,
 which the pinned SDK retries because a call's item event can arrive before the
-call is registered. A message holds `input_text` parts totalling at most 1 MiB
+call is registered. Input is a string or 1–32 user messages; Codex starts a turn from one list of
+parts, so several messages become one user message with their parts in order.
+A message holds `input_text` parts totalling at most 1 MiB
 plus `input_image` parts. Images are `data:image/` URLs or https URLs. Codex
 accepts only inline images, so the service fetches a remote image before
 dispatching the input (at most 20 MiB, an `image/*` content type, no

@@ -24,6 +24,8 @@ use tokio::sync::broadcast;
 
 /// Most input events accepted in one request.
 const MAX_EVENTS: usize = 32;
+/// Most user messages in one input.
+const MAX_MESSAGES: usize = 32;
 /// Most combined text bytes in one user message: Codex's limit on one user
 /// input is 2^20 characters, and a character is at least one byte.
 const MAX_TEXT_BYTES: usize = 1 << 20;
@@ -67,8 +69,9 @@ enum Event {
     ToolResult { turn_id: String, result: ToolResult },
 }
 
-/// Convert a string or one user message into Codex input items. The single
-/// message boundary is preserved: several messages are rejected, not merged.
+/// Convert a string or a list of user messages into Codex input items. Codex
+/// starts a turn from one list of parts, so several messages become one user
+/// message whose parts keep their order.
 pub(crate) fn message(input: Value) -> Result<Vec<Value>, ApiError> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -91,12 +94,21 @@ pub(crate) fn message(input: Value) -> Result<Vec<Value>, ApiError> {
     } else {
         let messages: Vec<Message> =
             serde_json::from_value(input).map_err(|e| invalid(e.to_string()))?;
-        let [message] = <[Message; 1]>::try_from(messages)
-            .map_err(|_| invalid("exactly one user message is currently supported"))?;
-        if message.role != "user" || message.kind.is_some_and(|kind| kind != "message") {
-            return Err(invalid("input must be a user message"));
+        if !(1..=MAX_MESSAGES).contains(&messages.len()) {
+            return Err(invalid(format!(
+                "input must contain 1 to {MAX_MESSAGES} user messages"
+            )));
         }
-        message.content
+        // Codex takes a turn's input as one list, so the messages' parts run
+        // together, in order, as one user message.
+        let mut content = Vec::new();
+        for message in messages {
+            if message.role != "user" || message.kind.is_some_and(|kind| kind != "message") {
+                return Err(invalid("input must be a user message"));
+            }
+            content.extend(message.content);
+        }
+        content
     };
     let mut items = Vec::new();
     let mut text_bytes = 0;

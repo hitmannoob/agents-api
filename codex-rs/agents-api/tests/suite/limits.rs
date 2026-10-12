@@ -51,6 +51,22 @@ async fn agents_carry_long_instructions_many_tools_and_long_input() -> anyhow::R
         assert_eq!((response.status(), response.json::<Value>().await?),
             (reqwest::StatusCode::BAD_REQUEST, error("input must contain non-blank text or an image, with at most 1048576 text bytes")));
 
+        // Several user messages reach the model in order, as one message; more
+        // than 32 are refused.
+        let part = |text: &str| json!({"role":"user","content":[{"type":"input_text","text":text}]});
+        let response = post(&format!("{}/events", url.trim_start_matches(&base)),
+            &json!({"events":[{"type":"agent.session.input.message","input":[part("first-part"),part("second-part")]}]})).await?;
+        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+        idle(&client, &url, /*expected_turns*/ 2).await?;
+        let captures = provider.received_requests().await.context("captures")?;
+        let sent = captures.iter().rev().find(|r| String::from_utf8_lossy(&r.body).contains("second-part")).context("request")?;
+        let sent = String::from_utf8_lossy(&sent.body).into_owned();
+        assert!(sent.find("first-part") < sent.find("second-part"), "{sent}");
+        let many: Vec<Value> = (0..33).map(|_| part("too many")).collect();
+        let response = post(&format!("{}/events", url.trim_start_matches(&base)),
+            &json!({"events":[{"type":"agent.session.input.message","input":many}]})).await?;
+        assert_eq!((response.status(), response.json::<Value>().await?), (reqwest::StatusCode::BAD_REQUEST, error("input must contain 1 to 32 user messages")));
+
         // Idempotency keys keep a digest, not the request, and a retry that
         // orders its fields differently still replays.
         let events = format!("{url}/events");
@@ -61,7 +77,7 @@ async fn agents_carry_long_instructions_many_tools_and_long_input() -> anyhow::R
         assert_eq!(reordered.status(), reqwest::StatusCode::ACCEPTED);
         let different = keyed(json!({"events":[{"type":"agent.session.input.message","input":"other"}]})).await?;
         assert_eq!(different.status(), reqwest::StatusCode::BAD_REQUEST);
-        idle(&client, &url, /*expected_turns*/ 2).await?;
+        idle(&client, &url, /*expected_turns*/ 3).await?;
         let pool = codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::from_absolute_path(data.path())?)
             .open_read_write_pool(data.path().join("agents-api.sqlite").as_path()).await?;
         let stored: String = sqlx::query_scalar("SELECT request FROM input_requests WHERE key = 'large-retry'").fetch_one(&pool).await?;
