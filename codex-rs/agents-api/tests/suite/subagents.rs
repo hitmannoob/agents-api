@@ -202,7 +202,20 @@ async fn subagents_are_registered_attributed_and_kept_apart() -> anyhow::Result<
         let root_items = request(&client, reqwest::Method::GET, &format!("{url}/items?order=asc"), Value::Null).await?;
         let handoff = root_items["data"].as_array().context("items")?.iter().find(|item| item["type"] == "send_subagent_input_call").context("handoff item")?;
         assert_eq!(json!({"sender":handoff["sender_agent_id"],"recipient":handoff["recipient_agent_id"]}), json!({"sender":session["agent"]["id"],"recipient":sub_id}));
-        idle(&client, &url, /*expected_turns*/ 2).await?;
+        // Messages between agents are still recorded after the session resumed
+        // on a new worker: the follow-up task reached the subagent, and its
+        // report reaches the root in the root's next turn.
+        let messages = |items: Value| items["data"].as_array().into_iter().flatten()
+            .filter(|item| item["type"] == "agent_message").map(|item| item["content"].clone()).collect::<Vec<_>>();
+        let sub_messages = messages(request(&client, reqwest::Method::GET, &format!("{url}/subagents/{sub_id}/items?order=asc"), Value::Null).await?);
+        assert_eq!(sub_messages.last(), Some(&json!([{"type":"encrypted_content","encrypted_content":"second-task"}])), "{sub_messages:?}");
+        idle(&client, &url, /*expected_turns*/ 3).await?;
+        let check_in = client.post(format!("{url}/events")).bearer_auth(TOKEN)
+            .json(&json!({"events":[{"type":"agent.session.input.message","input":"check-in-again"}]})).send().await?;
+        assert_eq!(check_in.status(), reqwest::StatusCode::ACCEPTED);
+        idle(&client, &url, /*expected_turns*/ 4).await?;
+        let root_messages = messages(request(&client, reqwest::Method::GET, &format!("{url}/items?order=asc"), Value::Null).await?);
+        assert_eq!(root_messages.last(), Some(&json!([{"type":"output_text","text":"second-report"}])), "{root_messages:?}");
         request(&client, reqwest::Method::DELETE, &url, Value::Null).await?;
         assert_eq!(client.get(format!("{url}/subagents")).bearer_auth(TOKEN).send().await?.status(), reqwest::StatusCode::NOT_FOUND);
 

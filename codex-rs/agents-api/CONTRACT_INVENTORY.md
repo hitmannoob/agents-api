@@ -178,5 +178,7 @@ Amendments under the same `openai==3.17.0` pin:
 - 2026-10-12: input waiting for a self-hosted executor queues a turn whose
   service-chosen ID the started Codex turn keeps; messages between agents are
   `agent_message` items from Codex's experimental raw events, including
-  encrypted task text. TRN-001 and ITM-001 moved to verified; agent messages
-  after a resume on a new worker connection are an engine limit (additive).
+  encrypted task text. TRN-001 and ITM-001 moved to verified (additive).
+- 2026-10-12: Codex's app-server gains `thread/resume.experimentalRawEvents`,
+  so agent messages keep being recorded after a session resumes on a new
+  worker connection (additive).

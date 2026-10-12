@@ -583,7 +583,10 @@ async fn publish_item(
     // Inputs to an agent, including messages from other agents, are not
     // model output, so they are not streamed as output items.
     let input = item["role"] == "user"
-        || matches!(item["type"].as_str(), Some("function_call_output" | "agent_message"));
+        || matches!(
+            item["type"].as_str(),
+            Some("function_call_output" | "agent_message")
+        );
     let output_index = if input {
         None
     } else {

@@ -362,9 +362,9 @@ root agent can spawn subagents, each a Codex child thread, up to
   Payload:` envelope and becomes `output_text`; encrypted task text passes
   through as `encrypted_content`. A result delivered while its recipient is
   idle is recorded in the recipient's next turn. Like user messages, these are
-  inputs, so they are not streamed as output items. `thread/resume` has no
-  raw-event opt-in, so after a session resumes on a new worker connection its
-  messages are no longer recorded.
+  inputs, so they are not streamed as output items. Resuming a session (for
+  example after a restart) opts in again through `thread/resume`, so messages
+  keep being recorded.
 - **Delegation quality depends on the model:** see G12 in GOALS.md. With models
   Codex does not treat as V2, subagents cannot delegate and may announce a
   spawn instead of doing their task.

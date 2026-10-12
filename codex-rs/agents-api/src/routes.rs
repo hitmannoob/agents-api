@@ -485,6 +485,9 @@ pub(crate) async fn start_turn(
                     "thread/resume",
                     json!({"threadId": thread_id, "excludeTurns": true, "config": config,
                         "approvalPolicy": "never", "sandbox": sandbox,
+                        // As at thread/start, so messages between agents keep
+                        // arriving after a resume.
+                        "experimentalRawEvents": session.agent.config.multi_agent.as_ref().is_some_and(|settings| settings.enabled),
                         "serviceTier": null,
                         "model": session.agent.config.model, "developerInstructions": session.agent.config.instructions.as_deref().unwrap_or_default()}),
                 )
