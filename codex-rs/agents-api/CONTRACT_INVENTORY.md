@@ -1,6 +1,6 @@
 # Agents API contract inventory
 
-Updated: 2026-09-22.
+Updated: 2026-10-12 (contract review date 2026-09-22).
 
 This is the pinned G00 parity denominator for this service. The machine-readable
 inventory is [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json). It records every
@@ -49,9 +49,13 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count is 39 partial and 28 missing. No operation is called
-implemented or verified yet because the existing tests cover only constrained
-variants. A partial operation does not count as completed parity.
+The current count (2026-10-12) is 10 verified, 2 implemented, 39 partial, and
+16 missing. The 16 missing are 11 Skills operations, which are in scope, and the
+5 environment template operations, which are out of scope since 2026-10-06.
+Verified: ART-001..004, SUB-002..006, and TRN-002. Implemented, awaiting
+cross-OS evidence: ENV-002..003. Most remaining partial rows list project scope
+as a gap. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
+per-area summary.
 
 ## What is pinned
 

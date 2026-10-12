@@ -6,8 +6,8 @@ an implementation prototype, not the target public contract.
 
 Baseline reviewed: 2026-09-22, official Python SDK `openai==3.17.0` and the
 official Agents API guides. The [contract inventory](CONTRACT_INVENTORY.md)
-establishes a 59-operation denominator: 43 Agents API operations and 16 Files
-and Skills operations required by documented workflows. The text/function
+establishes a 67-operation denominator: 43 Agents API operations and 24 Files,
+Skills, and Webhooks operations required by documented workflows. The text/function
 session slice has an executable SDK contract check (`tests/sdk_lifecycle.py`)
 with strict response validation; `tests/sdk_inventory.py` detects drift in the
 pinned SDK resource surface.
@@ -30,23 +30,65 @@ in [GOALS.md](GOALS.md).
 - Do not infer private OpenAI implementation details or promise stronger recovery
   guarantees than the documented contract.
 
-## Initial gap inventory
+## Current status
 
-| Area | Documented target | Current implementation / gap |
-| --- | --- | --- |
-| Saved agents | Create, retrieve, list, update, delete; full configuration | CRUD and creation-order pagination implemented; SDK configuration round trips covered; project scope and prototype limits remain |
-| Configuration | Inline agents or saved IDs; session overrides; omitted/null/object replacement semantics; allowed session setting updates | Saved/inline overrides, replacement/null resets, deletion-independent snapshots, cold resume, and explicit default tier execution covered; session model/effort/tier updates apply to the next turn |
-| Sessions | Create with optional streaming/initial input as permitted; retrieve/list/update/delete; runtime status and required actions | Official create/retrieve/list/update/delete routes, initial input/streaming and normalized lifecycle; deletion refuses running work and cleans up the owned thread durably; self-hosted ownership remains |
-| Input | Message, cancel, and tool-result events through the session events endpoint | Unified events endpoint implemented with validated ordered batches, text and data-URL image messages, text function results/errors, and session-scoped `Idempotency-Key` replay; function content arrays and remote image URLs remain unsupported |
-| Turns and items | List/retrieve turn outcomes; saved item history with pagination and turn filtering | Durable normalized item and turn records with after/order/limit and turn filtering; turn errors use the documented codes and best-effort usage; tool, environment, and subagent item variants arrive with G07–G09 |
-| Streaming | Agent/session/turn/item events with stable IDs and text updates | Lifecycle, item, text/reasoning delta, content-part, and `error` events validated against the pinned SDK union; environment and subagent events arrive with G08–G09 |
-| Functions | Tagged function tools, supported output content, separate error field, deferred loading and tool search | Tagged functions and SDK result/error flow; structured content, deferred tools and official size limits missing |
-| MCP and built-ins | API-selected tools/transports/controls; capability-specific behavior | Public MCP/web/search configurations round trip; execution gated; prototype server-side MCP references and filters remain |
-| Harness features | Configurable multi-agent execution, context compaction, programmatic tool calling, skills/plugins | Codex has underlying machinery; API integration and parity tests missing |
-| Environments | None, service-hosted, self-hosted executor; connection actions and lifecycle | None or read-only local workspace |
-| Files/artifacts | Documented upload, publication, retrieval and cleanup behavior | No public implementation |
-| Webhooks, credentials, usage | Documented webhook, vault and observability operations | Vaults and credentials with encrypted secrets authenticate HTTP MCP; webhook endpoints with signed, retried, restart-safe session event delivery; OTLP session trace export; correlated logs, request IDs, and OTLP metrics (G11); environment-variable credentials and OAuth refresh missing |
-| Service operation | Service owns the harness and saved progress | API-owned local worker startup, initialization deadline and shutdown; optional external worker; automatic restart and crash reconciliation still missing |
+Updated: 2026-10-12. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
+per-operation detail lives in its `remaining` fields.
+
+**Scorecard:** 67 operations: 10 `verified`, 2 `implemented`, 39 `partial`,
+16 `missing`. Of the 16 missing, 5 (environment templates) are outside the
+parity target by decision (2026-10-06), so **11 missing operations (Skills)
+remain in scope**. Of 18 behavior rows, 16 are partial and 2 are missing
+(BEH-011 is out of scope; BEH-018, provider interoperability, is open), and
+3 are verified (BEH-006, BEH-012, BEH-015).
+
+The 2026-10-12 promotion pass, backed by a full crate run (59/59), moved rows
+whose only gaps were out of scope or intended behavior. The remaining partial
+rows are held back for reasons that repeat: there is no project-scoped identity (the
+service has a single operator-token tenant), evidence comes from mock
+providers plus OpenRouter runs only, and there is no Windows evidence. See
+[Path to `verified`](#path-to-verified).
+
+| Area | Ops | Status | Works today | Remaining gap |
+| --- | --- | --- | --- | --- |
+| Saved agents | AGT-001..005 | 5 partial | Full CRUD, creation-order pagination, every pinned configuration family round trips with omit/null/replace semantics, snapshots survive agent deletion and cold resume | Project scope; prototype limits; built-in capability execution (G07/G08) |
+| Sessions | SES-001..005 | 5 partial | CRUD, initial input and streaming, `none` and `self_hosted` environments, `vault_ids`, next-turn model/effort/tier updates, deletion with a durable cleanup queue | Project scope; complete configuration; environment actions in the session object; provider-specific model compatibility |
+| Input events | EVT-001 | partial | Validated ordered batches, text and data-URL images, string and content-part function results (10,000 bytes), session-scoped `Idempotency-Key` replay | Remote image URLs; batching and idempotency are local decisions with no upstream contract |
+| Streaming | EVT-002 | partial | Lifecycle, item, text and reasoning deltas, content parts, `error`, subagent, environment, and command-output events | Codex sends no command-output deltas for remote commands (output arrives on the item); no replay, by contract |
+| Items and turns | ITM-001, TRN-001..002 | 1 verified (TRN-002), 2 partial | Message, reasoning, function, MCP, and subagent create/send/interrupt items; turn usage, error codes, and pagination | Web search, command, wait/close/resume subagent, and `agent_message` items; `queued` turn state for worker-started turns |
+| Subagents | SUB-001..006 | 5 verified, 1 partial (SUB-001) | Resources, paginated items and turns per subagent, cancellation, restart continuity | `instructions` is always null and `closed` never occurs (Codex V2 reports neither) |
+| Functions | (in EVT/BEH-007) | partial | Tagged functions, result/error flow, content parts, duplicate and race handling | Deferred functions and tool search (G06) |
+| MCP and built-ins | (BEH-008) | partial | HTTP MCP with vault credentials and tool/resource selection | Inline MCP authorization, request metadata, web search, per-capability built-in slices (G07), programmatic tool calling (G08) |
+| Harness features | (BEH-009) | partial | Multi-agent delegation | Compaction controls, programmatic tool calling, and skills/plugins selection (G08) |
+| Environments | ENV-001..003 | 2 implemented, 1 partial (ENV-001) | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected` status, writing and listing environment files, executor loss handled apart from worker loss | `expired`/`failed` statuses (ENV-001); one real-provider run; Windows and cross-OS execution |
+| Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
+| Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |
+| Files | FIL-001..005 | 5 partial | Streaming multipart upload (50 MiB) with SHA-256, six purposes, `expires_after`, integrity-checked download | Single tenant; no upload parts, batch processing, or range requests; `status` is always `processed` |
+| Skills | SKL-001..006, SKV-001..005 | **11 missing** | Nothing | Whole resource: ZIP upload, metadata, versions, archive download, and `skill_reference` wiring into sessions |
+| Vaults and credentials | VLT-001..004, CRD-001..005 | 9 partial | Encrypted CRUD, rotation without ID changes, snapshots held by running sessions, HTTP MCP authentication | `environment_variable` credentials; OAuth refresh (rejected); project scope; external key management |
+| Webhooks | WHK-001..008 | 8 partial | Endpoint CRUD, signed and retried deliveries that survive restarts, secret rotation with a 24h overlap, test delivery | Only the five `agent.session.*` event types; environment data in events; ordering after a failed attempt |
+| Traces | TRC-001 | partial | OTLP JSON export, including `execute_tool` spans | No reference schema or SDK method exists; per-response model and subagent instructions are not recorded |
+| Service operation | (BEH-017) | partial | Managed worker supervision with backoff, reconnect fencing, turn/function reconciliation, Unix orphan reclaim, data-directory lock, migrations, Modal deployment | Windows orphan containment; the spawn-to-record window; durable identity and list indexes (G02) |
+
+### Path to `verified`
+
+Ordered by the number of rows each item unblocks:
+
+1. **Projects, API keys, and permissions ([G13](GOALS.md#g13--projects-api-keys-and-permissions)).**
+   This is the blocker cited by nearly every agent, session, vault, file, and
+   webhook row. Decided 2026-10-12: the service is multi-project (keys belong
+   to projects; other projects' resources return 404; missing permissions
+   return 403), with CLI-managed projects and keys for now.
+2. **Second promotion pass.** The first pass (2026-10-12) promoted artifacts,
+   subagent lists, and turn lists. Once item 1 is settled, files (FIL-002..005),
+   webhooks, vaults, and the agent/session CRUD rows are the next candidates.
+3. **Skills API (11 ops).** This is the largest in-scope block that is still
+   missing, and G08 skills/plugins selection depends on it.
+4. **Capability gaps:** deferred functions and tool search (G06), built-in
+   capability slices (G07), compaction and programmatic tool calling (G08).
+5. **Platform evidence (G12):** Windows and cross-OS worker/executor runs, SDK
+   scenarios for every implemented resource, and
+   provider interoperability (BEH-018).
 
 ## Implementation sequence
 

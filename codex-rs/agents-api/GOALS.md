@@ -1,6 +1,6 @@
 # Remaining Agents API parity work
 
-Updated: 2026-09-22.
+Updated: 2026-10-12.
 
 ## Objective and scope
 
@@ -61,18 +61,13 @@ These capabilities already exist; extend them rather than rebuilding them:
   its related records in one transaction and broadcasts events only after commit,
   so a mid-handler failure cannot leave contradictory records or premature events.
 
-Latest verification (2026-09-27): 24/24 tests passed, none skipped, using
-`CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CODEX_AGENTS_API_SDK_PYTHON=/private/tmp/codex-g03-sdk/bin/python just test -p codex-agents-api --run-ignored all`.
-This includes strict `openai==3.17.0` inventory/lifecycle checks, saved-agent
-configuration coverage, provider request captures before/after cold resume,
-and existing recovery/ownership tests. `just test -p codex-features` passed
-42/42, and the focused core integration test
-`default_service_tier_override_is_omitted_from_http_turn` passed. The complete
-core crate run had failures in connector, MCP, and executor tests; those failures
-were not resolved in this G03 change. Execution was on macOS with mock providers;
-Windows and real-provider acceptance remain unverified. Scoped
-`just fix -p codex-features -p codex-core -p codex-agents-api`, `just fmt`, and
-`git diff --check` passed.
+Latest verification (2026-10-06, recorded under G12): the inventory sweep ties
+every partial row to existing tests, and `tests/real_provider.py` passed against
+`openai/gpt-5-mini` through OpenRouter. A 15-model OpenRouter sweep passed every
+check that does not involve subagents. The Modal deployment and
+`deploy/modal/harness_evals.py` passed 8/8 coding tasks on `gpt-5-mini`, both on
+Modal and locally (2026-10-07). All runs were on macOS. Windows, cross-OS, and
+OpenAI-API (not OpenRouter) evidence remain open.
 
 Current boundaries:
 
@@ -82,15 +77,21 @@ Current boundaries:
   an API-process crash is authenticated and reclaimed on the next Unix startup.
   Windows orphan containment and the brief spawn-to-record window are not yet
   covered.
-- Official-style sessions currently accept environment `none`. The original
-  prototype also supports a read-only local workspace; that is not managed
-  sandbox provisioning or self-hosted environment parity.
+- Sessions accept environment `none` or `self_hosted` (executor attachment
+  through the rendezvous relay). `openai_hosted` and environment templates are
+  out of scope by decision (2026-10-06).
+- The service has a single operator-token tenant. Project-scoped ownership, the
+  gap most often cited by inventory rows, is not modeled yet; G13 adds it.
 - Event streams are live-only. Recovery reads saved state/history; it must not
   promise replay of missed events.
 - Persisted function records cannot recreate a lost JSON-RPC request waiter.
   Calls interrupted by backend loss become unresolved/unavailable.
-- Input/configuration/function-output limits remain prototype limits, including
-  the 1,024-byte serialized function-output limit.
+- Function results are limited to 10,000 text bytes, a local decision because
+  the public docs publish no limit.
+- Missing outright: the Skills API, deferred functions and tool search,
+  built-in capability execution, compaction controls, programmatic tool
+  calling, skills/plugins selection, `environment_variable` credentials, and
+  OAuth refresh.
 
 ## Execution order and tracking
 
@@ -101,18 +102,19 @@ fixture design may start earlier.
 | ID | Goal | Dependencies | Suggested landing units |
 | --- | --- | --- | --- |
 | G00 | Complete and pin the contract inventory (complete) | None | Inventory, fixtures, coverage mapping |
-| G01 | Keep the service available through worker failure | G00 recovery/error contract | Replaceable connection, supervisor, reconciliation, process-crash handling |
-| G02 | Version persistence and define ownership | Existing store; coordinate with G01 | Migrations, durable identity, transactional updates |
+| G01 | Keep the service available through worker failure (complete locally; Windows orphan containment open) | G00 recovery/error contract | Replaceable connection, supervisor, reconciliation, process-crash handling |
+| G02 | Version persistence and define ownership (open: durable identity/project scope, list indexes) | Existing store; coordinate with G01 | Migrations, durable identity, transactional updates |
 | G03 | Complete saved agents and configuration (complete locally) | G00, G02 | List, update/delete, field families |
 | G04 | Complete sessions and input semantics (complete locally) | G00, G01, G02 | List, update/delete, input variants, idempotency |
 | G05 | Complete events, items, turns, and usage (complete locally) | G00, G02 | Text deltas, item families, transitions, usage |
-| G06 | Complete function-tool behavior (complete locally except deferred functions) | G00, G04, G05 | Content/limits, deferred tools, failure cases |
-| G07 | Complete MCP and built-in controls (HTTP MCP complete locally) | G00, G03, G05 | MCP, built-in capabilities, isolation |
-| G08 | Expose remaining harness capabilities (subagents complete locally) | G00, G03, G05, G07 | Delegation, compaction, programmatic calls, skills/plugins |
-| G09 | Implement environment lifecycle | G00, G01, G02 | Self-hosted attachment, managed provisioning, lifecycle recovery |
-| G10 | Implement files and artifacts | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
-| G11 | Implement credentials and service integrations | G00, G02, G05 | Vaults, webhooks, observability |
-| G12 | Prove end-to-end parity | All applicable goals | Contract suite, real providers, platforms, failure matrix |
+| G06 | Complete function-tool behavior (complete locally except deferred functions/tool search) | G00, G04, G05 | Content/limits, deferred tools, failure cases |
+| G07 | Complete MCP and built-in controls (HTTP MCP complete locally; built-in capabilities open) | G00, G03, G05 | MCP, built-in capabilities, isolation |
+| G08 | Expose remaining harness capabilities (subagents complete locally; compaction, programmatic calls, skills/plugins open) | G00, G03, G05, G07 | Delegation, compaction, programmatic calls, skills/plugins |
+| G09 | Implement environment lifecycle (self-hosted complete locally; managed out of scope) | G00, G01, G02 | Self-hosted attachment, managed provisioning, lifecycle recovery |
+| G10 | Implement files and artifacts (complete locally for self-hosted; Skills API missing) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
+| G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
+| G12 | Prove end-to-end parity (open: SDK scenarios for every resource, Windows/cross-OS) | All applicable goals | Contract suite, real providers, platforms, failure matrix |
+| G13 | Projects, API keys, and permissions (open; decided 2026-10-12) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
 
 Ship bounded changes within each goal. Do not combine a supervisor rewrite,
 public-schema expansion, and sandbox provider integration into one change.
@@ -287,6 +289,7 @@ Starting points: `src/store.rs`, `src/records.rs`, and `src/resources.rs`.
   Cover upgrades from the current SQLite schema and defaults for old JSON records.
 - [ ] Define durable resource identity, timestamps, lifecycle/tombstone state,
   backend-generation bindings, and any principal scope required by the contract.
+  Principal (project) scope is now G13.
 - [x] Use transactions for related public records and action state transitions.
   Persist changes before broadcasting their corresponding events.
 - [x] Define ownership for one API data directory, one worker home, and external
@@ -1705,35 +1708,132 @@ acceptance tests, remaining unsupported capabilities are zero within the declare
 parity target, and real-provider/platform gaps are closed. Mock-only or partial
 SDK success is not full parity.
 
+## G13 — Projects, API keys, and permissions
+
+**Outcome:** one deployment serves many projects with the isolation the
+official API documents. An API key belongs to exactly one project, a project
+sees only its own resources, and a key does only what its permissions allow.
+
+Decision (2026-10-12): the service is an open-source copy of the Agents API,
+so it is multi-project. A single tenant per deployment is not the parity
+target. Projects and keys are managed with CLI commands for now; an
+OpenAI-compatible Admin API (`/organization/projects`, project API keys) is
+a separate contract and a possible later goal, not part of this one.
+
+Contract evidence (reviewed 2026-10-12):
+- Pinned SDK docstrings: an agent is "a reusable agent scoped to the caller's
+  project"; agent listing returns "reusable agents in the current project";
+  vaults are created "for the current project"; webhook endpoints belong to
+  "the authenticated project"; environment templates are project-scoped.
+- [Quickstart](https://developers.openai.com/api/docs/guides/agents-api/quickstart):
+  an application API key is created "in your OpenAI Platform project" and is
+  granted `api.agents.read`, `api.agents.write`, and `api.responses.write`.
+- [Vaults](https://developers.openai.com/api/docs/guides/agents-api/tools/vaults):
+  restricted keys need `api.vaults.read` to list and retrieve, and
+  `api.vaults.write` to create, update, or delete.
+- [Errors](https://developers.openai.com/api/docs/guides/agents-api/errors):
+  `401 unauthorized` / `403 forbidden` when "authentication failed or the
+  caller lacks access"; `404` when "the resource or model isn't available to
+  this request. Check the ID, model, project, and whether the resource was
+  deleted."
+- [RBAC](https://developers.openai.com/api/docs/guides/rbac): keys are scoped
+  to projects, and files and webhooks have their own read/write permissions.
+- No request carries a project ID: the key implies it.
+
+Design:
+- **Projects and keys.** New `projects` and `api_keys` tables. Keys are stored
+  only as SHA-256 hashes, with a display prefix, permissions, creation time,
+  and revocation state. The secret is shown once, at creation.
+- **Auth.** Middleware resolves the bearer key to (project, permissions) and
+  replaces the single-token check in `src/routes.rs`. No key or an unknown or
+  revoked key → 401; a key missing the operation's permission → 403; a
+  resource owned by another project → 404, indistinguishable from a missing ID.
+- **Ownership roots.** Agents, sessions, vaults, files, webhook endpoints, and
+  environments get a `project_id`. Turns, items, subagents, artifacts,
+  credentials, idempotency keys, usage, and traces inherit through their
+  session or vault, so access is checked once on the root ID.
+- **Cross-resource references** must stay inside one project: a session's
+  `agent_id`, `vault_ids`, `environment_id`, and `file_id` sources all resolve
+  in the caller's project, and other projects' IDs read as not found.
+- **Lists** filter by project, using an index on project, creation time, and
+  ID. This also closes G02's open indexes item.
+- **Webhooks.** A session's events are delivered only to its own project's
+  endpoints. This is the most likely cross-project leak, so it gets a
+  dedicated test.
+- **Environments.** Executors register against a project, and sessions
+  attach only that project's environments.
+- **Bootstrap and migration.** `CODEX_AGENTS_API_TOKEN` keeps working as a
+  full-permission key of a default project, and the migration assigns every
+  existing row to that project. Current deployments, the Modal setup, and the
+  test suite need no changes.
+- **Shared worker (known limit).** One Codex worker still serves every
+  project. Sessions are isolated at the thread level, but the worker home and
+  model-provider key are shared. Per-project provider keys, rate limits, and
+  spend limits are not part of the API contract and stay out of this goal.
+
+Permissions (initial mapping; confirm each against the guides while
+implementing):
+
+| Permission | Operations |
+| --- | --- |
+| `api.agents.read` | Retrieve/list agents, sessions, turns, items, subagents, artifacts, environments, environment files, traces; open event streams |
+| `api.agents.write` | Create/update/delete agents and sessions, post session events, write environment files, delete artifacts |
+| `api.responses.write` | Required with `api.agents.write` for operations that run model turns (session creation with input, session events) |
+| `api.vaults.read` / `api.vaults.write` | Vault and credential reads / writes |
+| Files read / write | Files API reads / writes |
+| Webhooks read / write | Webhook endpoint reads / writes, secret rotation, and test deliveries |
+
+Checklist:
+
+- [ ] **Slice 1: projects, keys, and auth.** Migration for `projects` and
+  `api_keys`; key-resolving middleware with 401/403; default-project
+  bootstrap from `CODEX_AGENTS_API_TOKEN`; CLI subcommands to create and list
+  projects and to create, list, and revoke keys with permissions. Request
+  context carries the project ID for later slices.
+- [ ] **Slice 2: agents and sessions.** `project_id` on agents and sessions,
+  every query and list scoped, inherited checks for turns, items, subagents,
+  artifacts, events, and traces. Add a two-project isolation sweep driven by
+  `CONTRACT_INVENTORY.json`, like the existing error-shape sweep: project B
+  gets 404 on every project-A ID and never sees A's rows in a list.
+- [ ] **Slice 3: vaults, files, and environments.** Scope vaults, credentials,
+  files, environments, and the executor registry; reject cross-project
+  `vault_ids`, `file_id`, and `environment_id`. Extend the isolation sweep.
+- [ ] **Slice 4: webhooks.** Scope endpoints, and route deliveries only to the
+  session's project, including restart-safe queued deliveries.
+- [ ] **Slice 5: permission sweep.** For every inventoried operation, a key
+  without the required permission gets 403 in the public error shape, and a
+  key with only that permission succeeds.
+- [ ] **Slice 6: inventory.** Record the decision as an amendment, update
+  BEH-001 and BEH-003, remove "project scope" from each row's remaining gap
+  where it was the only blocker, and run the second promotion pass.
+
+Acceptance: the isolation and permission sweeps cover every implemented
+operation; pre-G13 data directories migrate into the default project with
+no loss; the existing suite passes unchanged with the bootstrap token; and
+the README documents the CLI and the shared-worker limit.
+
 ## Immediate next implementation slices
 
-1. **G00 recovery subset:** pin failure/status and pending-function semantics
-   needed for supervision; continue the broader inventory alongside later work.
-2. **G01 connection ownership (complete 2026-09-23):** HTTP/store state stays
-   alive when the backend disconnects; generations are fenced; disconnect and
-   reconnect tests cover replacement and worker SIGKILL.
-3. **G01 worker replacement (complete 2026-09-23):** the CLI supervisor restarts
-   owned workers with bounded backoff and initialization and reattaches via
-   `AgentsApi::reconnect`; externally owned workers are left untouched.
-4. **G02 migrations (complete 2026-09-23):** ordered, transactional sqlx
-   migrations with in-place adoption of the pre-migration database.
-5. **G01 turn + function reconciliation (complete 2026-09-24):** after
-   reconnect, turns and tool-result deliveries failed only by a connection loss
-   are recovered from authoritative rollout history; interrupted work is not
-   falsely recovered and lost waiters are not re-driven. No schema was needed.
-6. **G01 API-crash orphan reclaim (complete 2026-09-24, Unix):** an orphaned
-   worker is authenticated by PID plus start time and reclaimed before a
-   replacement spawns. Windows containment remains a follow-up.
-7. **G02 data-directory ownership + transactional records (complete 2026-09-24):**
-   `Store::open` holds a data-directory lock for its lifetime, and each public-
-   record notification handler now writes atomically and emits after commit.
-   Durable-identity columns and list indexes stay deferred until their G03/G04
-   consumers exist (they land as migration `0002` with those endpoints), to
-   avoid dead schema.
-8. **G03/G04 resource completion:** complete saved-agent and session CRUD in
-   independently reviewable changes, then input/idempotency semantics.
-9. **G05/G06 richer execution contract:** finish deltas/items/usage and function
-   content/limits before layering on additional capabilities and environments.
+Updated 2026-10-12. G00–G05 slices and the G01/G02 recovery slices that
+previously led this list are complete; their history is in the goal sections
+above and in git.
+
+1. **Projects, API keys, and permissions (G13).** Decided 2026-10-12: the
+   service is multi-project, managed by CLI for now. Most partial rows cite
+   project scope, so this gates the next promotion pass. Start with slice 1
+   (projects, keys, and auth).
+2. **Second inventory promotion pass (G12, G13 slice 6).** The first pass (2026-10-12)
+   promoted 10 operations and 3 behaviors to `verified` and ENV-002..003 to
+   `implemented`. After item 1, re-evaluate files, webhooks, vaults, and the
+   agent/session CRUD rows.
+3. **Skills API (SKL-001..006, SKV-001..005).** This is the largest in-scope
+   block still missing, and G08 skills/plugins selection depends on it.
+4. **Deferred functions and tool search (G06), then built-in capability
+   slices (G07).** Both need provider/model support reported by the worker.
+5. **G08 compaction controls and programmatic tool calling.**
+6. **G12 evidence gaps.** SDK scenarios for every implemented resource
+   a Windows/cross-OS worker and executor run, and
+   provider interoperability (BEH-018).
 
 ## How to maintain this plan
 
