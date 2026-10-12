@@ -6,6 +6,7 @@ use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelAccessPrograms as CoreModelAccessPrograms;
 use codex_protocol::openai_models::ModelAvailabilityNux as CoreModelAvailabilityNux;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ToolMode as CoreToolMode;
 use codex_protocol::openai_models::default_input_modalities;
 use codex_protocol::protocol::ModelRerouteReason as CoreModelRerouteReason;
 use codex_protocol::protocol::ModelVerification as CoreModelVerification;
@@ -32,6 +33,16 @@ v2_enum_from_core!(
         Disabled,
         V1,
         V2
+    }
+);
+
+v2_enum_from_core!(
+    /// How a model calls tools: directly, from model-written code as well, or
+    /// only from model-written code.
+    pub enum ToolMode from CoreToolMode {
+        Direct,
+        CodeMode,
+        CodeModeOnly
     }
 );
 
@@ -137,6 +148,10 @@ pub struct Model {
     /// are not offered to the model.
     #[serde(default)]
     pub supports_search_tool: bool,
+    /// The tool mode the model requires, when its catalog entry pins one. It takes
+    /// precedence over code-mode configuration.
+    #[serde(default)]
+    pub tool_mode: Option<ToolMode>,
     /// Multi-agent runtime declared by this model, when available.
     pub multi_agent_version: Option<MultiAgentVersion>,
     /// Deprecated: use `serviceTiers` instead.

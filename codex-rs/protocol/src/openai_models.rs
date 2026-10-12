@@ -256,6 +256,9 @@ pub struct ModelPreset {
     /// are not offered to the model.
     #[serde(default)]
     pub supports_search_tool: bool,
+    /// The tool mode the model requires, when its catalog entry pins one.
+    #[serde(default)]
+    pub tool_mode: Option<ToolMode>,
     /// Deprecated: use `service_tiers` instead.
     #[serde(default)]
     pub additional_speed_tiers: Vec<String>,
@@ -955,6 +958,7 @@ impl From<ModelInfo> for ModelPreset {
             supported_reasoning_efforts: info.supported_reasoning_levels.clone(),
             supports_personality: false,
             supports_search_tool: info.supports_search_tool,
+            tool_mode: info.tool_mode,
             additional_speed_tiers: info.additional_speed_tiers,
             service_tiers: info.service_tiers,
             default_service_tier: info.default_service_tier,

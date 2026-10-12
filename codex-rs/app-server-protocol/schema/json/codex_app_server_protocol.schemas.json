@@ -15645,6 +15645,18 @@
             "description": "Whether the model can search deferred tools (`tool_search`). Without it, deferred tools are not offered to the model.",
             "type": "boolean"
           },
+          "toolMode": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ToolMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The tool mode the model requires, when its catalog entry pins one. It takes precedence over code-mode configuration."
+          },
           "upgrade": {
             "type": [
               "string",
@@ -25585,6 +25597,15 @@
             "type": "string"
           }
         ]
+      },
+      "ToolMode": {
+        "description": "How a model calls tools: directly, from model-written code as well, or only from model-written code.",
+        "enum": [
+          "direct",
+          "codeMode",
+          "codeModeOnly"
+        ],
+        "type": "string"
       },
       "ToolsV2": {
         "properties": {

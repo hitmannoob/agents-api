@@ -40,6 +40,7 @@ fn model_from_preset(preset: ModelPreset) -> Model {
         input_modalities: preset.input_modalities,
         supports_personality: false,
         supports_search_tool: preset.supports_search_tool,
+        tool_mode: preset.tool_mode.map(Into::into),
         multi_agent_version: preset.multi_agent_version.map(Into::into),
         additional_speed_tiers: preset.additional_speed_tiers,
         service_tiers: preset

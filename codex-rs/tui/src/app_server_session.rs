@@ -1902,6 +1902,9 @@ pub(crate) fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
             .collect(),
         supports_personality: false,
         supports_search_tool: model.supports_search_tool,
+        tool_mode: model
+            .tool_mode
+            .map(codex_app_server_protocol::ToolMode::to_core),
         additional_speed_tiers: model.additional_speed_tiers,
         service_tiers: model
             .service_tiers
@@ -2761,6 +2764,7 @@ mod tests {
             input_modalities: Vec::new(),
             supports_personality: false,
             supports_search_tool: false,
+            tool_mode: None,
             multi_agent_version: None,
             additional_speed_tiers: Vec::new(),
             service_tiers: Vec::new(),

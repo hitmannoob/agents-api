@@ -73,7 +73,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         node_repl_disabled: false,
         auto_review_model_override: None,
         model_specialty: None,
-        tool_mode: None,
+        tool_mode: preset.tool_mode,
         multi_agent_version: preset.multi_agent_version,
         multi_agent_reasoning_effort: None,
     }

@@ -9,6 +9,7 @@ import type { ModelServiceTier } from "./ModelServiceTier";
 import type { ModelUpgradeInfo } from "./ModelUpgradeInfo";
 import type { MultiAgentVersion } from "./MultiAgentVersion";
 import type { ReasoningEffortOption } from "./ReasoningEffortOption";
+import type { ToolMode } from "./ToolMode";
 
 export type Model = { id: string, model: string, upgrade: string | null, upgradeInfo: ModelUpgradeInfo | null, availabilityNux: ModelAvailabilityNux | null, displayName: string, description: string, modelSpecialty: string | null, hidden: boolean, supportedReasoningEfforts: Array<ReasoningEffortOption>, defaultReasoningEffort: ReasoningEffort, inputModalities: Array<InputModality>,
 /**
@@ -20,6 +21,11 @@ supportsPersonality: boolean,
  * are not offered to the model.
  */
 supportsSearchTool: boolean,
+/**
+ * The tool mode the model requires, when its catalog entry pins one. It takes
+ * precedence over code-mode configuration.
+ */
+toolMode: ToolMode | null,
 /**
  * Multi-agent runtime declared by this model, when available.
  */

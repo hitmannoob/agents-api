@@ -6377,6 +6377,12 @@ class ToolExposureSurface(Enum):
     direct = "direct"
 
 
+class ToolMode(Enum):
+    direct = "direct"
+    code_mode = "codeMode"
+    code_mode_only = "codeModeOnly"
+
+
 class TurnDiffUpdatedNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -8872,6 +8878,13 @@ class Model(BaseModel):
             description="Whether the model can search deferred tools (`tool_search`). Without it, deferred tools are not offered to the model.",
         ),
     ] = False
+    tool_mode: Annotated[
+        ToolMode | None,
+        Field(
+            alias="toolMode",
+            description="The tool mode the model requires, when its catalog entry pins one. It takes precedence over code-mode configuration.",
+        ),
+    ] = None
     upgrade: str | None = None
     upgrade_info: Annotated[ModelUpgradeInfo | None, Field(alias="upgradeInfo")] = None
 
