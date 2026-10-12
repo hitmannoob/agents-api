@@ -128,6 +128,11 @@ pub(crate) async fn foreign(
             *id,
             "vault not found",
         ),
+        ["webhook_endpoints", id, ..] => (
+            "SELECT project_id FROM webhook_endpoints WHERE id = ?",
+            *id,
+            "webhook endpoint not found",
+        ),
         ["files", id, ..] => (
             "SELECT project_id FROM files WHERE id = ?",
             *id,

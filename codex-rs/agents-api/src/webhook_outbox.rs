@@ -28,14 +28,17 @@ const CONCURRENT_ENDPOINTS: usize = 8;
 /// How long finished deliveries are kept.
 const RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 
-/// Queue `event_type` for every endpoint subscribed to it, inside the
-/// transaction that makes the change it reports.
+/// Queue `event_type` about `session_id` for every endpoint in the session's
+/// project subscribed to it, inside the transaction that makes the change it
+/// reports.
 pub(crate) async fn enqueue(
     connection: &mut sqlx::SqliteConnection,
+    session_id: &str,
     event_type: &str,
     data: Value,
 ) -> anyhow::Result<()> {
-    let endpoints: Vec<String> = sqlx::query_scalar("SELECT id FROM webhook_endpoints WHERE EXISTS (SELECT 1 FROM json_each(data, '$.event_types') WHERE value = ?) ORDER BY created_seq")
+    let endpoints: Vec<String> = sqlx::query_scalar("SELECT id FROM webhook_endpoints WHERE project_id = (SELECT project_id FROM public_sessions WHERE id = ?) AND EXISTS (SELECT 1 FROM json_each(data, '$.event_types') WHERE value = ?) ORDER BY created_seq")
+        .bind(session_id)
         .bind(event_type)
         .fetch_all(&mut *connection)
         .await?;
@@ -67,6 +70,7 @@ pub(crate) async fn session_status(
         "requires_action" => {
             enqueue(
                 connection,
+                session_id,
                 "agent.session.action_required",
                 json!({"id":session_id,"required_action":{"type":"function_call"}}),
             )
@@ -75,6 +79,7 @@ pub(crate) async fn session_status(
         "in_progress" | "idle" | "failed" => {
             enqueue(
                 connection,
+                session_id,
                 &format!("agent.session.{status}"),
                 json!({"id":session_id}),
             )

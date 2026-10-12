@@ -329,3 +329,57 @@ async fn session_events_are_queued_retried_and_survive_restart() -> anyhow::Resu
         Ok::<_, anyhow::Error>(())
     }).await?
 }
+
+/// Each project's endpoints receive events only about that project's
+/// sessions, and another project's endpoints read as missing and stay out of
+/// its list.
+#[tokio::test(flavor = "multi_thread")]
+async fn endpoints_receive_only_their_projects_session_events() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 60), async {
+        let inventory: Value = serde_json::from_str(&std::fs::read_to_string(codex_utils_cargo_bin::find_resource!("CONTRACT_INVENTORY.json")?)?)?;
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let provider = create_mock_responses_server_repeating_assistant("done").await;
+        MockResponsesConfig::new(&provider.uri()).write(home.path())?;
+        let directory = AbsolutePathBuf::from_absolute_path(data.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, directory.clone(), TOKEN.into()).await?;
+        api.configure_vault(PASSPHRASE.into()).await?;
+        api.allow_webhook_hosts(["127.0.0.1".to_string()]);
+        let (base, _server) = capabilities::serve(&api).await?;
+        let (hooks, received, _receiver_task) = receiver().await?;
+        let admin = codex_agents_api::projects::Admin::open(directory).await?;
+        let other = admin.create_project("Other").await?;
+        let all: Vec<String> = codex_agents_api::projects::PERMISSIONS.iter().map(|&permission| permission.to_owned()).collect();
+        let outsider = admin.create_key(&other.id, "", &all).await?.value;
+        let client = reqwest::Client::new();
+        let post = |secret: &str, path: &str, body: Value| {
+            let request = client.post(format!("{base}{path}")).bearer_auth(secret).header("OpenAI-Beta", "agents=v1").json(&body);
+            async move { anyhow::Ok(request.send().await?.error_for_status()?.json::<Value>().await?) }
+        };
+        let endpoint = |path: &str| json!({"name":path,"url":format!("{hooks}{path}"),"event_types":["agent.session.created"]});
+        let owned = post(TOKEN, "/webhook_endpoints", endpoint("/owner")).await?;
+        post(&outsider, "/webhook_endpoints", endpoint("/outsider")).await?;
+        let session = json!({"agent":{"model":"mock-model"},"environment":{"type":"none"},"input":"hello"});
+        let owner_session = post(TOKEN, "/agents/sessions", session.clone()).await?;
+        let outsider_session = post(&outsider, "/agents/sessions", session).await?;
+
+        deliveries(&received, |seen| seen.len() >= 2).await;
+        // Let any misrouted delivery arrive before checking.
+        tokio::time::sleep(Duration::from_millis(/*millis*/ 500)).await;
+        let seen = received.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let mut routed = seen.iter()
+            .map(|received| Ok(json!([received.path, serde_json::from_str::<Value>(&received.body)?["data"]["id"]])))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        routed.sort_by_key(|route| route[0].as_str().map(str::to_owned));
+        assert_eq!(routed, vec![json!(["/outsider", outsider_session["id"]]), json!(["/owner", owner_session["id"]])]);
+
+        let owned_id = owned["id"].as_str().context("endpoint id")?;
+        let listed = client.get(format!("{base}/webhook_endpoints")).bearer_auth(&outsider).send().await?.json::<Value>().await?;
+        assert_eq!(listed["data"].as_array().map(Vec::len), Some(1));
+        assert_ne!(listed["data"][0]["id"], owned["id"]);
+        let swept = projects::sweep(&client, &base, &outsider, &inventory, &[("{webhook_endpoint_id}", owned_id, "webhook endpoint not found")]).await?;
+        assert_eq!(swept, 5);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}

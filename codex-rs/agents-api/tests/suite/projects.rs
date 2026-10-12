@@ -238,7 +238,7 @@ async fn projects_cannot_see_or_change_each_others_agents_and_sessions() -> anyh
 /// `secret`, filling other path parameters with placeholders. Each must
 /// answer 404 with that root's message; the most specific root in a path
 /// decides it. Returns how many operations were sent.
-async fn sweep(
+pub(super) async fn sweep(
     client: &reqwest::Client,
     base: &str,
     secret: &str,

@@ -6,9 +6,11 @@ use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
 use crate::contract::now;
+use crate::projects::Principal;
 use crate::webhook_delivery::PREVIOUS_SECRET_SECS;
 use crate::webhook_delivery::secret_name;
 use anyhow::Context;
+use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::extract::Path;
@@ -123,6 +125,7 @@ async fn save(state: &State, endpoint: &Value) -> Result<(), ApiError> {
 
 async fn create(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let fields = fields(&body, &["name", "url", "event_types"])?;
@@ -142,9 +145,10 @@ async fn create(
     let created_at = now();
     let mut endpoint = json!({"id":id,"object":"webhook_endpoint","created_at":created_at,
         "updated_at":created_at,"name":name,"url":url,"event_types":event_types,"signing_secret_hint":hint(&secret)});
-    sqlx::query("INSERT INTO webhook_endpoints (id, data) VALUES (?, ?)")
+    sqlx::query("INSERT INTO webhook_endpoints (id, data, project_id) VALUES (?, ?, ?)")
         .bind(&id)
         .bind(endpoint.to_string())
+        .bind(&principal.project_id)
         .execute(&state.store.0)
         .await
         .map_err(anyhow::Error::from)?;
@@ -188,6 +192,7 @@ async fn update(
 /// List endpoints newest first, `limit` (default 20, at most 100) at a time.
 async fn list(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Result<Json<Value>, ApiError> {
     let mut after = None;
@@ -206,17 +211,21 @@ async fn list(
     }
     let pool = &state.store.0;
     let start: i64 = match after {
-        Some(after) => sqlx::query_scalar("SELECT created_seq FROM webhook_endpoints WHERE id = ?")
-            .bind(after)
-            .fetch_optional(pool)
-            .await
-            .map_err(anyhow::Error::from)?
-            .ok_or_else(|| invalid("invalid after cursor"))?,
+        Some(after) => sqlx::query_scalar(
+            "SELECT created_seq FROM webhook_endpoints WHERE id = ? AND project_id = ?",
+        )
+        .bind(after)
+        .bind(&principal.project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| invalid("invalid after cursor"))?,
         None => i64::MAX,
     };
     let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT data FROM webhook_endpoints WHERE created_seq < ? ORDER BY created_seq DESC LIMIT ?",
+        "SELECT data FROM webhook_endpoints WHERE project_id = ? AND created_seq < ? ORDER BY created_seq DESC LIMIT ?",
     )
+    .bind(&principal.project_id)
     .bind(start)
     .bind(limit + 1)
     .fetch_all(pool)

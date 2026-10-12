@@ -1826,8 +1826,16 @@ Checklist:
   Follow-up: executors still authenticate to the registry with the
   operator's environment key rather than a project key, so executor
   credentials are operator-level, not project-level.
-- [ ] **Slice 4: webhooks.** Scope endpoints, and route deliveries only to the
+- [x] **Slice 4: webhooks.** Scope endpoints, and route deliveries only to the
   session's project, including restart-safe queued deliveries.
+  Evidence (2026-10-12): migration `0018` adds `project_id` to
+  `webhook_endpoints`. The outbox selects only endpoints in the session's
+  project, inside the transaction that queues the event, so queued and
+  retried deliveries keep their routing across restarts. The ownership guard
+  covers `/webhook_endpoints/{id}`, and the list and its cursor are
+  project-scoped. `webhooks::endpoints_receive_only_their_projects_session_events`
+  checks routing with one endpoint per project and sweeps the 5 inventoried
+  operations that name an endpoint.
 - [ ] **Slice 5: permission sweep.** For every inventoried operation, a key
   without the required permission gets 403 in the public error shape, and a
   key with only that permission succeeds.

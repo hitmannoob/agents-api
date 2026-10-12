@@ -39,8 +39,8 @@ pub(crate) async fn create_session(
         .bind(project_id)
         .execute(&mut *tx)
         .await?;
-    crate::webhook_outbox::enqueue(&mut tx, "agent.session.created", json!({"id":data["id"]}))
-        .await?;
+    let id = data["id"].as_str().unwrap_or_default();
+    crate::webhook_outbox::enqueue(&mut tx, id, "agent.session.created", json!({"id":id})).await?;
     tx.commit().await?;
     Ok(())
 }
