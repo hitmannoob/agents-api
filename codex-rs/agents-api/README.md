@@ -127,16 +127,18 @@ codex-agents-api keys revoke --data-directory DATA key_...
 stored. Permissions are `api.agents.read`, `api.agents.write`,
 `api.responses.write` (also required to create sessions and post session
 events), `api.vaults.read`, `api.vaults.write`, `api.files.read`,
-`api.files.write`, `api.webhooks.read`, and `api.webhooks.write`. An unknown
+`api.files.write`, `api.webhooks.read`, `api.webhooks.write`, and
+`api.environments.connect` (for executor keys; see below). An unknown
 or revoked key gets 401, and a key missing an operation's permission gets 403.
 
 Agents, sessions (with everything under a session), vaults (with their
 credentials), files, environments, and webhook endpoints are isolated by
 project: another project's IDs read as not found, never appear in lists, and
 cannot be referenced from `vault_ids` or a `file_id` source. Webhook
-endpoints receive events only about their own project's sessions.
-Self-hosted executors still authenticate with the operator's environment
-key, which is not project-scoped.
+endpoints receive events only about their own project's sessions, and
+executors presenting a project key reach only that project's environments.
+OpenAI's Admin API (`/organization/projects`) is not reproduced; the CLI is
+how projects and keys are managed.
 
 ## Operating the service
 
@@ -371,8 +373,14 @@ URL, non-secret `headers`, `allowed_tools` (all tools when omitted), and
 Self-hosted environments run a session's commands on compute the caller owns.
 They are available only when the operator supplies an environment key of at
 least 32 bytes, different from the API token, with `--environment-key` (or
-`CODEX_AGENTS_API_ENVIRONMENT_KEY`); otherwise such sessions return 501. The key
-grants only the registry endpoints under `/registry/`, never the API.
+`CODEX_AGENTS_API_ENVIRONMENT_KEY`); otherwise such sessions return 501. That
+operator key reaches every environment. For callers, create a project key
+holding only `api.environments.connect`, as the guide's environment key holds
+only permission to connect environments:
+`codex-agents-api keys create --data-directory DATA --project proj_... --name executor --permission api.environments.connect`.
+It connects only that project's environments (another project's read as
+`environment_not_found`) and grants no API operation. Both kinds of key reach
+only the registry endpoints under `/registry/`.
 - **Creating:** `environment: {"type":"self_hosted","workspace_directory":"/abs/path"}`.
   The workspace path belongs to the executor's OS, so POSIX and Windows absolute
   forms are both accepted. Skills in `capability_directories` (up to 32
@@ -383,7 +391,9 @@ grants only the registry endpoints under `/registry/`, never the API.
   `/registry` on the host and scheme the request used (`x-forwarded-proto`
   selects https).
 - **Connecting:** on the caller's compute, run
-  `CODEX_API_KEY=<environment key> codex exec-server --remote <remote_url> --environment-id <id>`.
+  `CODEX_API_KEY=<environment key> codex exec-server --remote <remote_url> --environment-id <id>`,
+  where the environment key is the project's connect-only key (or the
+  operator's).
   The stock CLI sends that key only to OpenAI hosts or loopback; add
   `--trusted-registry-host <host>` for this service's https host. The executor
   registers a Noise key and dials out to a rendezvous websocket. The worker

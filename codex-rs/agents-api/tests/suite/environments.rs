@@ -23,13 +23,32 @@ impl AuthProvider for EnvironmentKey {
     }
 }
 
+/// Presents a project API key as the executor's `CODEX_API_KEY`.
+struct ProjectKey(String);
+
+impl AuthProvider for ProjectKey {
+    fn add_auth_headers(&self, headers: &mut http::HeaderMap) {
+        if let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {}", self.0)) {
+            headers.insert(http::header::AUTHORIZATION, value);
+        }
+    }
+}
+
 /// Run an executor for the environment in this process, as
 /// `codex exec-server --remote <remote_url> --environment-id <id>` would.
 fn executor(remote_url: &str, environment_id: &str) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    executor_with(remote_url, environment_id, Arc::new(EnvironmentKey))
+}
+
+fn executor_with(
+    remote_url: &str,
+    environment_id: &str,
+    key: Arc<dyn AuthProvider>,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let config = RemoteEnvironmentConfig::new(
         remote_url.to_owned(),
         environment_id.to_owned(),
-        Arc::new(EnvironmentKey),
+        key,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     )?;
     let paths = ExecServerRuntimeOptions::new(
@@ -608,6 +627,73 @@ async fn official_sdk_self_hosted_environment() -> anyhow::Result<()> {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+
+/// An executor may present a project API key holding
+/// `api.environments.connect`, which reaches only its own project's
+/// environments; the operator's environment key reaches every environment.
+#[tokio::test]
+async fn project_environment_keys_connect_only_their_projects_environments() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 60), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_directory = workspace.path().canonicalize()?.to_str().context("workspace path")?.to_owned();
+        let provider = create_mock_responses_server_repeating_assistant("unused").await;
+        MockResponsesConfig::new(&provider.uri()).write(home.path())?;
+        let directory = AbsolutePathBuf::from_absolute_path(data.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, directory.clone(), TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        let admin = codex_agents_api::projects::Admin::open(directory).await?;
+        let other = admin.create_project("Other").await?;
+        let key = |project: &str, permissions: &[&str]| {
+            let permissions: Vec<String> = permissions.iter().map(|&permission| permission.to_owned()).collect();
+            let admin = &admin;
+            let project = project.to_owned();
+            async move { anyhow::Ok(admin.create_key(&project, "", &permissions).await?.value) }
+        };
+        let connect = key(codex_agents_api::projects::DEFAULT_PROJECT, &["api.environments.connect"]).await?;
+        let agents_only = key(codex_agents_api::projects::DEFAULT_PROJECT, &["api.agents.read", "api.agents.write"]).await?;
+        let other_connect = key(&other.id, &["api.environments.connect"]).await?;
+        let client = reqwest::Client::new();
+        let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), json!({"agent":{"model":"mock-model"},
+            "environment":{"type":"self_hosted","workspace_directory":workspace_directory}})).await?;
+        let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
+
+        // Authentication precedes body checks, so an unsupported security
+        // profile shows which keys are admitted without registering anything.
+        let register = |secret: &str| {
+            let request = client.post(format!("{origin}/registry/cloud/environment/{environment_id}/register")).bearer_auth(secret)
+                .json(&json!({"security_profile":"unsupported","executor_public_key":{"suite":"x","x25519_public_key":"x","mlkem768_public_key":"x"}}));
+            async move {
+                let response = request.send().await?;
+                let status = response.status().as_u16();
+                anyhow::Ok((status, response.json::<Value>().await?["error"]["code"].clone()))
+            }
+        };
+        assert_eq!(register(&connect).await?, (400, json!("unsupported_security_profile")));
+        assert_eq!(register(ENVIRONMENT_KEY).await?, (400, json!("unsupported_security_profile")));
+        assert_eq!(register(&agents_only).await?, (403, json!("permission_denied")));
+        assert_eq!(register(&other_connect).await?, (404, json!("environment_not_found")));
+        assert_eq!(register("sk-proj-unknown").await?, (401, json!("invalid_environment_key")));
+        // A connect-only key grants nothing else.
+        let response = client.get(format!("{base}/agents")).bearer_auth(&connect).send().await?;
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+
+        // An executor with the project key connects for real.
+        let _running = executor_with(&format!("{origin}/registry"), &environment_id, Arc::new(ProjectKey(connect)))?;
+        loop {
+            let info = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?;
+            if info["status"] == "connected" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        }
         Ok::<_, anyhow::Error>(())
     })
     .await?

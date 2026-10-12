@@ -81,8 +81,8 @@ Current boundaries:
   through the rendezvous relay). `openai_hosted` and environment templates are
   out of scope by decision (2026-10-06).
 - Resources are project-scoped and API keys carry permissions (G13); projects
-  and keys are managed by CLI, and executors still use the operator's
-  environment key.
+  and keys are managed by CLI, and executors authenticate with a project key
+  holding `api.environments.connect` (or the operator's environment key).
 - Event streams are live-only. Recovery reads saved state/history; it must not
   promise replay of missed events.
 - Persisted function records cannot recreate a lost JSON-RPC request waiter.
@@ -115,7 +115,7 @@ fixture design may start earlier.
 | G10 | Implement files and artifacts (complete locally for self-hosted; Skills API missing) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
 | G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
 | G12 | Prove end-to-end parity (open: SDK scenarios for every resource, Windows/cross-OS) | All applicable goals | Contract suite, real providers, platforms, failure matrix |
-| G13 | Projects, API keys, and permissions (complete locally 2026-10-12; executor keys and Admin API open) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
+| G13 | Projects, API keys, and permissions (complete locally 2026-10-12; Admin API out of scope) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
 
 Ship bounded changes within each goal. Do not combine a supervisor rewrite,
 public-schema expansion, and sandbox provider integration into one change.
@@ -1825,9 +1825,13 @@ Checklist:
   `projects::projects_cannot_reach_each_others_vaults_files_or_environments`
   sweeps the 13 inventoried operations that name them. Environment IDs are
   always server-generated, so they cannot collide across projects.
-  Follow-up: executors still authenticate to the registry with the
-  operator's environment key rather than a project key, so executor
-  credentials are operator-level, not project-level.
+  Follow-up (done 2026-10-12): executors may present a project key holding
+  `api.environments.connect`, which reaches only that project's
+  environments (another project's read as `environment_not_found`, a
+  missing permission is 403). The operator's environment key still reaches
+  every environment. Covered by
+  `environments::project_environment_keys_connect_only_their_projects_environments`,
+  which also connects a real executor with a project key.
 - [x] **Slice 4: webhooks.** Scope endpoints, and route deliveries only to the
   session's project, including restart-safe queued deliveries.
   Evidence (2026-10-12): migration `0018` adds `project_id` to
@@ -1855,10 +1859,10 @@ Checklist:
   to verified, giving 22 verified, 2 implemented, 27 partial, and 16
   missing.
 
-Status (2026-10-12): slices 1-6 complete. Remaining follow-ups: executors
-authenticate with the operator's environment key rather than a project key;
-the OpenAI Admin API (`/organization/projects`, project API keys) is not
-reproduced.
+Status (2026-10-12): G13 is complete locally, including project-scoped
+executor keys. Decision (2026-10-12): the OpenAI Admin API
+(`/organization/projects`, project API keys) is out of scope; the CLI manages
+projects and keys.
 
 Acceptance: the isolation and permission sweeps cover every implemented
 operation; pre-G13 data directories migrate into the default project with
@@ -1872,8 +1876,8 @@ previously led this list are complete; their history is in the goal sections
 above and in git.
 
 1. **Projects, API keys, and permissions (G13): complete locally
-   2026-10-12.** Follow-ups: project-scoped executor credentials and,
-   optionally, the OpenAI Admin API.
+   2026-10-12,** including project-scoped executor keys. The Admin API is out
+   of scope by decision.
 2. **Second inventory promotion pass (G12, G13 slice 6): done 2026-10-12.**
 3. **Skills API (SKL-001..006, SKV-001..005).** This is the largest in-scope
    block still missing, and G08 skills/plugins selection depends on it.

@@ -26,9 +26,10 @@ use uuid::Uuid;
 pub const DEFAULT_PROJECT: &str = "proj_default";
 
 /// Every permission a key can hold. Agents, Responses, Vaults, and Files names
-/// follow the official guides; the guides name no webhooks permission string,
-/// so `api.webhooks.*` is a local choice.
-pub const PERMISSIONS: [&str; 9] = [
+/// follow the official guides. The guides name no string for webhooks or for
+/// the environment key's "connect environments" permission, so
+/// `api.webhooks.*` and `api.environments.connect` are local choices.
+pub const PERMISSIONS: [&str; 10] = [
     "api.agents.read",
     "api.agents.write",
     "api.responses.write",
@@ -38,6 +39,7 @@ pub const PERMISSIONS: [&str; 9] = [
     "api.files.write",
     "api.webhooks.read",
     "api.webhooks.write",
+    "api.environments.connect",
 ];
 
 /// The authenticated caller of one request, stored in the request extensions.
@@ -112,11 +114,12 @@ pub(crate) async fn foreign(
             *id,
             "session not found",
         ),
-        ["agents", "environments", id, ..] => (
-            "SELECT p.project_id FROM environments e JOIN public_sessions p ON p.id = e.session_id WHERE e.id = ?",
-            *id,
-            "environment not found",
-        ),
+        ["agents", "environments", id, ..] => {
+            let owner = environment_project(state, id).await?;
+            return Ok(owner
+                .is_some_and(|owner| owner != principal.project_id)
+                .then_some("environment not found"));
+        }
         ["agents", "sessions" | "environments", ..] => return Ok(None),
         ["agents", id, ..] => (
             "SELECT project_id FROM agents WHERE id = ?",
@@ -152,6 +155,19 @@ pub(crate) async fn foreign(
     Ok(owner
         .is_some_and(|owner| owner != principal.project_id)
         .then_some(message))
+}
+
+/// The project that owns an environment, through its session.
+pub(crate) async fn environment_project(
+    state: &State,
+    environment_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT p.project_id FROM environments e JOIN public_sessions p ON p.id = e.session_id WHERE e.id = ?",
+    )
+    .bind(environment_id)
+    .fetch_optional(&state.store.0)
+    .await?)
 }
 
 /// The permissions an operation requires, from its method and path. Reads need

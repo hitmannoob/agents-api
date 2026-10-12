@@ -136,3 +136,9 @@ Amendments under the same `openai==3.17.0` pin:
   permission in the default project. The second promotion pass moved
   AGT-005, SES-004, VLT-001..004, CRD-002, CRD-004, WHK-002, WHK-004..006, and
   BEH-003 to verified.
+- 2026-10-12: executors may authenticate with a project key holding
+  `api.environments.connect`, a local name for the guide's "only permits
+  connecting environments" key, which must belong to the session's project.
+  By project decision, the OpenAI Admin API (`/organization/projects` and
+  project API key management) stays outside the denominator; the CLI manages
+  projects and keys.

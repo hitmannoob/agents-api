@@ -8,7 +8,9 @@
 //! - `POST cloud/environment/{id}/validate`: the executor checks that a harness
 //!   key was authorized by `connect` before completing a Noise handshake.
 //!
-//! Executors authenticate with the operator's environment key; the harness
+//! Executors authenticate with an environment key: a project API key holding
+//! `api.environments.connect`, valid only for its project's environments, or
+//! the operator's environment key, valid for every environment. The harness
 //! authenticates with a token only the worker holds. Traffic itself flows
 //! through [`crate::rendezvous`], encrypted end to end.
 use crate::State;
@@ -242,7 +244,10 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Check the executor's environment key and that the environment belongs to a
-/// session. Comparison runs in constant time.
+/// session the key may reach. The operator's key reaches every environment; a
+/// project key needs `api.environments.connect` and reaches only its own
+/// project's environments, another project's reading as not found. The
+/// operator-key comparison runs in constant time.
 async fn executor_allowed(
     state: &State,
     headers: &HeaderMap,
@@ -255,30 +260,48 @@ async fn executor_allowed(
             "self-hosted environments require the operator to configure an environment key",
         ));
     };
-    if !bearer(headers).is_some_and(|token| constant_time_eq(token, key)) {
-        return Err(error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_environment_key",
-            "invalid environment key",
-        ));
-    }
-    if !crate::environments::exists(state, environment_id)
-        .await
-        .map_err(|_| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "registry error",
-            )
-        })?
-    {
-        return Err(error(
+    let internal = |_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "registry error",
+        )
+    };
+    let not_found = || {
+        error(
             StatusCode::NOT_FOUND,
             "environment_not_found",
             "no session uses this environment",
+        )
+    };
+    let presented = bearer(headers).unwrap_or_default();
+    let owner = crate::projects::environment_project(state, environment_id)
+        .await
+        .map_err(internal)?;
+    if constant_time_eq(presented, key) {
+        return owner.map(|_| ()).ok_or_else(not_found);
+    }
+    let principal = crate::projects::resolve(state, presented)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| {
+            error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_environment_key",
+                "invalid environment key",
+            )
+        })?;
+    if let Some(permission) = principal.missing(&["api.environments.connect"]) {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            &format!("this API key lacks the {permission} permission"),
         ));
     }
-    Ok(())
+    match owner {
+        Some(owner) if owner == principal.project_id => Ok(()),
+        _ => Err(not_found()),
+    }
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
