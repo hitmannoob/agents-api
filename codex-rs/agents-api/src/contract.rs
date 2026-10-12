@@ -234,7 +234,8 @@ async fn create(
         &stdio_env,
     )
     .await?;
-    let vault_ids = crate::credentials::vaults(&state, params.vault_ids).await?;
+    let vault_ids =
+        crate::credentials::vaults(&state, &principal.project_id, params.vault_ids).await?;
     let credentials = crate::credentials::resolve(&state, &saved.config, &vault_ids).await?;
     let session = state
         .store

@@ -94,7 +94,8 @@ pub(crate) async fn resolve(state: &State, secret: &str) -> anyhow::Result<Optio
 /// The not-found message for a request whose root resource exists but belongs
 /// to another project, so it reads exactly like a missing ID. Children of a
 /// session (turns, items, subagents, artifacts, events, and traces) are
-/// covered by their session. A root that does not exist passes through, so
+/// covered by their session, a vault's credentials by their vault, and an
+/// environment by the session it belongs to. A root that does not exist passes through, so
 /// its handler keeps its own validation order and errors.
 pub(crate) async fn foreign(
     state: &State,
@@ -111,11 +112,26 @@ pub(crate) async fn foreign(
             *id,
             "session not found",
         ),
+        ["agents", "environments", id, ..] => (
+            "SELECT p.project_id FROM environments e JOIN public_sessions p ON p.id = e.session_id WHERE e.id = ?",
+            *id,
+            "environment not found",
+        ),
         ["agents", "sessions" | "environments", ..] => return Ok(None),
         ["agents", id, ..] => (
             "SELECT project_id FROM agents WHERE id = ?",
             *id,
             "agent not found",
+        ),
+        ["vaults", id, ..] => (
+            "SELECT project_id FROM vaults WHERE id = ?",
+            *id,
+            "vault not found",
+        ),
+        ["files", id, ..] => (
+            "SELECT project_id FROM files WHERE id = ?",
+            *id,
+            "file not found",
         ),
         ["sessions", id, ..] => (
             "SELECT project_id FROM sessions WHERE id = ?",

@@ -8,7 +8,9 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
 use crate::registry::ExecutorState;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::Query;
@@ -140,6 +142,7 @@ pub(crate) enum Create {
 
 pub(crate) async fn create(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(environment_id): Path<String>,
     Json(params): Json<Create>,
 ) -> Result<Json<Value>, ApiError> {
@@ -156,13 +159,15 @@ pub(crate) async fn create(
             (path, contents)
         }
         // Uploads are already bounded by the Files API limit.
-        Create::FileId { path, file_id } => match crate::files::read(&state, &file_id).await {
-            Ok(contents) => (path, contents),
-            Err(error) if error.0 == StatusCode::NOT_FOUND => {
-                return Err(invalid(format!("file {file_id} not found")));
+        Create::FileId { path, file_id } => {
+            match crate::files::read(&state, &principal.project_id, &file_id).await {
+                Ok(contents) => (path, contents),
+                Err(error) if error.0 == StatusCode::NOT_FOUND => {
+                    return Err(invalid(format!("file {file_id} not found")));
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
-        },
+        }
     };
     let workspace = Workspace::open(&state, &environment_id).await?;
     let path = workspace.path(&path, /*allow_root*/ false)?;

@@ -6,6 +6,8 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
+use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
@@ -99,7 +101,17 @@ fn corrupted() -> ApiError {
 /// A live file's contents, checked against its digest, for an environment
 /// file's `file_id` source. Uploads are bounded, so this holds at most
 /// [`MAX_FILE_BYTES`].
-pub(crate) async fn read(state: &State, id: &str) -> Result<Vec<u8>, ApiError> {
+pub(crate) async fn read(state: &State, project_id: &str, id: &str) -> Result<Vec<u8>, ApiError> {
+    let owned: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM files WHERE id = ? AND project_id = ?)")
+            .bind(id)
+            .bind(project_id)
+            .fetch_one(&state.store.0)
+            .await
+            .map_err(anyhow::Error::from)?;
+    if !owned {
+        return Err(not_found());
+    }
     let expected = digest(state, id).await?;
     let contents = tokio::fs::read(state.files.0.join(id))
         .await
@@ -164,6 +176,7 @@ pub(crate) async fn sweep(state: &State) -> anyhow::Result<()> {
 
 async fn create(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<Value>, ApiError> {
@@ -240,8 +253,8 @@ async fn create(
         now,
         expires_at,
     );
-    sqlx::query("INSERT INTO files (id, filename, purpose, bytes, created_at, expires_at, sha256) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .bind(&row.0).bind(&row.1).bind(&row.2).bind(row.3).bind(row.4).bind(row.5).bind(&upload.sha256)
+    sqlx::query("INSERT INTO files (id, filename, purpose, bytes, created_at, expires_at, sha256, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(&row.0).bind(&row.1).bind(&row.2).bind(row.3).bind(row.4).bind(row.5).bind(&upload.sha256).bind(&principal.project_id)
         .execute(&state.store.0).await.map_err(anyhow::Error::from)?;
     Ok(Json(public(row)))
 }
@@ -308,6 +321,7 @@ struct ListParams {
 
 async fn list(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = params.limit.unwrap_or(10_000);
@@ -321,8 +335,9 @@ async fn list(
     };
     let after: Option<i64> = match &params.after {
         Some(after) => Some(
-            sqlx::query_scalar("SELECT seq FROM files WHERE id = ?")
+            sqlx::query_scalar("SELECT seq FROM files WHERE id = ? AND project_id = ?")
                 .bind(after)
+                .bind(&principal.project_id)
                 .fetch_optional(&state.store.0)
                 .await
                 .map_err(anyhow::Error::from)?
@@ -332,12 +347,13 @@ async fn list(
     };
     // Fetch one extra row to learn whether more follow.
     let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM files WHERE {LIVE} AND (?2 IS NULL OR purpose = ?2) AND (?3 IS NULL OR seq {comparison} ?3) ORDER BY seq {direction} LIMIT ?4"
+        "SELECT {COLUMNS} FROM files WHERE {LIVE} AND (?2 IS NULL OR purpose = ?2) AND (?3 IS NULL OR seq {comparison} ?3) AND project_id = ?5 ORDER BY seq {direction} LIMIT ?4"
     )))
     .bind(crate::contract::now() as i64)
     .bind(&params.purpose)
     .bind(after)
     .bind(limit + 1)
+    .bind(&principal.project_id)
     .fetch_all(&state.store.0)
     .await
     .map_err(anyhow::Error::from)?;

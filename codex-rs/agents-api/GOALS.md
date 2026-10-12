@@ -1811,9 +1811,21 @@ Checklist:
   session creation resolves only in the caller's project.
   `projects::projects_cannot_see_or_change_each_others_agents_and_sessions`
   sweeps every inventoried operation that names an agent or session.
-- [ ] **Slice 3: vaults, files, and environments.** Scope vaults, credentials,
+- [x] **Slice 3: vaults, files, and environments.** Scope vaults, credentials,
   files, environments, and the executor registry; reject cross-project
   `vault_ids`, `file_id`, and `environment_id`. Extend the isolation sweep.
+  Evidence (2026-10-12): migration `0017` adds `project_id` to `vaults` and
+  `files`; credentials inherit their vault and environments their session.
+  The ownership guard covers `/vaults/{id}`, `/files/{id}`, and
+  `/agents/environments/{id}`; vault and file lists and cursors are
+  project-scoped; `vault_ids` and `file_id` sources resolve only in the
+  caller's project.
+  `projects::projects_cannot_reach_each_others_vaults_files_or_environments`
+  sweeps the 13 inventoried operations that name them. Environment IDs are
+  always server-generated, so they cannot collide across projects.
+  Follow-up: executors still authenticate to the registry with the
+  operator's environment key rather than a project key, so executor
+  credentials are operator-level, not project-level.
 - [ ] **Slice 4: webhooks.** Scope endpoints, and route deliveries only to the
   session's project, including restart-safe queued deliveries.
 - [ ] **Slice 5: permission sweep.** For every inventoried operation, a key

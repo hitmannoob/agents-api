@@ -7,7 +7,9 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
 use crate::resources::AgentConfig;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::Query;
@@ -18,9 +20,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Validate a session's `vault_ids`: each must name an existing vault.
+/// Validate a session's `vault_ids`: each must name an existing vault in the
+/// session's project.
 pub(crate) async fn vaults(
     state: &State,
+    project_id: &str,
     vault_ids: Option<Vec<String>>,
 ) -> Result<Vec<String>, ApiError> {
     let vault_ids = vault_ids.unwrap_or_default();
@@ -28,11 +32,14 @@ pub(crate) async fn vaults(
         return Err(invalid("vault_ids accepts at most 32 vaults"));
     }
     for vault_id in &vault_ids {
-        let known: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM vaults WHERE id = ?)")
-            .bind(vault_id)
-            .fetch_one(&state.store.0)
-            .await
-            .map_err(anyhow::Error::from)?;
+        let known: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM vaults WHERE id = ? AND project_id = ?)",
+        )
+        .bind(vault_id)
+        .bind(project_id)
+        .fetch_one(&state.store.0)
+        .await
+        .map_err(anyhow::Error::from)?;
         if !known {
             return Err(invalid(format!("vault {vault_id} not found")));
         }
@@ -370,13 +377,14 @@ pub(crate) async fn create_credential(
 
 pub(crate) async fn list_credentials(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(vault_id): Path<String>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Result<Json<Value>, ApiError> {
     if crate::vaults::vault(&state, &vault_id).await?.is_none() {
         return Err(crate::vaults::not_found("vault"));
     }
-    crate::vaults::list(&state, Some(&vault_id), &query).await
+    crate::vaults::list(&state, &principal.project_id, Some(&vault_id), &query).await
 }
 
 pub(crate) async fn retrieve_credential(

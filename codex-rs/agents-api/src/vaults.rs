@@ -3,6 +3,8 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
+use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::extract::Path;
@@ -89,6 +91,7 @@ fn page(query: &[(String, String)]) -> Result<(Option<String>, i64, bool, bool),
 /// creation order.
 pub(crate) async fn list(
     state: &State,
+    project_id: &str,
     vault_id: Option<&str>,
     query: &[(String, String)],
 ) -> Result<Json<Value>, ApiError> {
@@ -97,9 +100,11 @@ pub(crate) async fn list(
     let cursor: Option<i64> = match &after {
         Some(after) => Some(
             match vault_id {
-                None => {
-                    sqlx::query_scalar("SELECT created_seq FROM vaults WHERE id = ?").bind(after)
-                }
+                None => sqlx::query_scalar(
+                    "SELECT created_seq FROM vaults WHERE id = ? AND project_id = ?",
+                )
+                .bind(after)
+                .bind(project_id),
                 Some(vault_id) => sqlx::query_scalar(
                     "SELECT created_seq FROM vault_credentials WHERE id = ? AND vault_id = ?",
                 )
@@ -117,10 +122,11 @@ pub(crate) async fn list(
     let rows: Vec<String> = match (active, vault_id) {
         (false, _) => Vec::new(),
         (true, None) => sqlx::query_scalar(if ascending {
-            "SELECT data FROM vaults WHERE created_seq > ? ORDER BY created_seq ASC LIMIT ?"
+            "SELECT data FROM vaults WHERE project_id = ? AND created_seq > ? ORDER BY created_seq ASC LIMIT ?"
         } else {
-            "SELECT data FROM vaults WHERE created_seq < ? ORDER BY created_seq DESC LIMIT ?"
+            "SELECT data FROM vaults WHERE project_id = ? AND created_seq < ? ORDER BY created_seq DESC LIMIT ?"
         })
+        .bind(project_id)
         .bind(start)
         .bind(limit + 1)
         .fetch_all(pool)
@@ -165,6 +171,7 @@ pub(crate) async fn vault(state: &State, vault_id: &str) -> Result<Option<Value>
 
 async fn create_vault(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let fields = body
@@ -180,9 +187,10 @@ async fn create_vault(
     let metadata = crate::configuration::metadata(fields.remove("metadata").unwrap_or_default())?;
     let vault = json!({"id":format!("vault_{}", Uuid::new_v4().simple()),"object":"vault",
         "created_at":crate::contract::now(),"metadata":metadata,"name":name});
-    sqlx::query("INSERT INTO vaults (id, data) VALUES (?, ?)")
+    sqlx::query("INSERT INTO vaults (id, data, project_id) VALUES (?, ?, ?)")
         .bind(vault["id"].as_str())
         .bind(vault.to_string())
+        .bind(&principal.project_id)
         .execute(&state.store.0)
         .await
         .map_err(anyhow::Error::from)?;
@@ -191,9 +199,16 @@ async fn create_vault(
 
 async fn list_vaults(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Result<Json<Value>, ApiError> {
-    list(&state, /*vault_id*/ None, &query).await
+    list(
+        &state,
+        &principal.project_id,
+        /*vault_id*/ None,
+        &query,
+    )
+    .await
 }
 
 async fn retrieve_vault(
