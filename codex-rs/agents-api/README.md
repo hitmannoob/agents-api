@@ -12,13 +12,20 @@ remains incomplete. The target is documented function-for-function parity; see
 the [contract inventory](CONTRACT_INVENTORY.md), [parity plan](PARITY.md), and
 [implementation goals](GOALS.md).
 
-Build both binaries, then start the API. It launches one app-server shared by its sessions:
+Build the API, app-server, and code-mode host, then start the API. It launches
+one app-server shared by its sessions:
 
 ```sh
-cargo build -p codex-app-server -p codex-agents-api --bins
+CARGO_INCREMENTAL=0 cargo build -p codex-code-mode-host -p codex-app-server -p codex-agents-api --bins
 export CODEX_AGENTS_API_TOKEN="$(openssl rand -hex 32)"
 target/debug/codex-agents-api --data-directory /absolute/path/agents-api-data
 ```
+
+When the upstream V8 prebuilt is missing, building `codex-code-mode-host` needs
+`RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH` pointing to Codex-published
+artifacts verified against `third_party/v8` checksums. See
+[setup-rusty-v8](../../.github/actions/setup-rusty-v8/action.yml).
+Ship `codex-code-mode-host` beside `codex-app-server`.
 
 The worker executable defaults to the sibling `codex-app-server`; override it with
 `--app-server-bin /absolute/path/codex-app-server`. Its persistent `CODEX_HOME`
@@ -323,8 +330,24 @@ answering it, so the session starts another turn instead of going idle. A
 cancel sent before Codex has reported the turn it just started (for example,
 right after creating a session with input) still stops that turn.
 
-Enabled programmatic calling can be saved and retrieved, but its execution is
-rejected; disabled programmatic calling is accepted.
+Programmatic calling (`{"type":"programmatic_tool_calling","enabled":true}`)
+enables Codex code mode: JavaScript runs in the sandboxed sibling
+`codex-code-mode-host` V8 process with no filesystem or network access. Nested
+tool calls become ordinary `function_call` items and `requires_action`; submit
+their results through the same events path. Exec yields after 30s by default,
+output has a token cap, and cancellation ends running cells. Missing hosts
+fail closed, with no in-process fallback.
+
+Code mode is turned off otherwise, subject to the model catalog's `tool_mode`
+precedence, exposed as `model/list.toolMode`. Explicit disabled returns 400 for
+`codeMode`/`codeModeOnly`, and enabled returns 400 for `direct`. Most current
+gpt-6-* and gpt-5.6-* catalog models pin `code_mode_only`, so tool calls always
+come from code and explicit disabled is refused.
+
+Codex compacts model context automatically. The pinned API contract has no
+compaction settings or items: `contextCompaction` is not public, and the full
+application history remains in `/items`. Automatic compaction followed by cold
+resume is verified locally with a mock provider (2026-10-12).
 
 A function with `defer_loading: true` needs `{"type": "tool_search"}` in the
 agent's tools. When the worker's `model/list` reports `supportsSearchTool` for
@@ -390,13 +413,24 @@ Codex's goal tools are disabled for every session.
 
 Public MCP servers run when they use HTTP with `connection_origin: service`
 (the default). Each becomes a session-scoped Codex server that sets only the
-URL, non-secret `headers`, `allowed_tools` (all tools when omitted), and
-`required`.
+URL, `headers`, `request_metadata`, `allowed_tools` (all tools when omitted), and
+`required`. HTTP transport `headers` are non-secret configuration and round trip
+in agent and session responses. Only `transport.authorization` is write-only
+and encrypted; it is omitted from responses.
 - **Unsupported configurations:** stdio servers and environment-origin
-  connections need an execution environment. An `Authorization` header, inline
-  `authorization`, and `request_metadata` are rejected, as is a label that
-  matches a server configured in the worker. Authenticate with a vault
-  credential instead (below).
+  connections need an execution environment. An `Authorization` entry in
+  `headers` is rejected; use `transport.authorization` or a vault credential.
+  A label that matches a worker-configured server is also rejected.
+- **Inline authorization:** `transport.authorization` is encrypted like stdio
+  env secrets and snapshotted per session. Bare tokens use Bearer; an explicit
+  scheme is preserved. Empty or invalid values and a simultaneous
+  `credential_id` return 400. Inline authorization wins over auto-matched vault
+  credentials. It needs the operator's vault passphrase, like other secrets.
+- **Request metadata:** `request_metadata` maps to Codex's per-server
+  `request_meta`, merged into tools/call `_meta`; Codex keys win collisions.
+  It accepts up to 16 KiB and 128 keys including nested keys. JSON null and
+  integers outside signed 64-bit range are refused because TOML cannot encode
+  them. Authorization and metadata survive agent deletion and cold resume.
 - **Egress:** the worker host makes these connections, so a server URL must use
   https and resolve only to public addresses. Loopback, private, link-local
   (including cloud metadata), and shared addresses are refused. The check runs
@@ -629,7 +663,7 @@ with:
 ```sh
 uv venv /tmp/codex-agents-api-sdk
 uv pip install --python /tmp/codex-agents-api-sdk/bin/python openai==3.17.0
-CODEX_AGENTS_API_SDK_PYTHON=/tmp/codex-agents-api-sdk/bin/python just test -p codex-agents-api --run-ignored all
+RUST_MIN_STACK=8388608 CODEX_AGENTS_API_SDK_PYTHON=/tmp/codex-agents-api-sdk/bin/python cargo test -p codex-agents-api --test api -- --ignored
 ```
 
 The inventory test detects drift in the pinned SDK resource surface. The

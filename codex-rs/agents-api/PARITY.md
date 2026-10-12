@@ -35,7 +35,7 @@ in [GOALS.md](GOALS.md).
 Updated: 2026-10-12. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
 per-operation detail lives in its `remaining` fields.
 
-**Scorecard:** 67 operations: 55 `verified`, 2 `implemented`, 5 `partial`,
+**Scorecard:** 67 operations: 57 `verified`, 2 `implemented`, 3 `partial`,
 5 `missing`. The 5 missing (environment templates) are outside the parity
 target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 12 are verified (BEH-001, BEH-003..007, BEH-009,
 BEH-012..016), 4 are partial, and 2 are missing (BEH-011 is out of scope;
@@ -58,15 +58,15 @@ only, and there is no Windows evidence. See
 
 | Area | Ops | Status | Works today | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Saved agents | AGT-001..005 | 3 verified (AGT-003..005), 2 partial | Full CRUD, creation-order pagination, every pinned configuration family round trips with omit/null/replace semantics, snapshots survive agent deletion and cold resume, project-scoped | Built-in capability execution (G06-G08); real-provider acceptance (AGT-002). Instructions and input take up to 1 MiB and agents 128 tools |
-| Sessions | SES-001..005 | 3 verified (SES-002, SES-004..005), 2 partial | CRUD, initial input and streaming, `none` and `self_hosted` environments, `vault_ids`, next-turn model/effort/tier updates, deletion with a durable cleanup queue, project-scoped | Capability execution (G06-G08) at creation (SES-001); provider-specific model compatibility (SES-003). Every SDK create, read, and update field is handled (audited 2026-10-12) |
+| Saved agents | AGT-001..005 | 4 verified (AGT-001, AGT-003..005), 1 partial | Full CRUD, creation-order pagination, every pinned configuration family with omit/null/replace semantics, snapshots after deletion and cold resume, programmatic calling with catalog-mode refusals, project-scoped | Real-provider acceptance (AGT-002). Instructions and input take up to 1 MiB and agents 128 tools |
+| Sessions | SES-001..005 | 4 verified (SES-001..002, SES-004..005), 1 partial | CRUD, initial input/streaming, `none` and `self_hosted`, `vault_ids`, next-turn model/effort/tier, durable deletion, programmatic calls and automatic compaction through cold resume, project-scoped | Provider-specific model compatibility (SES-003). Every SDK create, read, and update field is handled (audited 2026-10-12) |
 | Input events | EVT-001 | verified | Validated ordered batches, text up to 1 MiB, data-URL and remote https images (fetched under the egress rules), string and content-part function results (10,000 bytes), session-scoped `Idempotency-Key` replay | None. Batching and idempotency semantics are the contract by decision (2026-10-12) |
 | Streaming | EVT-002 | partial | Lifecycle, item, text and reasoning deltas, content parts, `error`, subagent, environment, and command-output events | Codex sends no command-output deltas for remote commands (output arrives on the item); no replay, by contract |
 | Items and turns | ITM-001, TRN-001..002 | 3 verified | Message, reasoning, function, MCP, web search, command, and subagent create/send/interrupt items (with the subagent's model), and `agent_message` items between agents; `queued` turns while input waits for an executor; turn usage, error codes, and pagination | None. Engine limit: wait/close/resume subagent items |
 | Subagents | SUB-001..006 | 6 verified | Resources, paginated items and turns per subagent, cancellation, restart continuity | None. `instructions` is always null and `closed` never occurs: Codex V2 reports neither, accepted as engine limits (2026-10-12) |
 | Functions | (in EVT/BEH-007) | verified | Tagged functions, result/error flow, content parts, duplicate and race handling, deferred functions found through tool search (offered up front on models without it) | None |
-| MCP and built-ins | (BEH-008) | partial | HTTP MCP with vault credentials and tool/resource selection; built-in web search with every setting (provider-dependent; mock evidence) | Inline MCP authorization, request metadata, a real-provider web search run, other built-in slices (G07), programmatic tool calling (G08) |
-| Harness features | (BEH-009) | BEH-009 verified | Multi-agent delegation within Codex V2's engine limits | Compaction controls and programmatic tool calling (G08), tracked in AGT-001 and BEH-008 |
+| MCP and built-ins | (BEH-008) | partial | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence) | A real-provider web search run |
+| Harness features | (BEH-009, G08) | BEH-009 verified; G08 compaction/programmatic verified locally | Multi-agent delegation within Codex V2 limits; automatic compaction preserves full public history through cold resume; sandboxed V8 nested function calls, cancellation, fail-closed host and model-mode refusals | Skills/plugins cross-session isolation (G08); no public compaction controls/items in the pinned contract |
 | Environments | ENV-001..003 | 1 verified (ENV-001), 2 implemented | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss | One real-provider run; Windows and cross-OS execution (ENV-002..003). Self-hosted environments never expire |
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
 | Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |
@@ -82,8 +82,10 @@ only, and there is no Windows evidence. See
 
 Ordered by the number of rows each item unblocks:
 
-1. **Capability gaps:** deferred functions and tool search (G06), built-in
-   capability slices (G07), compaction and programmatic tool calling (G08).
+1. **Capability evidence:** a real-provider web search run (BEH-008) and
+   skills/plugins cross-session isolation (G08). Tool search, automatic
+   compaction, and programmatic calling have local mock-provider evidence
+   (2026-10-12); named tests live in the inventory.
 2. **Platform evidence (G12):** Windows and cross-OS worker/executor runs, SDK
    scenarios for every implemented resource, and
    provider interoperability (BEH-018).

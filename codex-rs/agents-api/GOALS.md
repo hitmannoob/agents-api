@@ -92,9 +92,11 @@ Current boundaries:
 - The Skills API is complete locally (2026-10-12). Self-hosted sessions can
   install pinned Skills API versions through a local `skills` extension on
   `self_hosted` environments.
-- Missing outright: deferred functions and tool search, built-in capability
-  execution, compaction controls, programmatic tool calling,
-  `environment_variable` credentials, and OAuth refresh.
+- Tool search, programmatic calling, inline MCP authorization, request metadata,
+  and automatic compaction execute locally (2026-10-12; evidence in G06–G08).
+  Web search still needs a real-provider run; skills/plugins need cross-session
+  isolation evidence. The pinned contract has no compaction controls/items.
+  `environment_variable` credentials and OAuth refresh are out of scope.
 
 ## Execution order and tracking
 
@@ -112,7 +114,7 @@ fixture design may start earlier.
 | G05 | Complete events, items, turns, and usage (complete locally) | G00, G02 | Text deltas, item families, transitions, usage |
 | G06 | Complete function-tool behavior (complete locally except deferred functions/tool search) | G00, G04, G05 | Content/limits, deferred tools, failure cases |
 | G07 | Complete MCP and built-in controls (HTTP MCP complete locally; built-in capabilities open) | G00, G03, G05 | MCP, built-in capabilities, isolation |
-| G08 | Expose remaining harness capabilities (subagents complete locally; compaction, programmatic calls, skills/plugins open) | G00, G03, G05, G07 | Delegation, compaction, programmatic calls, skills/plugins |
+| G08 | Expose remaining harness capabilities (subagents, automatic compaction, programmatic calls complete locally; skills/plugins isolation open) | G00, G03, G05, G07 | Delegation, compaction, programmatic calls, skills/plugins |
 | G09 | Implement environment lifecycle (self-hosted complete locally; managed out of scope) | G00, G01, G02 | Self-hosted attachment, managed provisioning, lifecycle recovery |
 | G10 | Implement files and artifacts (complete locally for self-hosted, including the Skills API) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
 | G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
@@ -759,8 +761,8 @@ else is rejected with an explicit reason:
 
 Each server becomes a session-scoped Codex `mcp_servers` entry through thread
 configuration, so Codex's own MCP connection manager connects and calls it. The
-entry sets only `url`, `http_headers`, `enabled_tools`, `required`, `enabled`,
-and auto-approval, so no public field can reach worker-local options such as
+entry sets only `url`, `http_headers`, `request_meta`, `enabled_tools`, `required`,
+`enabled`, and auto-approval, so no public field can reach worker-local options such as
 header helper commands. Worker-configured servers stay disabled (the existing
 policy), and a public label that shadows one is rejected. Plugins, apps, and
 agent spawning remain off.
@@ -793,9 +795,18 @@ and the required-server failed turn. Unit test:
 Remaining:
 - MCP resources: Codex's resource tools are off for every session (G12 fix),
   so `allowed_tools` covers everything the model can reach on a server.
-- MCP credentials: vault credentials work (G11). Inline `authorization` and
-  `Authorization` headers stay rejected, because the transport is stored and
-  returned as non-secret configuration.
+- MCP credentials and metadata: complete locally 2026-10-12. Inline
+  `transport.authorization` is write-only and encrypted with the session's
+  stdio secrets; bare tokens use Bearer, explicit schemes survive. Empty
+  values and `credential_id` conflicts return 400; inline authorization wins
+  over auto-matched credentials. HTTP transport `headers` are non-secret
+  configuration and round trip in agent and session responses. An Authorization
+  header is refused; use `transport.authorization` instead.
+  `request_metadata` maps to per-server `request_meta` and tools/call `_meta`,
+  with Codex keys winning collisions. Evidence:
+  `mcp::mcp_inline_authorization_and_metadata_survive_session_snapshots`,
+  `mcp_tests::inline_authorization_is_bounded_and_preserves_explicit_schemes`,
+  and `mcp_tests::authorization_rejects_conflicts_and_stdio_fields`.
 - Built-in web search (decision 2026-09-28, reversed 2026-10-12): stayed
   rejected, like deferred functions. The hosted tool is only sent when the provider reports
   web-search capability, and some models use Codex's standalone `web.run`.
@@ -812,7 +823,7 @@ Remaining:
   (mock provider); a real-provider run is still required.
 - Programmatic tool calling belongs to G08.
 
-## G08 — Remaining harness features (subagents complete locally)
+## G08 — Remaining harness features (subagents, compaction, programmatic calls complete locally)
 
 **Outcome:** supported harness features are configurable through the API and have
 correct session, event, and ownership semantics.
@@ -820,32 +831,54 @@ correct session, event, and ownership semantics.
 - [x] Map documented delegation/multi-agent configuration to existing Codex
   mechanisms. Define parent/child ownership, cancellation, inherited restrictions,
   persisted outcomes, and usage accounting before exposing it.
-- [ ] Expose supported compaction controls and observable outcomes. Preserve
-  incremental history construction and existing context/cache invariants.
-- [ ] Map programmatic tool calling to existing code-mode/tool machinery where
-  suitable; define its execution boundary, callback handling, and limits.
+- [x] Compaction (2026-10-12): the pinned contract has no public controls or
+  compaction items. Codex compacts automatically; model context survives cold
+  resume while public history stays complete. `contextCompaction` items are
+  not public. Evidence: `compaction::automatic_compaction_survives_cold_resume`.
+- [x] Programmatic tool calling (2026-10-12): enabled maps to
+  `features.code_mode`, a fail-closed host, and cell interruption on cancel.
+  Execution uses the sandboxed V8 `codex-code-mode-host` process with no fs/net;
+  nested calls use the normal `function_call`/`requires_action` result path.
+  Exec yields after 30s by default, output has a token cap, and cancellation
+  ends running cells. A missing host cannot fall back to in-process execution.
+  API overrides turn code mode off otherwise; the model catalog's `tool_mode`
+  takes precedence. `model/list.toolMode` exposes it: explicit disabled is
+  refused on `codeMode`/`codeModeOnly`, and enabled is refused on `direct`.
+  Most current gpt-6-* and gpt-5.6-* catalog entries are `code_mode_only`.
+  Evidence: `programmatic::programmatic_tool_calls_reach_the_application_and_respect_the_model`
+  (nested result, plain-session isolation, cancellation, both refusals).
 - [ ] Add supported skills/plugin selection and configuration. Persist selections
   so restart does not silently change the session's enabled behavior.
 - [x] Keep API adaptation in this crate or an appropriate existing crate. Add to
   `codex-core` only when the missing behavior belongs in the harness itself.
+  Harness additions (2026-10-12): `codex-config` stores per-server `request_meta`,
+  `codex-core` merges it into tools/call `_meta` and preserves it through config
+  replacement, and app-server/protocol exposes catalog `toolMode`. Evidence:
+  `serialize_round_trips_server_config_with_request_meta`,
+  `mcp_tool_call_request_meta_includes_turn_metadata_for_custom_server`,
+  `blocking_replace_mcp_servers_preserves_request_meta`, and app-server
+  `model_list` tests. API secrets and public adaptation stay in this crate.
 
 Acceptance: one contract fixture per capability plus combined scenarios: child
 cancellation, compaction followed by cold resume, nested function callbacks, and
 skills/plugins isolated between sessions. Harness logic changes require the
 repository's relevant integration tests in addition to API tests.
 
-Triage (2026-09-28):
+Triage (2026-09-28; updated 2026-10-12):
 - **Compaction:** the pinned contract exposes no compaction controls or
   outcomes ("Summarizing previous work to manage its context window" is
-  automatic), so there is nothing public to add.
+  automatic). Automatic compaction and cold resume are now verified with a
+  mock provider; public records retain the full history and omit compaction.
 - **Skills and plugins:** these come from environment `capability_directories`,
   the Skills API, and hosted environments, so they wait for G09/G10.
   Update (2026-10-12): capability directories (G09) and pinned Skills API
   versions (G10) now reach self-hosted sessions. Both selections persist:
   Codex keeps the thread's capability roots, and pins live in the database.
   The open checklist item still lacks a cross-session isolation test.
-- **Programmatic tool calling:** needs Codex's code-mode host, whose V8 build
-  was unavailable here, so it stays rejected.
+- **Programmatic tool calling:** the V8 blocker is resolved. Codex-published
+  rusty_v8 artifacts and their manifest match `third_party/v8` checksums.
+  The host is built and shipped beside `codex-app-server`; enabled execution
+  and model-mode refusals have local behavioral evidence above.
 - **Subagents:** buildable now, and done first by decision.
 
 Evidence (2026-09-28, subagents). Experiments against the in-process worker
@@ -971,8 +1004,8 @@ Full compatibility would mean implementing, in this service:
 - environment keys, statuses, events, and the required action with its
   reconnection wait.
 
-Tests would run the exec-server library in-process, because the `codex` CLI
-needs a V8 build unavailable here.
+Tests run the exec-server library in-process. The earlier CLI V8 build blocker
+was resolved on 2026-10-12 with verified Codex-published artifacts (see G08).
 
 Deferred by decision (2026-09-29), resumed 2026-10-06 for self-hosted
 environments only, in stages:
@@ -2040,6 +2073,49 @@ pinned-SDK tests passed with `openai==3.17.0` (mock provider, macOS).
 Result: 48 verified, 2 implemented, 12 partial, and 5 missing operations; 11
 of 18 behavior rows verified.
 
+## G08 and MCP completion evidence (2026-10-12)
+
+Programmatic calls, automatic compaction, inline MCP authorization, and request
+metadata are implemented; local behavioral evidence is named in G07/G08 above.
+AGT-001 and SES-001 have no remaining in-scope variants and move to verified.
+BEH-008 stays partial only for a real-provider web search run. Current inventory:
+57 verified, 2 implemented, 3 partial, and 5 missing operations (all missing
+outside the parity target); 12 of 18 behavior rows verified.
+
+Verification (local macOS, mock provider/MCP, real V8 host): `CARGO_INCREMENTAL=0`
+and the verified `RUSTY_V8_ARCHIVE` / `RUSTY_V8_SRC_BINDING_PATH` were set for all
+Cargo commands, run from `codex-rs/`.
+
+| Command | Result |
+| --- | --- |
+| `cargo build -p codex-code-mode-host -p codex-app-server` | Passed, including rebuild after experimental schema regeneration |
+| `cargo test -p codex-agents-api --lib` | 24 passed |
+| `RUST_MIN_STACK=8388608 cargo test -p codex-agents-api --test api` | 48 passed, 3 SDK tests ignored |
+| `RUST_MIN_STACK=8388608 cargo test -p codex-agents-api --test api mcp` | 4 passed after the HTTP header correction; non-secret headers round trip in agent/session responses through cold resume, authorization stays hidden |
+| `RUST_MIN_STACK=8388608 CODEX_AGENTS_API_SDK_PYTHON=/tmp/codex-agents-api-sdk/bin/python cargo test -p codex-agents-api --test api -- --ignored` | 3 passed with openai==3.17.0, including a supplied x-tenant header round trip; initially failed because HTTP headers were omitted. Only authorization is write-only and encrypted |
+| `cargo test -p codex-app-server --test all model_list` | 20 passed |
+| `cargo test -p codex-config mcp` | 61 passed |
+| `cargo test -p codex-core --lib -- mcp_tool_call request_meta replace_mcp_servers` | Stack overflow in executed-tool-call metadata test |
+| `RUST_MIN_STACK=8388608 cargo test -p codex-core --lib -- mcp_tool_call request_meta replace_mcp_servers` | 168 passed; the repository's test recipe uses this stack size |
+| `just write-app-server-schema --experimental` (repository root) | Passed; regenerated only the experimental toolMode exports |
+| `cargo test -p codex-app-server-protocol` | 320 passed, 1 ignored; initially failed on the stale experimental bundle, fixed by regeneration |
+| `cargo clippy -p codex-agents-api --tests` | Passed; pre-existing warnings below |
+| `cargo clippy -p codex-config --tests` | Passed |
+| `cargo clippy -p codex-core --tests` | Passed; pre-existing warnings below |
+| `cargo clippy -p codex-mcp --tests` | Passed |
+| `cargo clippy -p codex-cli --tests` | Passed after replacing the new TUI toolMode conversion's redundant closure with `ToolMode::to_core` |
+| `cargo clippy -p codex-protocol --tests` | Passed |
+| `cargo clippy -p codex-app-server-protocol --tests` | Passed |
+| `cargo clippy -p codex-app-server --tests` | Passed; pre-existing warning below |
+| `cargo clippy -p codex-tui --tests` | Passed; checked because the CLI lint fix changes TUI |
+
+Seven pre-existing warnings remain in untouched code: app-server
+`src/message_processor.rs:372` (`let_and_return`); agents-api runtime test's
+`src/runtime.rs:17,36,231,299` (`RECLAIM_TIMEOUT`, `zombie`, `reclaim_orphan`,
+`terminate` dead code); core `tests/suite/openai_file_mcp.rs:47` (`body_json`)
+and `tests/suite/scenarios.rs:42` (`ReasoningEffort`) unused imports. No warnings
+remain in the changed code.
+
 ## Immediate next implementation slices
 
 Updated 2026-10-12. G00–G05 slices and the G01/G02 recovery slices that
@@ -2055,9 +2131,13 @@ above and in git.
 4. **Contract gaps without provider dependencies: done 2026-10-12** (webhook
    event types, beta header, pagination evidence, cursor expiry, Files scope),
    and a second decision pass the same day.
-5. **Deferred functions and tool search (G06), then built-in capability
-   slices (G07).** Both need provider/model support reported by the worker.
-6. **G08 compaction controls and programmatic tool calling.**
+5. **Deferred functions and tool search (G06): complete locally 2026-10-12.**
+   Built-in web search (G07) still needs real-provider evidence.
+6. **G08 automatic compaction and programmatic tool calling: complete locally
+   2026-10-12.** No public compaction controls exist in the pinned contract;
+   nested calls, cancellation, model refusals, and compaction followed by cold
+   resume have mock-provider evidence. Skills/plugins cross-session isolation
+   remains open.
 7. **G12 evidence gaps.** SDK scenarios for every implemented resource
    a Windows/cross-OS worker and executor run, and
    provider interoperability (BEH-018).

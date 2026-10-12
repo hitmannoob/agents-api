@@ -52,13 +52,24 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-12) is 55 verified, 2 implemented, 5 partial, and
+The current count (2026-10-12) is 57 verified, 2 implemented, 3 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
 of scope since 2026-10-06. Verified: ART-001..004, SUB-001..006, TRN-002,
-AGT-003..005, SES-002, SES-004..005, EVT-001, ENV-001, ITM-001, TRN-001, VLT-001..004, CRD-001..005, FIL-001..005,
+AGT-001, AGT-003..005, SES-001..002, SES-004..005, EVT-001, ENV-001, ITM-001, TRN-001, VLT-001..004, CRD-001..005, FIL-001..005,
 WHK-001..008, TRC-001, SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
 evidence: ENV-002..003. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
 per-area summary.
+
+G08 closes AGT-001 and SES-001's last gaps (2026-10-12):
+`programmatic::programmatic_tool_calls_reach_the_application_and_respect_the_model`
+verifies nested function results, cancellation, isolation, and model-mode
+refusals with a mock provider and real V8 host;
+`compaction::automatic_compaction_survives_cold_resume` verifies automatic
+compaction and complete public history after cold resume. The pinned contract
+has no public compaction settings or items. BEH-008 stays partial only for a
+real-provider web search run; inline authorization and request metadata are
+verified by `mcp::mcp_inline_authorization_and_metadata_survive_session_snapshots`
+and the authorization unit tests (mock MCP server).
 
 ## What is pinned
 
@@ -190,3 +201,13 @@ Amendments under the same `openai==3.17.0` pin:
   `model/list` reports `supportsSearchTool`; deferred functions are searched
   in a `deferred` namespace on capable models and offered up front otherwise.
   BEH-007 moved to verified (additive).
+- 2026-10-12: G08 programmatic calling executes through the fail-closed V8
+  host with ordinary nested function calls, cancellation, and model-mode
+  refusals (`model/list.toolMode`). Automatic compaction and cold resume
+  preserve public history; compaction has no public controls/items. Inline
+  MCP authorization is encrypted and write-only; HTTP transport headers are
+  non-secret configuration and round trip. An Authorization header is refused;
+  use `transport.authorization`. `request_metadata` reaches tools/call `_meta` through
+  `codex-config`/`codex-core` `request_meta`. AGT-001 and SES-001 moved to
+  verified; BEH-008 stays partial only for real-provider web search. Evidence
+  is local, mock-provider/MCP with the real V8 host (tests named above).
