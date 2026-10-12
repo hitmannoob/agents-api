@@ -109,6 +109,36 @@ pub(crate) struct Location {
     timezone: Option<String>,
 }
 
+/// The Codex `web_search` mode and `tools.web_search` settings for an agent's
+/// enabled web search tool. TOML has no null, so unset settings are omitted.
+pub(crate) fn web_search(config: &crate::resources::AgentConfig) -> Option<(SearchMode, Value)> {
+    config.tools.iter().find_map(|tool| match tool {
+        Tool::Capability(CapabilityTool::WebSearch {
+            allowed_domains,
+            context_size,
+            location,
+            mode,
+        }) if *mode != SearchMode::Disabled => {
+            let mut settings = serde_json::json!({"context_size": context_size});
+            if let Some(domains) = allowed_domains {
+                settings["allowed_domains"] = serde_json::json!(domains);
+            }
+            if let Some(location) = location {
+                let set: serde_json::Map<String, Value> = serde_json::to_value(location)
+                    .ok()?
+                    .as_object()?
+                    .iter()
+                    .filter(|(_, value)| !value.is_null())
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                settings["location"] = Value::Object(set);
+            }
+            Some((mode.clone(), settings))
+        }
+        _ => None,
+    })
+}
+
 fn default_if_null<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,

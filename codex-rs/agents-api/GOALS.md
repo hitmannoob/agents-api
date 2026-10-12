@@ -787,12 +787,20 @@ Remaining:
 - MCP credentials: vault credentials work (G11). Inline `authorization` and
   `Authorization` headers stay rejected, because the transport is stored and
   returned as non-secret configuration.
-- Built-in web search (decision 2026-09-28): stays rejected, like deferred
-  functions. The hosted tool is only sent when the provider reports
+- Built-in web search (decision 2026-09-28, reversed 2026-10-12): stayed
+  rejected, like deferred functions. The hosted tool is only sent when the provider reports
   web-search capability, and some models use Codex's standalone `web.run`.
   The worker reports neither, so enabling it could leave the model silently
   without search. The `[ ]` built-in item stays open until the worker reports
   that support.
+  Reversal (2026-10-12): web search runs, and the provider dependency is
+  documented instead. `mode`, `context_size`, `allowed_domains`, and
+  `location` map onto Codex's `web_search` and `tools.web_search` settings;
+  searches are recorded as `web_search_call` items. `cached` is refused on
+  `self_hosted`, where Codex would upgrade it to live. A provider without web
+  search support still leaves the model silently without it, which stays a
+  known limit. Evidence: `web_search::web_search_tools_reach_the_model_and_record_their_calls`
+  (mock provider); a real-provider run is still required.
 - Programmatic tool calling belongs to G08.
 
 ## G08 — Remaining harness features (subagents complete locally)

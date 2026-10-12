@@ -492,3 +492,6 @@ mod concurrency;
 
 #[path = "suite/projects.rs"]
 mod projects;
+
+#[path = "suite/web_search.rs"]
+mod web_search;

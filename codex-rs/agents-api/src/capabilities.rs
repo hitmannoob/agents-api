@@ -198,6 +198,10 @@ pub(crate) async fn overrides(
     if let Some(effort) = config.reasoning.as_ref().and_then(|r| r.effort.as_ref()) {
         overrides["model_reasoning_effort"] = json!(effort);
     }
+    if let Some((mode, settings)) = crate::agent_tools::web_search(config) {
+        overrides["web_search"] = json!(mode);
+        overrides["tools.web_search"] = settings;
+    }
     // Plugins in the caller's capability directories need Codex plugins on.
     // Plugins the worker's own configuration installs stay off, like its other
     // MCP sources, and so do remote plugins.

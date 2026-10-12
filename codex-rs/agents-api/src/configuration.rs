@@ -190,10 +190,6 @@ pub(crate) fn validate_execution(
             Tool::Function(tool) if tool.defer_loading => Some("deferred function discovery"),
             Tool::Function(_) => None,
             Tool::Capability(CapabilityTool::ProgrammaticToolCalling { enabled: false }) => None,
-            Tool::Capability(CapabilityTool::WebSearch {
-                mode: SearchMode::Disabled,
-                ..
-            }) => None,
             Tool::Capability(CapabilityTool::ToolSearch) => Some("tool search"),
             Tool::Capability(CapabilityTool::ProgrammaticToolCalling { enabled: true }) => {
                 Some("programmatic tool calling")
@@ -210,7 +206,21 @@ pub(crate) fn validate_execution(
                 ));
             }
             Tool::Capability(tool @ CapabilityTool::Mcp { .. }) => crate::mcp::unsupported(tool),
-            Tool::Capability(CapabilityTool::WebSearch { .. }) => Some("web search"),
+            // Codex upgrades cached search to live for an unsandboxed thread,
+            // as self-hosted sessions run, so it cannot honor cached there.
+            Tool::Capability(CapabilityTool::WebSearch {
+                mode: SearchMode::Cached,
+                ..
+            }) if matches!(
+                environment,
+                crate::resources::Environment::SelfHosted { .. }
+            ) =>
+            {
+                return Err(invalid(
+                    "web_search mode cached is not available on self_hosted environments; use live",
+                ));
+            }
+            Tool::Capability(CapabilityTool::WebSearch { .. }) => None,
         };
         if let Some(feature) = unsupported {
             return Err(invalid(format!("{feature} execution is not implemented")));

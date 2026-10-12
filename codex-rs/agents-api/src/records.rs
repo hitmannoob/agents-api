@@ -190,6 +190,22 @@ pub(crate) async fn running_turns(
         .bind(id).fetch_all(&state.store.0).await.map_err(anyhow::Error::from).map_err(Into::into)
 }
 
+/// A Codex web search action in the public shape, which names action types
+/// in snake_case and keeps only their documented fields.
+fn web_search_action(action: &Value) -> Value {
+    match action["type"].as_str() {
+        Some("search") => {
+            json!({"type":"search","query":action["query"],"queries":action["queries"]})
+        }
+        Some("openPage") => json!({"type":"open_page","url":action["url"]}),
+        Some("findInPage") => {
+            json!({"type":"find_in_page","url":action["url"],"pattern":action["pattern"]})
+        }
+        Some(_) => json!({"type":"other"}),
+        None => Value::Null,
+    }
+}
+
 pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), ApiError> {
     let params = &raw["params"];
     let Some(thread_id) = params["threadId"].as_str() else {
@@ -358,6 +374,9 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
                 Some("commandExecution") => {
                     json!({"type":"command_execution","command":item["command"],"cwd":item["cwd"],"duration_ms":item["durationMs"],
                         "exit_code":item["exitCode"],"output":item["aggregatedOutput"]})
+                }
+                Some("webSearch") => {
+                    json!({"type":"web_search_call","action":web_search_action(&item["action"])})
                 }
                 Some("mcpToolCall") => {
                     json!({"type":"mcp_call","server_label":item["server"],"name":item["tool"],"arguments":item["arguments"],

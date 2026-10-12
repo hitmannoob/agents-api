@@ -312,11 +312,22 @@ answering it, so the session starts another turn instead of going idle. A
 cancel sent before Codex has reported the turn it just started (for example,
 right after creating a session with input) still stops that turn.
 
-Deferred functions, tool search, enabled web search, and enabled programmatic
-calling can be saved/retrieved but their execution is rejected. Deferred functions and web search depend on model and
-provider support the worker does not report, so enabling them could leave the
-model silently without the tool. Disabled programmatic calling/web search are
-accepted. Prototype size limits below still apply to the original routes.
+Deferred functions, tool search, and enabled programmatic calling can be
+saved/retrieved but their execution is rejected. Deferred functions depend on
+model and provider support the worker does not report, so enabling them could
+leave the model silently without the tool. Disabled programmatic calling is
+accepted.
+
+`web_search` runs through Codex's built-in search: `mode`, `context_size`,
+`allowed_domains`, and `location` become the thread's `web_search` and
+`tools.web_search` settings, and each search is recorded as a
+`web_search_call` item with its `search`, `open_page`, or `find_in_page`
+action. The search itself is done by the model provider, so it depends on the
+provider: OpenAI and Responses-compatible providers receive the hosted tool,
+but a provider without web search support leaves the model without it, and one
+without live web access gets cached results instead, without an error.
+`cached` is refused on `self_hosted` environments, because Codex upgrades
+cached search to live for their unsandboxed threads. Prototype size limits below still apply to the original routes.
 
 `multi_agent: {enabled: true}` turns on Codex's V2 multi-agent runtime. The
 root agent can spawn subagents, each a Codex child thread, up to
@@ -647,8 +658,8 @@ remain subject to the selected model's support.
 
 MCP selections refer to server-side configuration, resolved for the session's
 workspace. Unknown or disabled servers and tools forbidden by server-side filters
-are rejected before execution. Unselected servers, plugins, apps, web search, and
-agent spawning are disabled for these threads. Omitted `tools`/`mcpServers` mean
+are rejected before execution. Unselected servers, plugins, apps, web search without a
+`web_search` tool, and agent spawning are disabled for these threads. Omitted `tools`/`mcpServers` mean
 empty lists, including when loading older Agent records. This replaces the first
 stage's inherited MCP behavior. Addresses, credentials, and approval policy remain
 server-side; configure MCP tools for unattended use there if appropriate.
