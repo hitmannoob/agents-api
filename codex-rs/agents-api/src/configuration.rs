@@ -206,13 +206,10 @@ pub(crate) fn validate_execution(
         ));
     }
     for tool in &config.tools {
-        let unsupported = match tool {
-            Tool::Function(_) => None,
-            Tool::Capability(CapabilityTool::ProgrammaticToolCalling { enabled: false }) => None,
-            Tool::Capability(CapabilityTool::ToolSearch) => None,
-            Tool::Capability(CapabilityTool::ProgrammaticToolCalling { enabled: true }) => {
-                Some("programmatic tool calling")
-            }
+        let unsupported: Option<&str> = match tool {
+            Tool::Function(_)
+            | Tool::Capability(CapabilityTool::ProgrammaticToolCalling { .. })
+            | Tool::Capability(CapabilityTool::ToolSearch) => None,
             Tool::Capability(tool @ CapabilityTool::Mcp { .. })
                 if crate::mcp::needs_environment(tool)
                     && !matches!(

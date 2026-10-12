@@ -4,7 +4,10 @@ codex_rust_crate(
     name = "agents-api",
     compile_data = glob(["migrations/**"]),
     crate_name = "codex_agents_api",
-    extra_binaries = ["//codex-rs/app-server:codex-app-server"],
+    extra_binaries = [
+        "//codex-rs/app-server:codex-app-server",
+        "//codex-rs/code-mode-host:codex-code-mode-host",
+    ],
     integration_compile_data_extra = [
         "CONTRACT_INVENTORY.json",
         "src/runtime.rs",

@@ -504,3 +504,9 @@ mod images;
 
 #[path = "suite/tool_search.rs"]
 mod tool_search;
+
+#[path = "suite/programmatic.rs"]
+mod programmatic;
+
+#[path = "suite/compaction.rs"]
+mod compaction;

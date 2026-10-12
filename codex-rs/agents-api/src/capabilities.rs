@@ -158,6 +158,27 @@ pub(crate) async fn overrides(
             ));
         }
     }
+    // A model's catalog entry can pin how it calls tools, and Codex follows it
+    // over any configuration. Without the tool the model decides; an explicit
+    // setting the model cannot honor is refused rather than ignored.
+    if let Some(enabled) = crate::agent_tools::programmatic_tool_calling(config) {
+        let mode = model(state, &config.model)
+            .await?
+            .and_then(|model| model["toolMode"].as_str().map(str::to_owned));
+        match (enabled, mode.as_deref()) {
+            (false, Some("codeMode" | "codeModeOnly")) => {
+                return Err(crate::contract::invalid(
+                    "selected model calls tools from code; programmatic_tool_calling cannot be disabled",
+                ));
+            }
+            (true, Some("direct")) => {
+                return Err(crate::contract::invalid(
+                    "selected model does not support programmatic tool calling",
+                ));
+            }
+            _ => {}
+        }
+    }
     let cwd = match environment {
         // A self-hosted workspace is not on this host.
         Environment::None | Environment::SelfHosted { .. } => None,
@@ -233,6 +254,8 @@ pub(crate) async fn overrides(
         // resource tools would read any resource of a server, beyond the
         // caller's allowed tools.
         "features.goals": false,
+        "features.code_mode": false,
+        "features.code_mode_only": false,
         "features.mcp_resources": false,
         "tools.experimental_request_user_input.enabled": false,
         "model_reasoning_summary": config.reasoning.as_ref().and_then(|r| r.summary.as_deref()).unwrap_or("none"),
@@ -242,6 +265,16 @@ pub(crate) async fn overrides(
     });
     if let Some(effort) = config.reasoning.as_ref().and_then(|r| r.effort.as_ref()) {
         overrides["model_reasoning_effort"] = json!(effort);
+    }
+    // Programmatic tool calling is Codex's code mode: the model writes
+    // JavaScript, run by the sibling `codex-code-mode-host`, that calls the
+    // session's tools. It fails closed rather than silently falling back to
+    // direct calls when the host is missing, and interrupts end running cells.
+    if crate::agent_tools::programmatic_tool_calling(config) == Some(true) {
+        overrides["features.code_mode"] = json!(true);
+        overrides["features.code_mode_host"] =
+            json!({"enabled": true, "disable_in_process_fallback": true});
+        overrides["features.code_mode_interrupt"] = json!(true);
     }
     if let Some((mode, settings)) = crate::agent_tools::web_search(config) {
         overrides["web_search"] = json!(mode);

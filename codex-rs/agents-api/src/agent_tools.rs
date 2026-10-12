@@ -109,6 +109,14 @@ pub(crate) struct Location {
     timezone: Option<String>,
 }
 
+/// The agent's programmatic tool calling setting, when it has the tool.
+pub(crate) fn programmatic_tool_calling(config: &crate::resources::AgentConfig) -> Option<bool> {
+    config.tools.iter().find_map(|tool| match tool {
+        Tool::Capability(CapabilityTool::ProgrammaticToolCalling { enabled }) => Some(*enabled),
+        _ => None,
+    })
+}
+
 /// The Codex `web_search` mode and `tools.web_search` settings for an agent's
 /// enabled web search tool. TOML has no null, so unset settings are omitted.
 pub(crate) fn web_search(config: &crate::resources::AgentConfig) -> Option<(SearchMode, Value)> {
