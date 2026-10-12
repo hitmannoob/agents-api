@@ -241,6 +241,35 @@ def check_structured(run):
         raise Model(f"answered {answer}")
 
 
+def check_web_search(run):
+    session = run.create(
+        agent={"tools": [{"type": "web_search", "mode": "live"}]},
+        input="Search the web for the latest stable Python release listed on "
+        "python.org and reply with its version number.",
+    )
+    session, turns = run.settle(session.id)
+    if turns[0].status == "failed":
+        # The provider, not the service, decides whether hosted search works.
+        raise Skip(f"the provider refused web search: {turns[0].error}")
+    expect(turns[0].status == "completed", f"turn {turns[0].status}")
+    items = list(run.sessions.items.list(session.id, order="asc"))
+    searches = [item for item in items if item.type == "web_search_call"]
+    if not searches:
+        raise Model("answered without searching")
+    expect(
+        all(item.status == "completed" for item in searches),
+        [item.status for item in searches],
+    )
+    answers = [
+        index
+        for index, item in enumerate(items)
+        if item.type == "message" and item.role == "assistant"
+    ]
+    if not answers:
+        raise Model("searched but never answered")
+    expect(items.index(searches[0]) < answers[-1], "the answer preceded the search")
+
+
 def check_cancel(run):
     session = run.create(input="Write a 3000-word essay on the history of mathematics.")
     deadline = time.monotonic() + 60
@@ -386,6 +415,7 @@ CHECKS = {
     "stream": check_stream,
     "function": check_function,
     "structured": check_structured,
+    "web_search": check_web_search,
     "cancel": check_cancel,
     "traces": check_traces,
     "self_hosted": check_self_hosted,
