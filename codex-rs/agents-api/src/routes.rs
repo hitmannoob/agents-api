@@ -592,6 +592,17 @@ pub(crate) async fn start_turn(
     // A cancel can arrive before Codex reports this turn started.
     if let Some(turn_id) = started.pointer("/turn/id").and_then(Value::as_str) {
         crate::lock(&state.started_turns).insert(id.to_owned(), (thread_id, turn_id.to_owned()));
+        // Traces name the model each response came from. A reroute Codex
+        // already reported for this turn wins.
+        sqlx::query(
+            "INSERT OR IGNORE INTO turn_models (session_id, turn_id, model) VALUES (?, ?, ?)",
+        )
+        .bind(id)
+        .bind(turn_id)
+        .bind(&session.agent.config.model)
+        .execute(&state.store.0)
+        .await
+        .map_err(anyhow::Error::from)?;
     }
     Ok(started)
 }

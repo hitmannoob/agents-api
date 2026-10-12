@@ -204,6 +204,7 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
             | "item/started"
             | "item/completed"
             | "thread/tokenUsage/updated"
+            | "model/rerouted"
     ) {
         return Ok(());
     }
@@ -292,6 +293,15 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
                 return Ok(());
             };
             crate::usage::record(&mut tx, &id, thread_id, turn_id, &params["tokenUsage"]).await?;
+        }
+        // Later responses in the turn come from the model the provider chose.
+        "model/rerouted" => {
+            if let (Some(turn_id), Some(model)) =
+                (params["turnId"].as_str(), params["toModel"].as_str())
+            {
+                sqlx::query("INSERT INTO turn_models (session_id, turn_id, model) VALUES (?, ?, ?) ON CONFLICT(session_id, turn_id) DO UPDATE SET model = excluded.model")
+                    .bind(&id).bind(turn_id).bind(model).execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+            }
         }
         // Subagents have no function tools, so only root turns wait on actions.
         "session.requires_action" if subagent.is_none() => {

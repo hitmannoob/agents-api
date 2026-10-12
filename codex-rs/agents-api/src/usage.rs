@@ -63,7 +63,7 @@ pub(crate) async fn record(
         .bind(id).bind(turn_id).bind(increase[0]).bind(increase[1]).bind(increase[2]).bind(increase[3]).bind(increase[4]).execute(&mut **tx).await?;
     // Codex reports usage once per model response, in order, which gives each
     // response in the turn's trace its usage.
-    sqlx::query("INSERT INTO generations (session_id, turn_id, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO generations (session_id, turn_id, input_tokens, output_tokens, total_tokens, model) VALUES (?1, ?2, ?3, ?4, ?5, (SELECT model FROM turn_models WHERE session_id = ?1 AND turn_id = ?2))")
         .bind(id).bind(turn_id).bind(increase[0]).bind(increase[2]).bind(increase[4]).execute(&mut **tx).await?;
     let turn_usage = usage(tx, id, Some(turn_id)).await?;
     sqlx::query("UPDATE public_records SET data = json_set(data, '$.usage', json(?)) WHERE session_id = ? AND kind = 'turn' AND id = ?")

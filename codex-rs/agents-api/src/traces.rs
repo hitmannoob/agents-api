@@ -97,6 +97,7 @@ struct Generation {
     input_tokens: i64,
     output_tokens: i64,
     total_tokens: i64,
+    model: Option<String>,
 }
 
 pub(crate) async fn list(
@@ -195,18 +196,21 @@ async fn trace(state: &State, session: &Value, root: Record) -> anyhow::Result<V
         .into_iter()
         .map(Record::from_row)
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let generations = sqlx::query_as::<_, (String, i64, i64, i64)>("SELECT turn_id, input_tokens, output_tokens, total_tokens FROM generations WHERE session_id = ? AND turn_id IN (SELECT value FROM json_each(?)) ORDER BY seq")
+    let generations = sqlx::query_as::<_, (String, i64, i64, i64, Option<String>)>("SELECT turn_id, input_tokens, output_tokens, total_tokens, model FROM generations WHERE session_id = ? AND turn_id IN (SELECT value FROM json_each(?)) ORDER BY seq")
         .bind(session_id)
         .bind(&turn_ids)
         .fetch_all(pool)
         .await?
         .into_iter()
-        .map(|(turn_id, input_tokens, output_tokens, total_tokens)| Generation {
-            turn_id,
-            input_tokens,
-            output_tokens,
-            total_tokens,
-        })
+        .map(
+            |(turn_id, input_tokens, output_tokens, total_tokens, model)| Generation {
+                turn_id,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                model,
+            },
+        )
         .collect::<Vec<_>>();
     let trace_id = Uuid::parse_str(&root.id)
         .map(|id| id.simple().to_string())
@@ -438,6 +442,9 @@ fn agent_spans(
                         &json!(reported.total_tokens),
                     ),
                 ]);
+                if let Some(model) = &reported.model {
+                    attributes.push(attribute("gen_ai.response.model", &json!(model)));
+                }
             }
             spans.push(span(
                 trace_id,

@@ -501,6 +501,9 @@ for an OTLP/HTTP collector, as the tracing guide shows.
   turn gets its own agent span beneath the root, holding its own work.
   Attributes use the OpenTelemetry GenAI names (`gen_ai.*`), with
   `openai.agents.*` for the agent type, status, and tool call and result.
+  Each `chat` span names its model in `gen_ai.response.model`: the model the
+  turn requested, or the one the provider rerouted it to. OpenAI publishes no
+  reference trace schema, so this format is the service's contract.
   String attributes are cut at 32 KiB.
 - **Timing:** times are when the service observed each turn and item.
   Responses are split by item order: a response starts when its input is ready

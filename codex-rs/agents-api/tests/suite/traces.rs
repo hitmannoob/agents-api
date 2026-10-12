@@ -122,6 +122,9 @@ async fn finished_turns_export_as_otlp_traces() -> anyhow::Result<()> {
         let asked: Value = serde_json::from_str(attribute(children[1], "gen_ai.input.messages").as_str().context("input")?)?;
         assert_eq!(asked.as_array().map(|items| items.iter().map(|item| item["type"].clone()).collect::<Vec<_>>()), Some(vec![json!("function_call_output")]));
         assert!(children.iter().all(|span| attribute(span, "gen_ai.usage.input_tokens").is_i64() || span["name"] != "chat"));
+        // Each response names the model it came from.
+        assert_eq!(children.iter().filter(|span| span["name"] == "chat").map(|span| attribute(span, "gen_ai.response.model")).collect::<Vec<_>>(),
+            vec![json!("mock-model"), json!("mock-model")]);
         // Every span belongs to the trace, has a unique ID, and lies within
         // the root agent's span.
         let mut span_ids = recorded.iter().map(|span| span["spanId"].clone()).collect::<Vec<_>>();
