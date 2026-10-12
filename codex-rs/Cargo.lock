@@ -2024,6 +2024,7 @@ dependencies = [
  "codex-protocol",
  "codex-rollout",
  "codex-secrets",
+ "codex-skills",
  "codex-state",
  "codex-tools",
  "codex-uds",
@@ -2052,6 +2053,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+ "zip",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
-//! A streaming `multipart/form-data` reader for file uploads. The `file` part
-//! is written to disk as it arrives and hashed on the way; other parts are
+//! A streaming `multipart/form-data` reader for file uploads. File parts are
+//! written to disk as they arrive and hashed on the way; other parts are
 //! small form fields kept in memory. Nothing holds a whole upload in memory.
 use crate::ApiError;
 use crate::contract::invalid;
@@ -9,6 +9,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
 /// Bytes of form fields and part headers an upload may carry besides its file.
@@ -21,6 +22,33 @@ pub(crate) struct Upload {
     pub(crate) filename: String,
     pub(crate) size: u64,
     pub(crate) sha256: String,
+}
+
+/// One received file part of a multi-file upload: its filename, where its
+/// contents were written, and its size.
+pub(crate) struct Part {
+    pub(crate) filename: String,
+    pub(crate) path: PathBuf,
+    pub(crate) size: u64,
+}
+
+/// A received multi-file upload: its form fields and its file parts in order.
+pub(crate) struct Parts {
+    pub(crate) fields: BTreeMap<String, String>,
+    pub(crate) files: Vec<Part>,
+}
+
+/// Which parts are files and where they go.
+enum Target<'a> {
+    /// Exactly one part named `file`, written to this path.
+    One(&'a Path),
+    /// Any number of parts with one of these names, up to `max`, written into
+    /// this directory by position.
+    Many {
+        names: &'a [&'a str],
+        directory: &'a Path,
+        max: usize,
+    },
 }
 
 enum Phase {
@@ -61,6 +89,64 @@ pub(crate) async fn receive(
     destination: &Path,
     max_file_bytes: u64,
 ) -> Result<Upload, ApiError> {
+    let (fields, mut files) =
+        parse(body, boundary, Target::One(destination), max_file_bytes).await?;
+    let (part, sha256) = files.pop().ok_or_else(|| invalid("file is required"))?;
+    Ok(Upload {
+        fields,
+        filename: part.filename,
+        size: part.size,
+        sha256,
+    })
+}
+
+/// Read an upload whose file parts are named one of `names`, writing each into
+/// `directory`: at most `max_files` parts and `max_total_bytes` across them.
+/// The caller removes `directory` whether or not this succeeds.
+pub(crate) async fn receive_many(
+    body: Body,
+    boundary: &str,
+    names: &[&str],
+    directory: &Path,
+    max_files: usize,
+    max_total_bytes: u64,
+) -> Result<Parts, ApiError> {
+    let target = Target::Many {
+        names,
+        directory,
+        max: max_files,
+    };
+    let (fields, files) = parse(body, boundary, target, max_total_bytes).await?;
+    Ok(Parts {
+        fields,
+        files: files.into_iter().map(|(part, _)| part).collect(),
+    })
+}
+
+/// A file part being written.
+struct Open {
+    handle: tokio::fs::File,
+    part: Part,
+    hasher: Sha256,
+}
+
+impl Open {
+    async fn finish(mut self) -> Result<(Part, String), ApiError> {
+        self.handle.flush().await.map_err(anyhow::Error::from)?;
+        self.handle.sync_all().await.map_err(anyhow::Error::from)?;
+        Ok((self.part, format!("{:x}", self.hasher.finalize())))
+    }
+}
+
+/// The streaming parser behind [`receive`] and [`receive_many`]: form fields,
+/// and each file part with its SHA-256 digest. `max_bytes` bounds the file
+/// parts together.
+async fn parse(
+    body: Body,
+    boundary: &str,
+    target: Target<'_>,
+    max_bytes: u64,
+) -> Result<(BTreeMap<String, String>, Vec<(Part, String)>), ApiError> {
     let malformed = || invalid("malformed multipart body");
     // A leading CRLF lets the first delimiter match the same separator as
     // the ones between parts.
@@ -69,10 +155,9 @@ pub(crate) async fn receive(
     let mut chunks = body.into_data_stream();
     let mut phase = Phase::Preamble;
     let mut fields = BTreeMap::new();
-    let mut file: Option<(tokio::fs::File, String)> = None;
-    let mut file_done = false;
-    let mut hasher = Sha256::new();
-    let mut size = 0u64;
+    let mut files: Vec<(Part, String)> = Vec::new();
+    let mut open: Option<Open> = None;
+    let mut total = 0u64;
     let mut side_bytes = 0usize;
     loop {
         // Consume what the buffer holds; `None` asks for more input.
@@ -97,7 +182,6 @@ pub(crate) async fn receive(
                 None if buffer.len() > MAX_FIELD_BYTES => return Err(malformed()),
                 None => None,
                 Some(end) => {
-                    side_bytes += end;
                     let headers = std::str::from_utf8(&buffer[..end]).map_err(|_| malformed())?;
                     let disposition = headers
                         .lines()
@@ -117,17 +201,53 @@ pub(crate) async fn receive(
                         })
                     };
                     let name = parameter("name").ok_or_else(malformed)?;
+                    let filename = parameter("filename");
                     buffer.drain(..end + 4);
-                    phase = match parameter("filename") {
-                        Some(filename) if name == "file" && !file_done && file.is_none() => {
-                            let handle = tokio::fs::File::create(destination)
+                    let destination = match (&target, filename) {
+                        (Target::One(destination), Some(filename))
+                            if name == "file" && files.is_empty() =>
+                        {
+                            Some((destination.to_path_buf(), filename))
+                        }
+                        (Target::One(_), _) if name == "file" => {
+                            return Err(invalid("upload exactly one file"));
+                        }
+                        (
+                            Target::Many {
+                                names,
+                                directory,
+                                max,
+                            },
+                            Some(filename),
+                        ) if names.contains(&name.as_str()) => {
+                            if files.len() == *max {
+                                return Err(invalid(format!("upload at most {max} files")));
+                            }
+                            Some((directory.join(files.len().to_string()), filename))
+                        }
+                        _ => None,
+                    };
+                    phase = match destination {
+                        Some((path, filename)) => {
+                            let handle = tokio::fs::File::create(&path)
                                 .await
                                 .map_err(anyhow::Error::from)?;
-                            file = Some((handle, filename));
+                            open = Some(Open {
+                                handle,
+                                part: Part {
+                                    filename,
+                                    path,
+                                    size: 0,
+                                },
+                                hasher: Sha256::new(),
+                            });
                             Phase::File
                         }
-                        _ if name == "file" => return Err(invalid("upload exactly one file")),
-                        _ => Phase::Field(name, Vec::new()),
+                        // File parts are bounded by count and size instead.
+                        None => {
+                            side_bytes += end;
+                            Phase::Field(name, Vec::new())
+                        }
                     };
                     Some(())
                 }
@@ -141,15 +261,21 @@ pub(crate) async fn receive(
                 if content > 0 {
                     match &mut phase {
                         Phase::File => {
-                            size += content as u64;
-                            if size > max_file_bytes {
-                                return Err(invalid(format!(
-                                    "files are limited to {max_file_bytes} bytes"
-                                )));
+                            total += content as u64;
+                            if total > max_bytes {
+                                return Err(invalid(match target {
+                                    Target::One(_) => {
+                                        format!("files are limited to {max_bytes} bytes")
+                                    }
+                                    Target::Many { .. } => {
+                                        format!("uploads are limited to {max_bytes} bytes")
+                                    }
+                                }));
                             }
-                            hasher.update(&buffer[..content]);
-                            if let Some((handle, _)) = &mut file {
-                                handle
+                            if let Some(open) = &mut open {
+                                open.part.size += content as u64;
+                                open.hasher.update(&buffer[..content]);
+                                open.handle
                                     .write_all(&buffer[..content])
                                     .await
                                     .map_err(anyhow::Error::from)?;
@@ -166,16 +292,24 @@ pub(crate) async fn receive(
                     }
                     buffer.drain(..content);
                 }
-                end.map(|end| {
-                    buffer.drain(..end - content);
-                    match std::mem::replace(&mut phase, Phase::Delimited) {
-                        Phase::File => file_done = true,
-                        Phase::Field(name, value) => {
-                            fields.insert(name, String::from_utf8_lossy(&value).into_owned());
+                match end {
+                    Some(end) => {
+                        buffer.drain(..end - content);
+                        match std::mem::replace(&mut phase, Phase::Delimited) {
+                            Phase::File => {
+                                if let Some(open) = open.take() {
+                                    files.push(open.finish().await?);
+                                }
+                            }
+                            Phase::Field(name, value) => {
+                                fields.insert(name, String::from_utf8_lossy(&value).into_owned());
+                            }
+                            Phase::Preamble | Phase::Delimited | Phase::Headers => {}
                         }
-                        Phase::Preamble | Phase::Delimited | Phase::Headers => {}
+                        Some(())
                     }
-                })
+                    None => None,
+                }
             }
         };
         if progressed.is_some() {
@@ -186,17 +320,7 @@ pub(crate) async fn receive(
             None => return Err(malformed()),
         }
     }
-    let (mut handle, filename) = file
-        .filter(|_| file_done)
-        .ok_or_else(|| invalid("file is required"))?;
-    handle.flush().await.map_err(anyhow::Error::from)?;
-    handle.sync_all().await.map_err(anyhow::Error::from)?;
-    Ok(Upload {
-        fields,
-        filename,
-        size,
-        sha256: format!("{:x}", hasher.finalize()),
-    })
+    Ok((fields, files))
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ codex-http-client = { workspace = true }
 codex-keyring-store = { workspace = true }
 codex-otel = { workspace = true }
 codex-secrets = { workspace = true }
+codex-skills = { workspace = true }
 codex-state = { workspace = true }
 codex-tools = { workspace = true }
 codex-uds = { workspace = true }
@@ -41,6 +42,7 @@ tokio-util = { workspace = true, features = ["io"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 uuid = { workspace = true, features = ["v4"] }
+zip = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

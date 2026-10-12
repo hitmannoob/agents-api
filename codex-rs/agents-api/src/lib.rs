@@ -21,6 +21,7 @@ mod resources;
 mod routes;
 mod secrets;
 mod sessions;
+mod skill_bundle;
 mod stdio_env;
 mod store;
 mod streaming;

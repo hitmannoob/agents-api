@@ -97,3 +97,64 @@ async fn malformed_and_oversized_uploads_are_refused() {
         Some("file is required".to_owned())
     );
 }
+
+#[tokio::test]
+async fn multi_file_uploads_keep_each_part_and_bound_them_together() {
+    let receive_parts = |body: Vec<u8>, max_files: usize, max_total: u64| async move {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+            body.chunks(5).map(|chunk| Ok(chunk.to_vec())).collect();
+        let result = receive_many(
+            Body::from_stream(futures::stream::iter(chunks)),
+            BOUNDARY,
+            &["files[]", "files"],
+            directory.path(),
+            max_files,
+            max_total,
+        )
+        .await;
+        result.map(|parts| {
+            let files: Vec<(String, Vec<u8>, u64)> = parts
+                .files
+                .iter()
+                .map(|part| {
+                    let contents = std::fs::read(&part.path).expect("part contents");
+                    (part.filename.clone(), contents, part.size)
+                })
+                .collect();
+            (parts.fields, files)
+        })
+    };
+    let upload = body(&[
+        ("files[]", Some("skill/SKILL.md"), b"manifest"),
+        ("default", None, b"true"),
+        ("files", Some("skill/a.txt"), b"a"),
+        // A part without a filename is a form field, even under a file name.
+        ("files[]", None, b"field"),
+    ]);
+    let (fields, files) = receive_parts(upload.clone(), 2, 9)
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.1));
+    assert_eq!(
+        (fields, files),
+        (
+            BTreeMap::from([
+                ("default".to_owned(), "true".to_owned()),
+                ("files[]".to_owned(), "field".to_owned()),
+            ]),
+            vec![
+                ("skill/SKILL.md".to_owned(), b"manifest".to_vec(), 8),
+                ("skill/a.txt".to_owned(), b"a".to_vec(), 1),
+            ]
+        )
+    );
+    let message = |result: Result<_, ApiError>| result.err().map(|error| error.1);
+    assert_eq!(
+        message(receive_parts(upload.clone(), 1, 9).await),
+        Some("upload at most 1 files".to_owned())
+    );
+    assert_eq!(
+        message(receive_parts(upload, 2, 8).await),
+        Some("uploads are limited to 8 bytes".to_owned())
+    );
+}
