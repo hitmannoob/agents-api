@@ -329,9 +329,9 @@ async fn session_events_are_queued_retried_and_survive_restart() -> anyhow::Resu
         let seen = deliveries(&received, |seen| at(seen, "/hook").len() == 5 && at(seen, "/flaky").len() == 2).await;
         let events = at(&seen, "/hook").iter().map(|received| serde_json::from_str(&received.body)).collect::<Result<Vec<Value>, _>>()?;
         assert_eq!(events.iter().map(|event| json!([event["type"], event["data"]])).collect::<Vec<_>>(), vec![
-            json!(["agent.session.created", {"id":id}]),
+            json!(["agent.session.created", {"id":id,"environment_type":"none"}]),
             json!(["agent.session.in_progress", {"id":id}]),
-            json!(["agent.session.action_required", {"id":id,"required_action":{"type":"function_call"}}]),
+            json!(["agent.session.action_required", {"id":id,"required_action":action}]),
             json!(["agent.session.in_progress", {"id":id}]),
             json!(["agent.session.idle", {"id":id}]),
         ]);
@@ -345,6 +345,31 @@ async fn session_events_are_queued_retried_and_survive_restart() -> anyhow::Resu
         let idle_event = at(&seen, "/hook")[4];
         assert_eq!((retried[0].body == idle_event.body, retried[0].id != idle_event.id), (true, true));
         assert_eq!((at(&seen, "/failed").len(), at(&seen, "/others").len()), (0, 0));
+
+        // A self-hosted session's events say where its executor connects, and
+        // initial input waiting for the executor asks for an environment
+        // connection.
+        let workspace = tempfile::tempdir()?;
+        let registry = format!("{}/registry", base.trim_end_matches("/v1"));
+        api.configure_environments("an-environment-key-for-webhook-checks".into(), registry.clone())?;
+        endpoint("environments", format!("{hooks}/environments"), json!(["agent.session.created","agent.session.action_required"])).await?;
+        let hosted = request(&client, reqwest::Method::POST, &sessions, json!({"agent":{"model":"mock-model"},
+            "environment":{"type":"self_hosted","workspace_directory":workspace.path().to_str().context("workspace")?},"input":"wait for me"})).await?;
+        let hosted_id = hosted["id"].as_str().context("self-hosted id")?.to_owned();
+        let environment_id = hosted["environment"]["id"].as_str().context("environment id")?.to_owned();
+        let hosted_url = format!("{sessions}/{hosted_id}");
+        let send = |event: Value| client.post(format!("{hosted_url}/events")).bearer_auth(TOKEN).json(&json!({"events":[event]})).send();
+        let seen = deliveries(&received, |seen| at(seen, "/environments").len() == 2).await;
+        let events = at(&seen, "/environments").iter().map(|received| serde_json::from_str(&received.body)).collect::<Result<Vec<Value>, _>>()?;
+        assert_eq!(events.iter().map(|event| json!([event["type"], event["data"]])).collect::<Vec<_>>(), vec![
+            json!(["agent.session.created", {"id":hosted_id,"environment_id":environment_id,"environment_type":"self_hosted","connect":{"remote_url":registry}}]),
+            json!(["agent.session.action_required", {"id":hosted_id,"required_action":{"type":"environment_connection","environment_id":environment_id}}]),
+        ]);
+        // Cancelling drops the waiting input, so nothing outlives the restart.
+        assert_eq!(send(json!({"type":"agent.session.input.cancel"})).await?.status(), reqwest::StatusCode::ACCEPTED);
+        while request(&client, reqwest::Method::GET, &hosted_url, Value::Null).await?["status"] != "idle" {
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
+        }
 
         // Stop with an undeliverable event queued and a turn still running.
         let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await?.local_addr()?;
@@ -364,7 +389,7 @@ async fn session_events_are_queued_retried_and_survive_restart() -> anyhow::Resu
         let restored: Value = serde_json::from_str(&at(&seen, "/restored")[0].body)?;
         let failed: Value = serde_json::from_str(&at(&seen, "/failed")[0].body)?;
         assert_eq!((restored["type"].clone(), restored["data"].clone(), failed["type"].clone(), failed["data"].clone()),
-            (json!("agent.session.created"), json!({"id":second_id}), json!("agent.session.failed"), json!({"id":second_id})));
+            (json!("agent.session.created"), json!({"id":second_id,"environment_type":"none"}), json!("agent.session.failed"), json!({"id":second_id})));
         assert_eq!(at(&seen, "/failed")[0].signature, sign(&secret(&failures)?, at(&seen, "/failed")[0])?);
         receiver_task.abort();
         server.abort();

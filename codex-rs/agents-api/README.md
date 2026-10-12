@@ -540,8 +540,12 @@ passphrase, because signing secrets are kept in the same encrypted store.
   receiver returns 502.
 - **Session events:** each status change queues one delivery per subscribed
   endpoint, in the transaction that records the change. The body is
-  `{id: "evt_…", object: "event", created_at, type, data: {id: <session>}}`,
-  and `action_required` adds `required_action: {type: "function_call"}`.
+  `{id: "evt_…", object: "event", created_at, type, data: {id: <session>}}`.
+  `created` adds `environment_type`, `environment_id`, and, for a self-hosted
+  environment, `connect: {remote_url}`, where its executor connects.
+  `action_required` adds the first `required_action`: a pending
+  `function_call`, or an `environment_connection` while input waits for the
+  executor. Delivery order is not guaranteed after a failed attempt.
   Sessions the service fails on a lost backend or restart report
   `agent.session.failed`.
 - **Retries:** any status other than 2xx, a redirect, or an unreachable

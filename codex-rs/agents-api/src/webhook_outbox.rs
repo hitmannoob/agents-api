@@ -60,6 +60,20 @@ pub(crate) async fn enqueue(
     Ok(())
 }
 
+/// The `agent.session.created` data: the session, its environment, and for a
+/// self-hosted environment where its executor connects.
+pub(crate) fn created(session: &Value) -> Value {
+    let environment = &session["environment"];
+    let mut data = json!({"id":session["id"],"environment_type":environment["type"]});
+    if let Some(id) = environment["id"].as_str() {
+        data["environment_id"] = json!(id);
+    }
+    if let Some(remote_url) = environment["remote_url"].as_str() {
+        data["connect"] = json!({"remote_url":remote_url});
+    }
+    data
+}
+
 /// Queue the webhook event for a session status, if the status has one.
 pub(crate) async fn session_status(
     connection: &mut sqlx::SqliteConnection,
@@ -68,11 +82,15 @@ pub(crate) async fn session_status(
 ) -> anyhow::Result<()> {
     match status {
         "requires_action" => {
+            // The first action the session waits on: a pending function call,
+            // or the environment its input waits for.
+            let session = crate::records::decorate(&mut *connection, session_id, json!({})).await?;
+            let required_action = session["required_actions"][0].clone();
             enqueue(
                 connection,
                 session_id,
                 "agent.session.action_required",
-                json!({"id":session_id,"required_action":{"type":"function_call"}}),
+                json!({"id":session_id,"required_action":required_action}),
             )
             .await
         }
