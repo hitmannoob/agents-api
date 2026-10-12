@@ -124,7 +124,7 @@ pub(crate) async fn foreign(
                 .then_some("environment not found"));
         }
         ["agents", "sessions" | "environments", ..] => return Ok(None),
-        ["agents", id, ..] => (
+        ["agents", id, ..] | ["prototype", "agents", id, ..] => (
             "SELECT project_id FROM agents WHERE id = ?",
             *id,
             "agent not found",
@@ -209,7 +209,7 @@ pub(crate) fn required(method: &axum::http::Method, path: &str) -> &'static [&'s
         } else {
             &["api.webhooks.write"]
         }
-    } else if under("/v1/agents") || under("/v1/sessions") {
+    } else if under("/v1/agents") || under("/v1/sessions") || under("/v1/prototype/agents") {
         let runs_turns = path == "/v1/agents/sessions"
             || path == "/v1/sessions"
             || (path.starts_with("/v1/agents/sessions/") && path.ends_with("/events"))

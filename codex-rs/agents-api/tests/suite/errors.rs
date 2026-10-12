@@ -33,8 +33,11 @@ async fn every_inventoried_operation_answers_with_the_public_error_shape() -> an
             let path = operation["path"].as_str().context("path")?;
             let path = path.split('/').map(|segment| if segment.starts_with('{') { "missing-id" } else { segment }).collect::<Vec<_>>().join("/");
             let url = format!("{base}{path}");
-            let send = |authorized: bool| {
-                let mut builder = client.request(method.clone(), &url).header("OpenAI-Beta", "agents=v1");
+            let send = |authorized: bool, beta: bool| {
+                let mut builder = client.request(method.clone(), &url);
+                if beta {
+                    builder = builder.header("OpenAI-Beta", "agents=v1");
+                }
                 if authorized {
                     builder = builder.bearer_auth(TOKEN);
                 }
@@ -43,16 +46,19 @@ async fn every_inventoried_operation_answers_with_the_public_error_shape() -> an
                 }
                 builder.send()
             };
-            for authorized in [false, true] {
-                let response = send(authorized).await?;
-                let status = response.status().as_u16();
-                let body: Value = response.json().await.unwrap_or(Value::Null);
-                observed.push(json!({"id":operation["id"],"authorized":authorized,"status":status,"public":public_error(&body)}));
+            for beta in [true, false] {
+                for authorized in [false, true] {
+                    let response = send(authorized, beta).await?;
+                    let status = response.status().as_u16();
+                    let body: Value = response.json().await.unwrap_or(Value::Null);
+                    observed.push(json!({"id":operation["id"],"authorized":authorized,"status":status,"public":public_error(&body)}));
+                }
             }
         }
         // Every operation refuses a missing token, then answers placeholder IDs
         // with 404 and empty bodies with 400; lists succeed. Errors always use
-        // the public shape; successes never do.
+        // the public shape; successes never do. The `OpenAI-Beta` header
+        // changes nothing, so each operation answers the same without it.
         let created_from_empty_body = ["VLT-001"];
         // POSTs that validate the body before looking up the resource.
         let validated_first = ["EVT-001", "ENV-002", "CRD-001", "CRD-003", "WHK-007"];
@@ -68,8 +74,9 @@ async fn every_inventoried_operation_answers_with_the_public_error_shape() -> an
                     ("POST", true) if validated_first.contains(&id) => 400,
                     _ => 404,
                 };
-                [json!({"id":id,"authorized":false,"status":401,"public":true}),
-                 json!({"id":id,"authorized":true,"status":status,"public":status != 200})]
+                let answers = [json!({"id":id,"authorized":false,"status":401,"public":true}),
+                    json!({"id":id,"authorized":true,"status":status,"public":status != 200})];
+                [answers.clone(), answers].concat()
             })
             .collect();
         assert_eq!(observed, expected);

@@ -16,7 +16,6 @@ use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::Request;
 use axum::extract::State as Extract;
-use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::middleware::Next;
@@ -43,6 +42,8 @@ pub(crate) fn router(state: Arc<State>) -> Router {
             "/v1/agents/{id}",
             get(read_agent).post(update_agent).delete(delete_agent),
         )
+        .route("/v1/prototype/agents", post(create_prototype_agent))
+        .route("/v1/prototype/agents/{id}", get(read_prototype_agent))
         .route("/v1/sessions", post(create_session))
         .route("/v1/sessions/{id}", get(read_session))
         .route("/v1/sessions/{id}/input", post(input))
@@ -94,16 +95,11 @@ async fn authorize(
     if request.uri().path().starts_with("/registry/") || request.uri().path() == "/healthz" {
         return Ok(next.run(request).await);
     }
-    // Webhook endpoint requests come from the SDK without the beta header.
-    let compatible = request.uri().path().starts_with("/v1/agents/sessions")
-        || request.uri().path().starts_with("/v1/webhook_")
-        || request.uri().path().starts_with("/v1/files")
-        || request.uri().path().starts_with("/v1/skills")
-        || request
-            .headers()
-            .get("openai-beta")
-            .and_then(|h| h.to_str().ok())
-            == Some("agents=v1");
+    // The `OpenAI-Beta` header changes nothing: the pinned SDK sends it on
+    // Agents API calls, and other clients need not. Every route but the
+    // prototype's answers errors in the public shape.
+    let compatible = !request.uri().path().starts_with("/v1/sessions")
+        && !request.uri().path().starts_with("/v1/prototype/");
     let secret = request
         .headers()
         .get("authorization")
@@ -166,39 +162,15 @@ async fn authorize(
 async fn create_agent(
     Extract(state): Extract<Arc<State>>,
     Extension(principal): Extension<Principal>,
-    headers: HeaderMap,
-    Json(value): Json<Value>,
-) -> Result<Response, ApiError> {
-    let compatible = headers.get("openai-beta").and_then(|h| h.to_str().ok()) == Some("agents=v1");
-    let mut value = value;
-    let (name, metadata) = if compatible {
-        take_agent_details(&mut value, None, Default::default())?
-    } else {
-        (None, Default::default())
-    };
-    let stdio_env = if compatible {
-        crate::stdio_env::take(&mut value)?.unwrap_or_default()
-    } else {
-        Default::default()
-    };
+    Json(mut value): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let (name, metadata) = take_agent_details(&mut value, None, Default::default())?;
+    let stdio_env = crate::stdio_env::take(&mut value)?.unwrap_or_default();
     if !stdio_env.is_empty() && !state.secrets.configured() {
         return Err(stdio_env_disabled());
     }
-    let config: AgentConfig = if compatible {
-        crate::contract::configure(AgentConfig::default(), value)?
-    } else {
-        serde_json::from_value(value).map_err(|e| crate::contract::invalid(e.to_string()))?
-    };
-    if config.model.trim().is_empty()
-        || config.model.len() > 256
-        || config.instructions.as_deref().unwrap_or_default().len() > 1024
-    {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "model must be 1-256 bytes; instructions must be at most 1024 bytes".into(),
-        ));
-    }
-    crate::capabilities::validate(&config)?;
+    let config = crate::contract::configure(AgentConfig::default(), value)?;
+    validate_agent(&config)?;
     let agent = state
         .store
         .create_agent(&principal.project_id, config, name, metadata)
@@ -209,11 +181,49 @@ async fn create_agent(
         state.store.delete_agent(&agent.id).await?;
         return Err(error);
     }
-    Ok(if compatible {
-        Json(public_agent(&agent)).into_response()
-    } else {
-        (StatusCode::CREATED, Json(agent)).into_response()
-    })
+    Ok(Json(public_agent(&agent)))
+}
+
+fn validate_agent(config: &AgentConfig) -> Result<(), ApiError> {
+    if config.model.trim().is_empty()
+        || config.model.len() > 256
+        || config.instructions.as_deref().unwrap_or_default().len() > 1024
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "model must be 1-256 bytes; instructions must be at most 1024 bytes".into(),
+        ));
+    }
+    crate::capabilities::validate(config)
+}
+
+/// Save an agent in the prototype's format, which can select MCP servers the
+/// operator configured by name. Prototype sessions run agents saved either way.
+async fn create_prototype_agent(
+    Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
+    Json(value): Json<Value>,
+) -> Result<(StatusCode, Json<Agent>), ApiError> {
+    let config: AgentConfig =
+        serde_json::from_value(value).map_err(|e| crate::contract::invalid(e.to_string()))?;
+    validate_agent(&config)?;
+    let agent = state
+        .store
+        .create_agent(&principal.project_id, config, None, Default::default())
+        .await?;
+    Ok((StatusCode::CREATED, Json(agent)))
+}
+
+async fn read_prototype_agent(
+    Extract(state): Extract<Arc<State>>,
+    Path(id): Path<String>,
+) -> Result<Json<Agent>, ApiError> {
+    state
+        .store
+        .agent(&id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))
 }
 
 fn stdio_env_disabled() -> ApiError {
@@ -226,20 +236,13 @@ fn stdio_env_disabled() -> ApiError {
 async fn read_agent(
     Extract(state): Extract<Arc<State>>,
     Path(id): Path<String>,
-    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let agent = state
         .store
         .agent(&id)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))?;
-    Ok(Json(
-        if headers.get("openai-beta").and_then(|h| h.to_str().ok()) == Some("agents=v1") {
-            public_agent(&agent)
-        } else {
-            serde_json::to_value(agent).map_err(anyhow::Error::from)?
-        },
-    ))
+    Ok(Json(public_agent(&agent)))
 }
 
 fn public_agent(agent: &Agent) -> Value {

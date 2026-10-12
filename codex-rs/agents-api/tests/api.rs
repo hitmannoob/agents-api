@@ -246,7 +246,7 @@ async fn sessions_run_follow_up_and_retrieve_independent_turns() -> anyhow::Resu
         let agent = request(
             &client,
             reqwest::Method::POST,
-            &format!("{base}/agents"),
+            &format!("{base}/prototype/agents"),
             json!({"model": "mock-model", "instructions": "Be concise."}),
         )
         .await?;

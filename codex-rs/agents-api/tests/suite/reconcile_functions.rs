@@ -28,7 +28,7 @@ async fn reconcile_recovers_submitted_tool_result_lost_to_disconnect() -> anyhow
         let agent = request(
             &client,
             reqwest::Method::POST,
-            &format!("{base}/agents"),
+            &format!("{base}/prototype/agents"),
             json!({"model":"mock-model","instructions":"Use tools.","tools":[{"name":"lookup_order","description":"Lookup","parameters":{"type":"object","properties":{}}}]}),
         )
         .await?;

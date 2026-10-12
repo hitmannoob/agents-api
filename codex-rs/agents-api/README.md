@@ -199,9 +199,10 @@ how projects and keys are managed.
 
 ## Official-style session path
 
-The SDK sends `OpenAI-Beta: agents=v1`. This selects flattened, tagged-function
-payloads for saved-agent operations at `/v1/agents`. The original payloads
-remain available without that header. New session routes are:
+The SDK sends `OpenAI-Beta: agents=v1`; this service accepts and ignores it,
+so every route behaves the same with or without the header. Saved-agent
+operations at `/v1/agents` use the flattened, tagged-function payloads; the
+original payloads moved to `/v1/prototype/agents`. New session routes are:
 
 | Method | Path | Behavior |
 | --- | --- | --- |
@@ -588,10 +589,13 @@ resume after service restart.
 
 ## Original prototype routes
 
+Prototype agents can select MCP servers the operator configured by name
+(`mcpServers`). Prototype sessions run agents saved by either agent route.
+
 | Method | Path | Body / result |
 | --- | --- | --- |
-| POST | `/v1/agents` | `{ "model": "…", "instructions": "…" }` → saved Agent |
-| GET | `/v1/agents/{id}` | Saved Agent |
+| POST | `/v1/prototype/agents` | `{ "model": "…", "instructions": "…" }` → saved Agent |
+| GET | `/v1/prototype/agents/{id}` | Saved Agent |
 | POST | `/v1/sessions` | `{ "agentId": "…", "environment": { "type": "none" } }` → Session |
 | GET | `/v1/sessions/{id}` | Configuration snapshot, thread binding, `requiredActions`, and `unresolvedActions` |
 | POST | `/v1/sessions/{id}/input` | `{ "input": "…" }` → accepted Codex turn; steers if active |

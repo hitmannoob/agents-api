@@ -95,11 +95,11 @@ async fn isolated_capabilities_and_function_results_survive_session_resume() -> 
         ] {
             let mut body = json!({"model": "mock-model", "instructions": "x"});
             body.as_object_mut().unwrap().extend(invalid.as_object().unwrap().clone());
-            assert_eq!(client.post(format!("{base}/agents")).bearer_auth(TOKEN).json(&body).send().await?.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert_eq!(client.post(format!("{base}/prototype/agents")).bearer_auth(TOKEN).json(&body).send().await?.status(), reqwest::StatusCode::BAD_REQUEST);
         }
         let mut sessions = Vec::new();
         for (function, mcp_server) in [("lookup_order", "warehouse"), ("get_invoice", "billing")] {
-            let agent = request(&client, reqwest::Method::POST, &format!("{base}/agents"), json!({
+            let agent = request(&client, reqwest::Method::POST, &format!("{base}/prototype/agents"), json!({
                 "model": "mock-model", "instructions": "Use tools.", "reasoning": {"effort": "low"},
                 "tools": [{"name": function, "description": "Lookup", "parameters": {"type": "object", "properties": {}}}],
                 "mcpServers": [{"server": mcp_server, "allowedTools": ["lookup"]}]

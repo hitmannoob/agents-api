@@ -28,7 +28,7 @@ async fn replacement_backend_fences_stale_function_calls_and_serves_new_work() -
         let agent = request(
             &client,
             reqwest::Method::POST,
-            &format!("{base}/agents"),
+            &format!("{base}/prototype/agents"),
             json!({
                 "model": "mock-model", "instructions": "Use tools.",
                 "tools": [{"name": "lookup_order", "description": "Lookup", "parameters": {"type": "object", "properties": {}}}]
