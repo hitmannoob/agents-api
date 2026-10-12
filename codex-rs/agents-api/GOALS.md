@@ -80,8 +80,9 @@ Current boundaries:
 - Sessions accept environment `none` or `self_hosted` (executor attachment
   through the rendezvous relay). `openai_hosted` and environment templates are
   out of scope by decision (2026-10-06).
-- The service has a single operator-token tenant. Project-scoped ownership, the
-  gap most often cited by inventory rows, is not modeled yet; G13 adds it.
+- Resources are project-scoped and API keys carry permissions (G13); projects
+  and keys are managed by CLI, and executors still use the operator's
+  environment key.
 - Event streams are live-only. Recovery reads saved state/history; it must not
   promise replay of missed events.
 - Persisted function records cannot recreate a lost JSON-RPC request waiter.
@@ -114,7 +115,7 @@ fixture design may start earlier.
 | G10 | Implement files and artifacts (complete locally for self-hosted; Skills API missing) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
 | G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
 | G12 | Prove end-to-end parity (open: SDK scenarios for every resource, Windows/cross-OS) | All applicable goals | Contract suite, real providers, platforms, failure matrix |
-| G13 | Projects, API keys, and permissions (open; decided 2026-10-12) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
+| G13 | Projects, API keys, and permissions (complete locally 2026-10-12; executor keys and Admin API open) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
 
 Ship bounded changes within each goal. Do not combine a supervisor rewrite,
 public-schema expansion, and sandbox provider integration into one change.
@@ -294,7 +295,8 @@ Starting points: `src/store.rs`, `src/records.rs`, and `src/resources.rs`.
   Persist changes before broadcasting their corresponding events.
 - [x] Define ownership for one API data directory, one worker home, and external
   workers. Coordinate this with G01 so orphan handling cannot bypass ownership.
-- [ ] Add indexes and stable ordering for the actual list/filter operations.
+- [x] Add indexes and stable ordering for the actual list/filter operations.
+  Per-project list indexes landed with G13 (migrations `0016`-`0018`).
   Avoid a database migration or distributed worker pool unless its behavior is
   needed; SQLite remains the starting implementation.
 
@@ -1844,9 +1846,19 @@ Checklist:
   independently of `projects::required`. For every operation it checks that
   a key lacking each needed permission gets 403 naming it, and that a key
   holding exactly those permissions is admitted (more than 100 cases).
-- [ ] **Slice 6: inventory.** Record the decision as an amendment, update
+- [x] **Slice 6: inventory.** Record the decision as an amendment, update
   BEH-001 and BEH-003, remove "project scope" from each row's remaining gap
   where it was the only blocker, and run the second promotion pass.
+  Evidence (2026-10-12): amendment recorded in `CONTRACT_INVENTORY.json` and
+  `CONTRACT_INVENTORY.md`; BEH-001 cites the permission and isolation
+  sweeps; BEH-003 is verified. The second promotion pass moved 12 operations
+  to verified, giving 22 verified, 2 implemented, 27 partial, and 16
+  missing.
+
+Status (2026-10-12): slices 1-6 complete. Remaining follow-ups: executors
+authenticate with the operator's environment key rather than a project key;
+the OpenAI Admin API (`/organization/projects`, project API keys) is not
+reproduced.
 
 Acceptance: the isolation and permission sweeps cover every implemented
 operation; pre-G13 data directories migrate into the default project with
@@ -1859,14 +1871,10 @@ Updated 2026-10-12. G00–G05 slices and the G01/G02 recovery slices that
 previously led this list are complete; their history is in the goal sections
 above and in git.
 
-1. **Projects, API keys, and permissions (G13).** Decided 2026-10-12: the
-   service is multi-project, managed by CLI for now. Most partial rows cite
-   project scope, so this gates the next promotion pass. Start with slice 1
-   (projects, keys, and auth).
-2. **Second inventory promotion pass (G12, G13 slice 6).** The first pass (2026-10-12)
-   promoted 10 operations and 3 behaviors to `verified` and ENV-002..003 to
-   `implemented`. After item 1, re-evaluate files, webhooks, vaults, and the
-   agent/session CRUD rows.
+1. **Projects, API keys, and permissions (G13): complete locally
+   2026-10-12.** Follow-ups: project-scoped executor credentials and,
+   optionally, the OpenAI Admin API.
+2. **Second inventory promotion pass (G12, G13 slice 6): done 2026-10-12.**
 3. **Skills API (SKL-001..006, SKV-001..005).** This is the largest in-scope
    block still missing, and G08 skills/plugins selection depends on it.
 4. **Deferred functions and tool search (G06), then built-in capability

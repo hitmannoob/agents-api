@@ -35,24 +35,25 @@ in [GOALS.md](GOALS.md).
 Updated: 2026-10-12. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
 per-operation detail lives in its `remaining` fields.
 
-**Scorecard:** 67 operations: 10 `verified`, 2 `implemented`, 39 `partial`,
+**Scorecard:** 67 operations: 22 `verified`, 2 `implemented`, 27 `partial`,
 16 `missing`. Of the 16 missing, 5 (environment templates) are outside the
 parity target by decision (2026-10-06), so **11 missing operations (Skills)
 remain in scope**. Of 18 behavior rows, 16 are partial and 2 are missing
 (BEH-011 is out of scope; BEH-018, provider interoperability, is open), and
-3 are verified (BEH-006, BEH-012, BEH-015).
+4 are verified (BEH-003, BEH-006, BEH-012, BEH-015).
 
-The 2026-10-12 promotion pass, backed by a full crate run (59/59), moved rows
-whose only gaps were out of scope or intended behavior. The remaining partial
-rows are held back for reasons that repeat: there is no project-scoped identity (the
-service has a single operator-token tenant), evidence comes from mock
-providers plus OpenRouter runs only, and there is no Windows evidence. See
+Two promotion passes on 2026-10-12 moved rows whose only gaps were out of
+scope, intended behavior, or project scope, which G13 closed: API keys belong
+to projects, every resource is project-scoped, and permissions are enforced.
+The remaining partial rows each have a concrete variant or evidence gap
+listed below; evidence still comes from mock providers plus OpenRouter runs
+only, and there is no Windows evidence. See
 [Path to `verified`](#path-to-verified).
 
 | Area | Ops | Status | Works today | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Saved agents | AGT-001..005 | 5 partial | Full CRUD, creation-order pagination, every pinned configuration family round trips with omit/null/replace semantics, snapshots survive agent deletion and cold resume | Project scope; prototype limits; built-in capability execution (G07/G08) |
-| Sessions | SES-001..005 | 5 partial | CRUD, initial input and streaming, `none` and `self_hosted` environments, `vault_ids`, next-turn model/effort/tier updates, deletion with a durable cleanup queue | Project scope; complete configuration; environment actions in the session object; provider-specific model compatibility |
+| Saved agents | AGT-001..005 | 1 verified (AGT-005), 4 partial | Full CRUD, creation-order pagination, every pinned configuration family round trips with omit/null/replace semantics, snapshots survive agent deletion and cold resume, project-scoped | Prototype limits; cursor expiry; built-in capability execution (G07/G08) |
+| Sessions | SES-001..005 | 1 verified (SES-004), 4 partial | CRUD, initial input and streaming, `none` and `self_hosted` environments, `vault_ids`, next-turn model/effort/tier updates, deletion with a durable cleanup queue, project-scoped | Complete configuration; environment actions in the session object; provider-specific model compatibility |
 | Input events | EVT-001 | partial | Validated ordered batches, text and data-URL images, string and content-part function results (10,000 bytes), session-scoped `Idempotency-Key` replay | Remote image URLs; batching and idempotency are local decisions with no upstream contract |
 | Streaming | EVT-002 | partial | Lifecycle, item, text and reasoning deltas, content parts, `error`, subagent, environment, and command-output events | Codex sends no command-output deltas for remote commands (output arrives on the item); no replay, by contract |
 | Items and turns | ITM-001, TRN-001..002 | 1 verified (TRN-002), 2 partial | Message, reasoning, function, MCP, and subagent create/send/interrupt items; turn usage, error codes, and pagination | Web search, command, wait/close/resume subagent, and `agent_message` items; `queued` turn state for worker-started turns |
@@ -63,29 +64,27 @@ providers plus OpenRouter runs only, and there is no Windows evidence. See
 | Environments | ENV-001..003 | 2 implemented, 1 partial (ENV-001) | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected` status, writing and listing environment files, executor loss handled apart from worker loss | `expired`/`failed` statuses (ENV-001); one real-provider run; Windows and cross-OS execution |
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
 | Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |
-| Files | FIL-001..005 | 5 partial | Streaming multipart upload (50 MiB) with SHA-256, six purposes, `expires_after`, integrity-checked download | Single tenant; no upload parts, batch processing, or range requests; `status` is always `processed` |
+| Files | FIL-001..005 | 5 partial | Streaming multipart upload (50 MiB) with SHA-256, six purposes, `expires_after`, integrity-checked download, project-scoped | No upload parts, batch processing, or range requests; `status` is always `processed` |
 | Skills | SKL-001..006, SKV-001..005 | **11 missing** | Nothing | Whole resource: ZIP upload, metadata, versions, archive download, and `skill_reference` wiring into sessions |
-| Vaults and credentials | VLT-001..004, CRD-001..005 | 9 partial | Encrypted CRUD, rotation without ID changes, snapshots held by running sessions, HTTP MCP authentication | `environment_variable` credentials; OAuth refresh (rejected); project scope; external key management |
-| Webhooks | WHK-001..008 | 8 partial | Endpoint CRUD, signed and retried deliveries that survive restarts, secret rotation with a 24h overlap, test delivery | Only the five `agent.session.*` event types; environment data in events; ordering after a failed attempt |
+| Vaults and credentials | VLT-001..004, CRD-001..005 | 6 verified, 3 partial (CRD-001, CRD-003, CRD-005) | Encrypted CRUD, rotation without ID changes, snapshots held by running sessions, HTTP MCP authentication, project-scoped | `environment_variable` credentials; OAuth refresh (rejected); external key management |
+| Webhooks | WHK-001..008 | 4 verified, 4 partial | Endpoint CRUD, signed and retried deliveries that survive restarts, secret rotation with a 24h overlap, test delivery; endpoints and deliveries project-scoped | Only the five `agent.session.*` event types; environment data in events; ordering after a failed attempt |
 | Traces | TRC-001 | partial | OTLP JSON export, including `execute_tool` spans | No reference schema or SDK method exists; per-response model and subagent instructions are not recorded |
-| Service operation | (BEH-017) | partial | Managed worker supervision with backoff, reconnect fencing, turn/function reconciliation, Unix orphan reclaim, data-directory lock, migrations, Modal deployment | Windows orphan containment; the spawn-to-record window; durable identity and list indexes (G02) |
+| Projects and keys | (BEH-001, BEH-003, G13) | BEH-003 verified, BEH-001 partial | Project API keys with permissions (CLI-managed), 401/403/404 swept over every operation, every resource project-scoped | Beta-header requirements per route; Admin API not reproduced; executors use the operator's environment key |
+| Service operation | (BEH-017) | partial | Managed worker supervision with backoff, reconnect fencing, turn/function reconciliation, Unix orphan reclaim, data-directory lock, migrations, Modal deployment, per-project list indexes | Windows orphan containment; the spawn-to-record window; durable identity (G02) |
 
 ### Path to `verified`
 
 Ordered by the number of rows each item unblocks:
 
-1. **Projects, API keys, and permissions ([G13](GOALS.md#g13--projects-api-keys-and-permissions)).**
-   This is the blocker cited by nearly every agent, session, vault, file, and
-   webhook row. Decided 2026-10-12: the service is multi-project (keys belong
-   to projects; other projects' resources return 404; missing permissions
-   return 403), with CLI-managed projects and keys for now.
-2. **Second promotion pass.** The first pass (2026-10-12) promoted artifacts,
-   subagent lists, and turn lists. Once item 1 is settled, files (FIL-002..005),
-   webhooks, vaults, and the agent/session CRUD rows are the next candidates.
-3. **Skills API (11 ops).** This is the largest in-scope block that is still
+1. **Skills API (11 ops).** This is the largest in-scope block that is still
    missing, and G08 skills/plugins selection depends on it.
-4. **Capability gaps:** deferred functions and tool search (G06), built-in
+2. **Capability gaps:** deferred functions and tool search (G06), built-in
    capability slices (G07), compaction and programmatic tool calling (G08).
+3. **Webhook event types (WHK-001, WHK-003):** accept subscriptions to the
+   other OpenAI event types, even though this service never produces them.
+4. **Files variants (FIL-001..005):** decide whether upload parts, batch
+   processing, and range requests belong to the target, then close or exclude
+   them; the remaining file rows are otherwise complete.
 5. **Platform evidence (G12):** Windows and cross-OS worker/executor runs, SDK
    scenarios for every implemented resource, and
    provider interoperability (BEH-018).

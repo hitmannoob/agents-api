@@ -49,12 +49,12 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-12) is 10 verified, 2 implemented, 39 partial, and
+The current count (2026-10-12) is 22 verified, 2 implemented, 27 partial, and
 16 missing. The 16 missing are 11 Skills operations, which are in scope, and the
 5 environment template operations, which are out of scope since 2026-10-06.
-Verified: ART-001..004, SUB-002..006, and TRN-002. Implemented, awaiting
-cross-OS evidence: ENV-002..003. Most remaining partial rows list project scope
-as a gap. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
+Verified: ART-001..004, SUB-002..006, TRN-002, AGT-005, SES-004, VLT-001..004,
+CRD-002, CRD-004, WHK-002, and WHK-004..006. Implemented, awaiting cross-OS
+evidence: ENV-002..003. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
 per-area summary.
 
 ## What is pinned
@@ -127,3 +127,12 @@ Amendments under the same `openai==3.17.0` pin:
   inventory with status `missing`, so the SDK diff still covers them, and the
   API rejects `openai_hosted` as not supported. The parity target is now the
   rest of the inventory.
+- 2026-10-12: project scope enters the parity target (G13). API keys belong
+  to projects and carry permissions; every resource is project-scoped, and
+  another project's IDs read as not found; a missing permission answers 403.
+  Projects and keys are managed by CLI, and the OpenAI Admin API is not
+  inventoried. `api.webhooks.*` is a local permission name, because the
+  guides name none. The change is additive: the operator token keeps every
+  permission in the default project. The second promotion pass moved
+  AGT-005, SES-004, VLT-001..004, CRD-002, CRD-004, WHK-002, WHK-004..006, and
+  BEH-003 to verified.
