@@ -495,3 +495,6 @@ mod projects;
 
 #[path = "suite/web_search.rs"]
 mod web_search;
+
+#[path = "suite/limits.rs"]
+mod limits;

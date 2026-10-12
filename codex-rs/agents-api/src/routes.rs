@@ -37,10 +37,18 @@ use tokio_stream::wrappers::BroadcastStream;
 pub(crate) fn router(state: Arc<State>) -> Router {
     Router::new()
         .route("/healthz", get(health))
-        .route("/v1/agents", post(create_agent).get(list_agents))
+        .route(
+            "/v1/agents",
+            post(create_agent)
+                .get(list_agents)
+                .layer(DefaultBodyLimit::max(crate::LARGE_JSON_BODY)),
+        )
         .route(
             "/v1/agents/{id}",
-            get(read_agent).post(update_agent).delete(delete_agent),
+            get(read_agent)
+                .post(update_agent)
+                .delete(delete_agent)
+                .layer(DefaultBodyLimit::max(crate::LARGE_JSON_BODY)),
         )
         .route("/v1/prototype/agents", post(create_prototype_agent))
         .route("/v1/prototype/agents/{id}", get(read_prototype_agent))
@@ -187,11 +195,12 @@ async fn create_agent(
 fn validate_agent(config: &AgentConfig) -> Result<(), ApiError> {
     if config.model.trim().is_empty()
         || config.model.len() > 256
-        || config.instructions.as_deref().unwrap_or_default().len() > 1024
+        || config.instructions.as_deref().unwrap_or_default().len()
+            > crate::configuration::MAX_INSTRUCTIONS_BYTES
     {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
-            "model must be 1-256 bytes; instructions must be at most 1024 bytes".into(),
+            crate::configuration::INVALID_SIZE.into(),
         ));
     }
     crate::capabilities::validate(config)

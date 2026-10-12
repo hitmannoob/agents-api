@@ -209,6 +209,11 @@ impl ApiError {
     }
 }
 
+/// The JSON body limit for requests that carry agent configuration or input:
+/// agent instructions and message text of up to 1 MiB each, with room for
+/// tools and data-URL images. Other JSON requests are limited to 16 KiB.
+pub(crate) const LARGE_JSON_BODY: usize = 8 << 20;
+
 /// HTTP facade over a dedicated Codex app-server connection.
 /// Dropping this owner requests shutdown; call `shutdown` to wait for completion.
 pub struct AgentsApi {

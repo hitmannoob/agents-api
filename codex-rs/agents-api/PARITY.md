@@ -35,7 +35,7 @@ in [GOALS.md](GOALS.md).
 Updated: 2026-10-12. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
 per-operation detail lives in its `remaining` fields.
 
-**Scorecard:** 67 operations: 48 `verified`, 2 `implemented`, 12 `partial`,
+**Scorecard:** 67 operations: 49 `verified`, 2 `implemented`, 11 `partial`,
 5 `missing`. The 5 missing (environment templates) are outside the parity
 target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 11 are verified (BEH-001, BEH-003..006, BEH-009,
 BEH-012..016), 5 are partial, and 2 are missing (BEH-011 is out of scope;
@@ -58,9 +58,9 @@ only, and there is no Windows evidence. See
 
 | Area | Ops | Status | Works today | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Saved agents | AGT-001..005 | 2 verified (AGT-004..005), 3 partial | Full CRUD, creation-order pagination, every pinned configuration family round trips with omit/null/replace semantics, snapshots survive agent deletion and cold resume, project-scoped | Prototype limits; built-in capability execution (G07/G08) |
+| Saved agents | AGT-001..005 | 3 verified (AGT-003..005), 2 partial | Full CRUD, creation-order pagination, every pinned configuration family round trips with omit/null/replace semantics, snapshots survive agent deletion and cold resume, project-scoped | Built-in capability execution (G06-G08); real-provider acceptance (AGT-002). Instructions and input take up to 1 MiB and agents 128 tools |
 | Sessions | SES-001..005 | 1 verified (SES-004), 4 partial | CRUD, initial input and streaming, `none` and `self_hosted` environments, `vault_ids`, next-turn model/effort/tier updates, deletion with a durable cleanup queue, project-scoped | Complete configuration; environment actions in the session object; provider-specific model compatibility |
-| Input events | EVT-001 | partial | Validated ordered batches, text and data-URL images, string and content-part function results (10,000 bytes), session-scoped `Idempotency-Key` replay | Remote image URLs. Batching and idempotency semantics are the contract by decision (2026-10-12) |
+| Input events | EVT-001 | partial | Validated ordered batches, text and data-URL images, string and content-part function results (10,000 bytes), session-scoped `Idempotency-Key` replay | Remote image URLs. Batching and idempotency semantics are the contract by decision (2026-10-12); message text up to 1 MiB |
 | Streaming | EVT-002 | partial | Lifecycle, item, text and reasoning deltas, content parts, `error`, subagent, environment, and command-output events | Codex sends no command-output deltas for remote commands (output arrives on the item); no replay, by contract |
 | Items and turns | ITM-001, TRN-001..002 | 1 verified (TRN-002), 2 partial | Message, reasoning, function, MCP, web search, and subagent create/send/interrupt items; turn usage, error codes, and pagination | Command, wait/close/resume subagent, and `agent_message` items; `queued` turn state for worker-started turns |
 | Subagents | SUB-001..006 | 6 verified | Resources, paginated items and turns per subagent, cancellation, restart continuity | None. `instructions` is always null and `closed` never occurs: Codex V2 reports neither, accepted as engine limits (2026-10-12) |

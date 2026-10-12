@@ -142,11 +142,9 @@ pub(crate) fn configure(mut config: AgentConfig, patch: Value) -> Result<AgentCo
     }
     if config.model.trim().is_empty()
         || config.model.len() > 256
-        || config.instructions.as_deref().unwrap_or_default().len() > 1024
+        || config.instructions.as_deref().unwrap_or_default().len() > MAX_INSTRUCTIONS_BYTES
     {
-        return Err(invalid(
-            "model must be 1-256 bytes; instructions must be at most 1024 bytes",
-        ));
+        return Err(invalid(INVALID_SIZE));
     }
     if !config.mcp_servers.is_empty() {
         return Err(invalid(
@@ -179,6 +177,12 @@ pub(crate) fn configure(mut config: AgentConfig, patch: Value) -> Result<AgentCo
 }
 
 /// Keep stored configuration separate from capabilities not yet implemented by this service.
+/// Most instruction bytes an agent may carry. The contract documents no limit;
+/// this matches Codex's limit on one user input (2^20 characters).
+pub(crate) const MAX_INSTRUCTIONS_BYTES: usize = 1 << 20;
+pub(crate) const INVALID_SIZE: &str =
+    "model must be 1-256 bytes; instructions must be at most 1 MiB";
+
 pub(crate) fn validate_execution(
     config: &AgentConfig,
     environment: &crate::resources::Environment,

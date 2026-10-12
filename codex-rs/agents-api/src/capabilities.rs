@@ -7,6 +7,10 @@ use serde_json::Value;
 use serde_json::json;
 use std::collections::HashSet;
 
+/// Most tools an agent may define. The contract documents no limit; the
+/// request body bounds their size.
+const MAX_TOOLS: usize = 128;
+
 pub(crate) fn validate(config: &AgentConfig) -> Result<(), ApiError> {
     let invalid = || {
         ApiError(
@@ -14,7 +18,7 @@ pub(crate) fn validate(config: &AgentConfig) -> Result<(), ApiError> {
             "invalid or oversized agent capabilities".into(),
         )
     };
-    if config.tools.len() > 16 || config.mcp_servers.len() > 16 {
+    if config.tools.len() > MAX_TOOLS || config.mcp_servers.len() > 16 {
         return Err(invalid());
     }
     let mut names = HashSet::new();
@@ -27,7 +31,6 @@ pub(crate) fn validate(config: &AgentConfig) -> Result<(), ApiError> {
             || tool.name == "mcp"
             || tool.name.starts_with("mcp__")
             || !names.insert(&tool.name)
-            || serde_json::to_vec(tool).map_err(anyhow::Error::from)?.len() > 1024
             || tool.parameters.get("type") != Some(&json!("object"))
             || codex_tools::parse_tool_input_schema(&tool.parameters).is_err()
         {

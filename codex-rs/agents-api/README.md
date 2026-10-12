@@ -174,11 +174,13 @@ how projects and keys are managed.
   same vault passphrase. One process owns a data directory at a time
   (`agents-api.lock`).
 - **Admission limits:**
-  - JSON bodies 16 KiB; environment files 5 MiB decoded; uploads 50 MiB,
+  - JSON bodies 8 MiB for agent create/update, session create, and session
+    events, 16 KiB elsewhere; instructions and message text 1 MiB each
+    (Codex's input limit is 2^20 characters); environment files 5 MiB decoded; uploads 50 MiB,
     streamed; skill versions of at most 500 files, 25 MiB per file, and
     256 MiB uncompressed (a local bound);
   - 1–32 events per input batch; 10,000-byte function results;
-  - 16 tools and 16 MCP servers per agent; metadata of 16 pairs;
+  - 128 tools per agent (16 prototype MCP selections); metadata of 16 pairs;
   - lists of 1–100 (files 1–10,000);
   - 256 harness sockets per environment and 256 KiB relay frames.
   Input to one session is serialized. There is no global rate limit or
@@ -286,8 +288,8 @@ before anything runs. Events then run in array order and stop at the first
 failure; earlier events stay applied. An unknown call returns 400 with code
 `invalid_request_error` and message `Unknown pending tool call: <call_id>`,
 which the pinned SDK retries because a call's item event can arrive before the
-call is registered. A message holds `input_text` parts totalling at most 8,192
-bytes plus `input_image` parts. Images must be `data:image/` URLs: Codex rejects
+call is registered. A message holds `input_text` parts totalling at most 1 MiB
+plus `input_image` parts. Images must be `data:image/` URLs: Codex rejects
 remote image URLs, and invalid image data is left to Codex's image preparation.
 
 `Idempotency-Key` (1–255 visible ASCII characters) is scoped to one session and
@@ -649,9 +651,9 @@ Agents are immutable. An Agent can additionally specify:
 }
 ```
 
-Function definitions use Codex's supported JSON Schema subset. Limits: 16 functions,
-1024 serialized UTF-8 bytes per definition; 16 MCP selections, 32 tool names each;
-1024 instruction bytes, 8192 input bytes, and 16 KiB request bodies.
+Function definitions use Codex's supported JSON Schema subset. Limits: 128 functions;
+16 MCP selections, 32 tool names each; 8192 input bytes; and 16 KiB request bodies,
+which also bound instructions on these routes.
 Session creation copies the configuration. Function definitions persist with the
 Codex thread; MCP policy is applied at start and cold resume. Reasoning settings
 remain subject to the selected model's support.

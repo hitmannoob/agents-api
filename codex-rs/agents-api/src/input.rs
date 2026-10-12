@@ -15,6 +15,8 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,8 +24,9 @@ use tokio::sync::broadcast;
 
 /// Most input events accepted in one request.
 const MAX_EVENTS: usize = 32;
-/// Most combined text bytes in one user message.
-const MAX_TEXT_BYTES: usize = 8192;
+/// Most combined text bytes in one user message: Codex's limit on one user
+/// input is 2^20 characters, and a character is at least one byte.
+const MAX_TEXT_BYTES: usize = 1 << 20;
 /// How long an `Idempotency-Key` outcome stays available for replay.
 const KEY_RETENTION_SECS: u64 = 24 * 60 * 60;
 /// Longest a cancel waits for tool results sent earlier in its batch to land.
@@ -392,6 +395,31 @@ enum Claim {
     Replay(Result<StatusCode, ApiError>),
 }
 
+const DIGEST_PREFIX: &str = "sha256:";
+
+/// A fingerprint of a request that ignores object key order, so a retry that
+/// orders its fields differently still matches. Storing it rather than the
+/// request keeps large inputs out of the replay table.
+fn digest(request: &Value) -> String {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Object(fields) => {
+                let mut keys: Vec<&String> = fields.keys().collect();
+                keys.sort();
+                Value::Object(
+                    keys.into_iter()
+                        .map(|key| (key.clone(), sorted(&fields[key])))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    let hash = Sha256::digest(sorted(request).to_string().as_bytes());
+    format!("{DIGEST_PREFIX}{}", crate::otlp::hex(&hash))
+}
+
 /// Claim an unused key for this request, or return the stored outcome of the
 /// identical request that used it. Keys are scoped to one session.
 async fn claim(state: &State, id: &str, key: &str, request: &Value) -> Result<Claim, ApiError> {
@@ -417,13 +445,19 @@ async fn claim(state: &State, id: &str, key: &str, request: &Value) -> Result<Cl
     .map_err(anyhow::Error::from)?;
     let Some((stored, record, status, message)) = row else {
         sqlx::query("INSERT INTO input_requests (session_id, key, request, state, created_at) VALUES (?, ?, ?, 'pending', ?)")
-            .bind(id).bind(key).bind(request.to_string()).bind(now as i64)
+            .bind(id).bind(key).bind(digest(request)).bind(now as i64)
             .execute(&mut *tx).await.map_err(anyhow::Error::from)?;
         tx.commit().await.map_err(anyhow::Error::from)?;
         return Ok(Claim::New);
     };
     tx.commit().await.map_err(anyhow::Error::from)?;
-    if serde_json::from_str::<Value>(&stored).map_err(anyhow::Error::from)? != *request {
+    // Rows saved before digests hold the request itself.
+    let same = if stored.starts_with(DIGEST_PREFIX) {
+        stored == digest(request)
+    } else {
+        serde_json::from_str::<Value>(&stored).map_err(anyhow::Error::from)? == *request
+    };
+    if !same {
         return Err(invalid(
             "Idempotency-Key was already used with a different request",
         ));

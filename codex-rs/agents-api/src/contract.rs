@@ -33,7 +33,9 @@ pub(crate) fn router() -> Router<Arc<State>> {
     Router::new()
         .route(
             "/v1/agents/sessions",
-            post(create).get(crate::sessions::list),
+            post(create)
+                .get(crate::sessions::list)
+                .layer(axum::extract::DefaultBodyLimit::max(crate::LARGE_JSON_BODY)),
         )
         .route(
             "/v1/agents/sessions/{id}",
@@ -43,7 +45,9 @@ pub(crate) fn router() -> Router<Arc<State>> {
         )
         .route(
             "/v1/agents/sessions/{id}/events",
-            get(stream).post(crate::input::create),
+            get(stream)
+                .post(crate::input::create)
+                .layer(axum::extract::DefaultBodyLimit::max(crate::LARGE_JSON_BODY)),
         )
         .route("/v1/agents/sessions/{id}/items", get(crate::records::items))
         .route(

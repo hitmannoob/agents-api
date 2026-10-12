@@ -52,10 +52,10 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-12) is 48 verified, 2 implemented, 12 partial, and
+The current count (2026-10-12) is 49 verified, 2 implemented, 11 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
 of scope since 2026-10-06. Verified: ART-001..004, SUB-001..006, TRN-002,
-AGT-004..005, SES-004, VLT-001..004, CRD-001..005, FIL-001..005,
+AGT-003..005, SES-004, VLT-001..004, CRD-001..005, FIL-001..005,
 WHK-001..008, TRC-001, SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
 evidence: ENV-002..003. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
 per-area summary.
@@ -164,3 +164,8 @@ Amendments under the same `openai==3.17.0` pin:
   the response model (additive). The fourth promotion pass moved WHK-007,
   TRC-001, SUB-001, CRD-001, CRD-003, CRD-005, BEH-005, BEH-009, BEH-013,
   BEH-014, and BEH-016 to verified.
+- 2026-10-12: public routes drop the prototype's size limits. Instructions
+  and message text take up to 1 MiB, agents up to 128 tools, and agent,
+  session, and input requests 8 MiB bodies; the contract documents no
+  limits, so these are local bounds sized to Codex's input limit (additive).
+  AGT-003 moved to verified.
