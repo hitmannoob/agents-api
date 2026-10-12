@@ -13,6 +13,7 @@ from sdk_events import check_event_stream
 from sdk_helpers import message
 from sdk_input import check_input_semantics
 from sdk_sessions import check_session_management
+from sdk_skills import check_skills
 from sdk_subagents import check_subagents
 from sdk_vaults import check_vaults
 from sdk_webhooks import check_webhooks
@@ -177,6 +178,8 @@ print("SDK: vaults", file=sys.stderr, flush=True)
 check_vaults(client)
 print("SDK: webhooks", file=sys.stderr, flush=True)
 check_webhooks(client)
+print("SDK: skills", file=sys.stderr, flush=True)
+check_skills(client)
 
 # Cancel a stalled model request, and preserve the outcome in history.
 print("SDK: cancel turn", file=sys.stderr, flush=True)

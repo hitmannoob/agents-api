@@ -127,14 +127,17 @@ codex-agents-api keys revoke --data-directory DATA key_...
 stored. Permissions are `api.agents.read`, `api.agents.write`,
 `api.responses.write` (also required to create sessions and post session
 events), `api.vaults.read`, `api.vaults.write`, `api.files.read`,
-`api.files.write`, `api.webhooks.read`, `api.webhooks.write`, and
-`api.environments.connect` (for executor keys; see below). An unknown
+`api.files.write`, `api.webhooks.read`, `api.webhooks.write`,
+`api.skills.read`, `api.skills.write`, and `api.environments.connect` (for
+executor keys; see below). The guides name no strings for webhooks, skills, or
+connecting environments, so those are local choices. An unknown
 or revoked key gets 401, and a key missing an operation's permission gets 403.
 
 Agents, sessions (with everything under a session), vaults (with their
-credentials), files, environments, and webhook endpoints are isolated by
-project: another project's IDs read as not found, never appear in lists, and
-cannot be referenced from `vault_ids` or a `file_id` source. Webhook
+credentials), files, skills, environments, and webhook endpoints are isolated
+by project: another project's IDs read as not found, never appear in lists,
+and cannot be referenced from `vault_ids`, a `file_id` source, or a
+`skill_reference`. Webhook
 endpoints receive events only about their own project's sessions, and
 executors presenting a project key reach only that project's environments.
 OpenAI's Admin API (`/organization/projects`) is not reproduced; the CLI is
@@ -164,21 +167,25 @@ how projects and keys are managed.
     metadata;
   - `secrets/` for age-encrypted credential, webhook, and env values;
   - `files/` for uploads;
+  - `skills/` for skill versions, and `skill_pins/` for the versions each
+    self-hosted session pinned;
   - `codex-home/` for the worker's rollouts, which sessions need to resume.
   Back them up together while the service is stopped. A restore needs the
   same vault passphrase. One process owns a data directory at a time
   (`agents-api.lock`).
 - **Admission limits:**
   - JSON bodies 16 KiB; environment files 5 MiB decoded; uploads 50 MiB,
-    streamed;
+    streamed; skill versions of at most 500 files, 25 MiB per file, and
+    256 MiB uncompressed (a local bound);
   - 1–32 events per input batch; 10,000-byte function results;
   - 16 tools and 16 MCP servers per agent; metadata of 16 pairs;
   - lists of 1–100 (files 1–10,000);
   - 256 harness sockets per environment and 256 KiB relay frames.
   Input to one session is serialized. There is no global rate limit or
   per-tenant quota, so add one at the proxy if you need it.
-- **Resource growth:** uploads stay until deleted or expired, and rollouts
-  and records stay until their session is deleted. Watch the data
+- **Resource growth:** uploads stay until deleted or expired, skill versions
+  until deleted, and rollouts, records, and skill pins until their session is
+  deleted. Watch the data
   directory's disk use. One worker serves every session, and there is no
   distributed routing.
 - **Deployment:** SIGTERM stops accepting requests, then stops the worker
@@ -214,6 +221,10 @@ remain available without that header. New session routes are:
 | POST / GET | `/v1/agents/environments/{id}/files` | Write an inline or `file_id` file into, or list files in, a connected environment's workspace |
 | POST / GET | `/v1/files` | Upload (multipart, at most 50 MiB, optional `expires_after`) or list files |
 | GET / DELETE | `/v1/files/{id}` | Retrieve or delete an uploaded file; `/content` streams it after checking its SHA-256 |
+| POST / GET | `/v1/skills` | Create a skill from a ZIP or a directory upload (multipart `files[]` parts), or list skills |
+| GET / POST / DELETE | `/v1/skills/{id}` | Retrieve a skill, move its `default_version`, or delete it with every version; `/content` serves the default version's ZIP |
+| POST / GET | `/v1/skills/{id}/versions` | Add a version (`default=true` makes it the default) or list versions by number |
+| GET / DELETE | `/v1/skills/{id}/versions/{version}` | Retrieve or delete a version; `/content` serves its ZIP |
 | GET | `/v1/agents/sessions/{id}/artifacts` | Always empty: self-hosted files are not published as artifacts (retrieve, content, and delete return 404) |
 
 Lists accept `after`, `order=asc|desc`, and `limit=1..100`; item lists also accept
@@ -423,6 +434,20 @@ only the registry endpoints under `/registry/`.
   workspace or `path`, ordered by path components (`order`, `limit` 1..100,
   opaque `page` token). The executor must be connected (409 otherwise).
   `{"type":"file_id",…}` copies a `/v1/files` upload instead.
+- **Skills (local extension):** the contract takes Skills API references only
+  for OpenAI-hosted environments, so `self_hosted` environments accept the
+  same list here: `"skills":[{"type":"skill_reference","skill_id":"skill_...","version":"2"}]`
+  (at most 32; omit `version` for the default, or pass `latest`). Each
+  reference resolves in the caller's project when the session is created, and
+  that version's contents are pinned beside the session, so deleting the skill
+  or version later changes nothing. Before each turn the pinned skills are
+  written to `<workspace_directory>/.agents-api/skills/<name>/` on the
+  executor (skipped while its marker matches) and offered to the agent like
+  capability-directory skills. Executable bits are not kept, inline skills
+  are refused (upload them instead), and two skills may not share a name.
+  `GET /v1/agents/environments/{id}` lists the pinned versions in `skills`.
+  Deleting the session removes its pins; the executor's copy stays with the
+  caller's compute.
 - **MCP:** stdio MCP servers run on the executor with the given `cwd`, and
   `env_vars` are read from the executor's environment. Literal `env` values
   are secrets: they need the vault passphrase, are stored encrypted, are never

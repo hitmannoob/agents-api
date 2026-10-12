@@ -23,7 +23,9 @@ The operation denominator is 67:
 - 43 Agents API operations, including raw-HTTP trace export.
 - 5 Files API operations needed for `file_id` environment inputs and cleanup.
 - 11 Skills API operations needed for hosted `skill_reference` inputs and
-  version selection.
+  version selection. This service has no hosted environments, so it accepts
+  the same references on `self_hosted` environments as a local extension
+  (see the README).
 - 8 Webhooks API operations (endpoints and event types). The session webhook
   guide has callers create an endpoint and select Agents API events.
 
@@ -49,11 +51,11 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-12) is 22 verified, 2 implemented, 27 partial, and
-16 missing. The 16 missing are 11 Skills operations, which are in scope, and the
-5 environment template operations, which are out of scope since 2026-10-06.
-Verified: ART-001..004, SUB-002..006, TRN-002, AGT-005, SES-004, VLT-001..004,
-CRD-002, CRD-004, WHK-002, and WHK-004..006. Implemented, awaiting cross-OS
+The current count (2026-10-12) is 33 verified, 2 implemented, 27 partial, and
+5 missing. The 5 missing are the environment template operations, which are out
+of scope since 2026-10-06. Verified: ART-001..004, SUB-002..006, TRN-002,
+AGT-005, SES-004, VLT-001..004, CRD-002, CRD-004, WHK-002, WHK-004..006,
+SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
 evidence: ENV-002..003. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
 per-area summary.
 

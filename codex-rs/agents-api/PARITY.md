@@ -35,10 +35,9 @@ in [GOALS.md](GOALS.md).
 Updated: 2026-10-12. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
 per-operation detail lives in its `remaining` fields.
 
-**Scorecard:** 67 operations: 22 `verified`, 2 `implemented`, 27 `partial`,
-16 `missing`. Of the 16 missing, 5 (environment templates) are outside the
-parity target by decision (2026-10-06), so **11 missing operations (Skills)
-remain in scope**. Of 18 behavior rows, 16 are partial and 2 are missing
+**Scorecard:** 67 operations: 33 `verified`, 2 `implemented`, 27 `partial`,
+5 `missing`. The 5 missing (environment templates) are outside the parity
+target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 16 are partial and 2 are missing
 (BEH-011 is out of scope; BEH-018, provider interoperability, is open), and
 4 are verified (BEH-003, BEH-006, BEH-012, BEH-015).
 
@@ -65,7 +64,7 @@ only, and there is no Windows evidence. See
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
 | Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |
 | Files | FIL-001..005 | 5 partial | Streaming multipart upload (50 MiB) with SHA-256, six purposes, `expires_after`, integrity-checked download, project-scoped | No upload parts, batch processing, or range requests; `status` is always `processed` |
-| Skills | SKL-001..006, SKV-001..005 | **11 missing** | Nothing | Whole resource: ZIP upload, metadata, versions, archive download, and `skill_reference` wiring into sessions |
+| Skills | SKL-001..006, SKV-001..005 | 11 verified | ZIP and directory uploads validated against the guide's limits and the Agent Skills frontmatter rules, numbered versions with default/latest pointers, integrity-checked archive download, project-scoped; `self_hosted` sessions install pinned `skill_reference` versions (local extension) | None within the parity target |
 | Vaults and credentials | VLT-001..004, CRD-001..005 | 6 verified, 3 partial (CRD-001, CRD-003, CRD-005) | Encrypted CRUD, rotation without ID changes, snapshots held by running sessions, HTTP MCP authentication, project-scoped | `environment_variable` credentials; OAuth refresh (rejected); external key management |
 | Webhooks | WHK-001..008 | 4 verified, 4 partial | Endpoint CRUD, signed and retried deliveries that survive restarts, secret rotation with a 24h overlap, test delivery; endpoints and deliveries project-scoped | Only the five `agent.session.*` event types; environment data in events; ordering after a failed attempt |
 | Traces | TRC-001 | partial | OTLP JSON export, including `execute_tool` spans | No reference schema or SDK method exists; per-response model and subagent instructions are not recorded |
@@ -76,16 +75,14 @@ only, and there is no Windows evidence. See
 
 Ordered by the number of rows each item unblocks:
 
-1. **Skills API (11 ops).** This is the largest in-scope block that is still
-   missing, and G08 skills/plugins selection depends on it.
-2. **Capability gaps:** deferred functions and tool search (G06), built-in
+1. **Capability gaps:** deferred functions and tool search (G06), built-in
    capability slices (G07), compaction and programmatic tool calling (G08).
-3. **Webhook event types (WHK-001, WHK-003):** accept subscriptions to the
+2. **Webhook event types (WHK-001, WHK-003):** accept subscriptions to the
    other OpenAI event types, even though this service never produces them.
-4. **Files variants (FIL-001..005):** decide whether upload parts, batch
+3. **Files variants (FIL-001..005):** decide whether upload parts, batch
    processing, and range requests belong to the target, then close or exclude
    them; the remaining file rows are otherwise complete.
-5. **Platform evidence (G12):** Windows and cross-OS worker/executor runs, SDK
+4. **Platform evidence (G12):** Windows and cross-OS worker/executor runs, SDK
    scenarios for every implemented resource, and
    provider interoperability (BEH-018).
 

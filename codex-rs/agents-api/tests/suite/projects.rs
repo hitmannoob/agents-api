@@ -334,7 +334,7 @@ async fn projects_cannot_reach_each_others_vaults_files_or_environments() -> any
             ("{environment_id}", &environment_id, "environment not found"),
             ("{skill_id}", &skill_id, "skill not found"),
         ]).await?;
-        assert_eq!(swept, 13);
+        assert_eq!(swept, 22);
 
         let send = |method: reqwest::Method, url: String, body: Value| {
             let request = client.request(method, url).bearer_auth(&outsider).header("OpenAI-Beta", "agents=v1").json(&body);

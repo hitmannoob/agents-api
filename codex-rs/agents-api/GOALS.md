@@ -89,10 +89,12 @@ Current boundaries:
   Calls interrupted by backend loss become unresolved/unavailable.
 - Function results are limited to 10,000 text bytes, a local decision because
   the public docs publish no limit.
-- Missing outright: the Skills API, deferred functions and tool search,
-  built-in capability execution, compaction controls, programmatic tool
-  calling, skills/plugins selection, `environment_variable` credentials, and
-  OAuth refresh.
+- The Skills API is complete locally (2026-10-12). Self-hosted sessions can
+  install pinned Skills API versions through a local `skills` extension on
+  `self_hosted` environments.
+- Missing outright: deferred functions and tool search, built-in capability
+  execution, compaction controls, programmatic tool calling,
+  `environment_variable` credentials, and OAuth refresh.
 
 ## Execution order and tracking
 
@@ -112,7 +114,7 @@ fixture design may start earlier.
 | G07 | Complete MCP and built-in controls (HTTP MCP complete locally; built-in capabilities open) | G00, G03, G05 | MCP, built-in capabilities, isolation |
 | G08 | Expose remaining harness capabilities (subagents complete locally; compaction, programmatic calls, skills/plugins open) | G00, G03, G05, G07 | Delegation, compaction, programmatic calls, skills/plugins |
 | G09 | Implement environment lifecycle (self-hosted complete locally; managed out of scope) | G00, G01, G02 | Self-hosted attachment, managed provisioning, lifecycle recovery |
-| G10 | Implement files and artifacts (complete locally for self-hosted; Skills API missing) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
+| G10 | Implement files and artifacts (complete locally for self-hosted, including the Skills API) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
 | G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
 | G12 | Prove end-to-end parity (open: SDK scenarios for every resource, Windows/cross-OS) | All applicable goals | Contract suite, real providers, platforms, failure matrix |
 | G13 | Projects, API keys, and permissions (complete locally 2026-10-12; Admin API out of scope) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
@@ -821,6 +823,10 @@ Triage (2026-09-28):
   automatic), so there is nothing public to add.
 - **Skills and plugins:** these come from environment `capability_directories`,
   the Skills API, and hosted environments, so they wait for G09/G10.
+  Update (2026-10-12): capability directories (G09) and pinned Skills API
+  versions (G10) now reach self-hosted sessions. Both selections persist:
+  Codex keeps the thread's capability roots, and pins live in the database.
+  The open checklist item still lacks a cross-session isolation test.
 - **Programmatic tool calling:** needs Codex's code-mode host, whose V8 build
   was unavailable here, so it stays rejected.
 - **Subagents:** buildable now, and done first by decision.
@@ -1083,9 +1089,91 @@ Evidence (2026-10-06, self-hosted scope):
     directs for self-hosted environments.
 - **Scope:** the service has a single operator-token tenant, so there is no
   cross-tenant isolation to test.
-- **Out of scope** with hosted environments: creation-time files, published
-  artifacts, and the Skills API (SKL/SKV), which only feeds hosted
-  `skill_reference` inputs.
+- **Out of scope** with hosted environments: creation-time files and
+  published artifacts. The Skills API was listed here too, since the contract
+  feeds `skill_reference` only to hosted environments; it was brought back
+  into scope on 2026-10-12 (below).
+
+Evidence (2026-10-12, Skills API and self-hosted skills). Decision: build
+the Skills API to the pinned contract, and let `self_hosted` environments
+consume it through a local extension, since the contract has no self-hosted
+consumer.
+- **Slice 1, uploads and bundles** (`src/upload.rs`, `src/skill_bundle.rs`):
+  - The multipart reader now also takes many file parts, written to disk as
+    they arrive and bounded by count (500) and total size (50 MiB).
+  - The SDK sends `files[]` parts: one per file for a directory upload, or a
+    single `.zip`. A lone file passed outside a list goes out as a JSON body,
+    which gets 400 "files is required".
+  - A bundle needs one top-level folder (archiver `__MACOSX` and `.DS_Store`
+    are dropped) and exactly one `SKILL.md` (case-insensitive) directly
+    inside it.
+  - Frontmatter is read with `codex-skills`' parser, so stored versions are
+    ones Codex loads. `name` and `description` are then held to the Agent
+    Skills rules: 1-64 lowercase letters, digits, and single hyphens, and
+    1-1024 characters. Folder-name matching is not enforced.
+  - Limits: 25 MiB per file, read rather than trusted from headers, and a
+    local 256 MiB uncompressed bound against ZIP bombs.
+  - Paths that are absolute, contain `..`, backslashes, or `:`, or appear
+    twice are refused, as are links and encrypted entries.
+  - Valid bundles are rewritten as a canonical ZIP: sorted entries,
+    deflated, with only the executable bit of each mode kept.
+  - Tests: `skill_bundle_tests::*` and
+    `upload_tests::multi_file_uploads_keep_each_part_and_bound_them_together`.
+- **Slice 2, routes** (`src/skills.rs`, migration `0019_skills`):
+  - All 11 operations, with IDs `skill_…` and `skillver_…`.
+  - Versions are numbered from 1 and numbers are never reused.
+    `default=true` moves the default, and `latest_version` is the highest
+    remaining number. A skill's name and description are its default
+    version's.
+  - The default version cannot be deleted while others remain, and deleting
+    the last version deletes the skill.
+  - Contents live under `skills/` and are checked against their SHA-256
+    before they are served as `application/zip`. A startup sweep removes
+    interrupted uploads.
+  - Skills are project-scoped and need `api.skills.read`/`api.skills.write`
+    (local names). `/v1/skills` errors use the public shape without the beta
+    header.
+  - Tests:
+    - `skills::skills_keep_numbered_versions_with_a_default`
+    - the error-shape, pagination, permission, and isolation sweeps, now
+      over 17 lists and 22 isolated operations
+    - `store::tests::migrations_record_a_ledger_and_adopt_a_legacy_database`
+- **Slice 3, self-hosted extension** (`src/session_skills.rs`, migration
+  `0020_session_skills`):
+  - `self_hosted` environments accept
+    `skills: [{"type":"skill_reference","skill_id","version"?}]`, at most 32.
+    `version` is a number, `latest`, or omitted for the default.
+  - References resolve in the caller's project at session creation. Each
+    version is hard-linked (or copied) to `skill_pins/<session>/`, so later
+    deletes do not affect the session.
+  - Before each turn the pins are written to
+    `<workspace>/.agents-api/skills/<name>/` on the executor, unless a digest
+    marker matches. That directory is one more capability root on
+    `thread/start`.
+  - `EnvironmentInfo.skills` lists the pinned versions. Session deletion
+    removes the rows and pins.
+  - Limits:
+    - inline skills are refused;
+    - executable bits are lost on install (the executor filesystem API
+      writes contents only);
+    - a reinstall overwrites files without removing extra ones, since
+      recursive no-follow removal is unsupported on executors.
+  - Test: `environments::self_hosted_sessions_install_their_pinned_skills`.
+    With a real in-process executor it shows the model is offered the pinned
+    skill after a new default replaces it and v1 is deleted, that a wiped
+    installation comes back on the next turn, and that deletion leaves no
+    rows or pins.
+- **Slice 4, SDK and inventory:** `tests/sdk_skills.py`, run by
+  `contract::official_sdk_session_lifecycle` with strict response validation,
+  drives every operation through `openai==3.17.0`. SKL-001..006 and
+  SKV-001..005 are verified. The inventory now has 33 verified,
+  2 implemented, 27 partial, and 5 missing (all environment templates, out of
+  scope).
+- Commands (macOS, mock provider, `RUST_MIN_STACK=8388608`):
+  `cargo test -p codex-agents-api --lib` (19 passed), and
+  `cargo test -p codex-agents-api --test api -- skills:: errors:: projects:: files:: environments::`
+  plus the ignored SDK tests with `CODEX_AGENTS_API_SDK_PYTHON` set, all
+  passing.
 
 ## G11 — Credentials, webhooks, and observability (complete locally except environment-dependent parts)
 
@@ -1879,8 +1967,8 @@ above and in git.
    2026-10-12,** including project-scoped executor keys. The Admin API is out
    of scope by decision.
 2. **Second inventory promotion pass (G12, G13 slice 6): done 2026-10-12.**
-3. **Skills API (SKL-001..006, SKV-001..005).** This is the largest in-scope
-   block still missing, and G08 skills/plugins selection depends on it.
+3. **Skills API (SKL-001..006, SKV-001..005): complete locally 2026-10-12,**
+   including pinned skills for self-hosted sessions (local extension).
 4. **Deferred functions and tool search (G06), then built-in capability
    slices (G07).** Both need provider/model support reported by the worker.
 5. **G08 compaction controls and programmatic tool calling.**

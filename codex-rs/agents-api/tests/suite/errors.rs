@@ -140,7 +140,7 @@ async fn every_list_bounds_its_pagination() -> anyhow::Result<()> {
             json!({"id":id,"query":query,"status":status,"public":status != 200})
         }).collect();
         assert_eq!(observed, expected);
-        assert_eq!(observed.len(), 15 * queries.len());
+        assert_eq!(observed.len(), 17 * queries.len());
         Ok::<_, anyhow::Error>(())
     })
     .await?
