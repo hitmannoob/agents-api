@@ -16,6 +16,11 @@ export type Model = { id: string, model: string, upgrade: string | null, upgrade
  */
 supportsPersonality: boolean,
 /**
+ * Whether the model can search deferred tools (`tool_search`). Without it, deferred tools
+ * are not offered to the model.
+ */
+supportsSearchTool: boolean,
+/**
  * Multi-agent runtime declared by this model, when available.
  */
 multiAgentVersion: MultiAgentVersion | null,

@@ -196,6 +196,7 @@ fn model_from_preset(preset: &ModelPreset) -> Model {
         default_reasoning_effort: preset.default_reasoning_effort.clone(),
         input_modalities: preset.input_modalities.clone(),
         supports_personality: false,
+        supports_search_tool: preset.supports_search_tool,
         multi_agent_version: preset.multi_agent_version.map(Into::into),
         additional_speed_tiers: preset.additional_speed_tiers.clone(),
         service_tiers: preset
@@ -227,6 +228,11 @@ fn expected_visible_models() -> Vec<Model> {
         .iter()
         .filter(|preset| preset.show_in_picker)
         .map(model_from_preset)
+        // The cache `write_models_cache` writes does not carry search support.
+        .map(|model| Model {
+            supports_search_tool: false,
+            ..model
+        })
         .collect()
 }
 

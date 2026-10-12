@@ -133,6 +133,10 @@ pub struct Model {
     /// @deprecated Always false; models no longer support personality selection.
     #[serde(default)]
     pub supports_personality: bool,
+    /// Whether the model can search deferred tools (`tool_search`). Without it, deferred tools
+    /// are not offered to the model.
+    #[serde(default)]
+    pub supports_search_tool: bool,
     /// Multi-agent runtime declared by this model, when available.
     pub multi_agent_version: Option<MultiAgentVersion>,
     /// Deprecated: use `serviceTiers` instead.

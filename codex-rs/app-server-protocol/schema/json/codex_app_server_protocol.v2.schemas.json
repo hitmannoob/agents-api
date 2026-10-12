@@ -11652,6 +11652,11 @@
           "description": "@deprecated Always false; models no longer support personality selection.",
           "type": "boolean"
         },
+        "supportsSearchTool": {
+          "default": false,
+          "description": "Whether the model can search deferred tools (`tool_search`). Without it, deferred tools are not offered to the model.",
+          "type": "boolean"
+        },
         "upgrade": {
           "type": [
             "string",

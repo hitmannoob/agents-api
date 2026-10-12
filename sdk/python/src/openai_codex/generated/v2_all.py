@@ -8865,6 +8865,13 @@ class Model(BaseModel):
             description="@deprecated Always false; models no longer support personality selection.",
         ),
     ] = False
+    supports_search_tool: Annotated[
+        bool | None,
+        Field(
+            alias="supportsSearchTool",
+            description="Whether the model can search deferred tools (`tool_search`). Without it, deferred tools are not offered to the model.",
+        ),
+    ] = False
     upgrade: str | None = None
     upgrade_info: Annotated[ModelUpgradeInfo | None, Field(alias="upgradeInfo")] = None
 
