@@ -35,15 +35,18 @@ in [GOALS.md](GOALS.md).
 Updated: 2026-10-12. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
 per-operation detail lives in its `remaining` fields.
 
-**Scorecard:** 67 operations: 33 `verified`, 2 `implemented`, 27 `partial`,
+**Scorecard:** 67 operations: 42 `verified`, 2 `implemented`, 18 `partial`,
 5 `missing`. The 5 missing (environment templates) are outside the parity
-target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 16 are partial and 2 are missing
-(BEH-011 is out of scope; BEH-018, provider interoperability, is open), and
-4 are verified (BEH-003, BEH-006, BEH-012, BEH-015).
+target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 6 are verified (BEH-001, BEH-003, BEH-004,
+BEH-006, BEH-012, BEH-015), 10 are partial, and 2 are missing (BEH-011 is out
+of scope; BEH-018, provider interoperability, is open).
 
 Two promotion passes on 2026-10-12 moved rows whose only gaps were out of
 scope, intended behavior, or project scope, which G13 closed: API keys belong
 to projects, every resource is project-scoped, and permissions are enforced.
+A third pass the same day closed the contract gaps that needed no provider:
+webhook event types, the beta header (accepted and ignored everywhere),
+pagination evidence, cursor expiry, and the Files scope decision.
 The remaining partial rows each have a concrete variant or evidence gap
 listed below; evidence still comes from mock providers plus OpenRouter runs
 only, and there is no Windows evidence. See
@@ -51,7 +54,7 @@ only, and there is no Windows evidence. See
 
 | Area | Ops | Status | Works today | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Saved agents | AGT-001..005 | 1 verified (AGT-005), 4 partial | Full CRUD, creation-order pagination, every pinned configuration family round trips with omit/null/replace semantics, snapshots survive agent deletion and cold resume, project-scoped | Prototype limits; cursor expiry; built-in capability execution (G07/G08) |
+| Saved agents | AGT-001..005 | 2 verified (AGT-004..005), 3 partial | Full CRUD, creation-order pagination, every pinned configuration family round trips with omit/null/replace semantics, snapshots survive agent deletion and cold resume, project-scoped | Prototype limits; built-in capability execution (G07/G08) |
 | Sessions | SES-001..005 | 1 verified (SES-004), 4 partial | CRUD, initial input and streaming, `none` and `self_hosted` environments, `vault_ids`, next-turn model/effort/tier updates, deletion with a durable cleanup queue, project-scoped | Complete configuration; environment actions in the session object; provider-specific model compatibility |
 | Input events | EVT-001 | partial | Validated ordered batches, text and data-URL images, string and content-part function results (10,000 bytes), session-scoped `Idempotency-Key` replay | Remote image URLs; batching and idempotency are local decisions with no upstream contract |
 | Streaming | EVT-002 | partial | Lifecycle, item, text and reasoning deltas, content parts, `error`, subagent, environment, and command-output events | Codex sends no command-output deltas for remote commands (output arrives on the item); no replay, by contract |
@@ -63,12 +66,12 @@ only, and there is no Windows evidence. See
 | Environments | ENV-001..003 | 2 implemented, 1 partial (ENV-001) | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected` status, writing and listing environment files, executor loss handled apart from worker loss | `expired`/`failed` statuses (ENV-001); one real-provider run; Windows and cross-OS execution |
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
 | Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |
-| Files | FIL-001..005 | 5 partial | Streaming multipart upload (50 MiB) with SHA-256, six purposes, `expires_after`, integrity-checked download, project-scoped | No upload parts, batch processing, or range requests; `status` is always `processed` |
+| Files | FIL-001..005 | 5 verified | Streaming multipart upload (50 MiB) with SHA-256, six purposes, `expires_after`, integrity-checked download, project-scoped | None; upload parts, batch processing, and range requests are **out of scope** (decision 2026-10-12) |
 | Skills | SKL-001..006, SKV-001..005 | 11 verified | ZIP and directory uploads validated against the guide's limits and the Agent Skills frontmatter rules, numbered versions with default/latest pointers, integrity-checked archive download, project-scoped; `self_hosted` sessions install pinned `skill_reference` versions (local extension) | None within the parity target |
 | Vaults and credentials | VLT-001..004, CRD-001..005 | 6 verified, 3 partial (CRD-001, CRD-003, CRD-005) | Encrypted CRUD, rotation without ID changes, snapshots held by running sessions, HTTP MCP authentication, project-scoped | `environment_variable` credentials; OAuth refresh (rejected); external key management |
-| Webhooks | WHK-001..008 | 4 verified, 4 partial | Endpoint CRUD, signed and retried deliveries that survive restarts, secret rotation with a 24h overlap, test delivery; endpoints and deliveries project-scoped | Only the five `agent.session.*` event types; environment data in events; ordering after a failed attempt |
+| Webhooks | WHK-001..008 | 7 verified, 1 partial (WHK-007) | Endpoint CRUD, every event type the SDK lists (only `agent.session.*` are produced), signed and retried deliveries that survive restarts, secret rotation with a 24h overlap, test delivery of any type; endpoints and deliveries project-scoped | 502 for an unreachable test receiver is a local choice; environment data in events; ordering after a failed attempt |
 | Traces | TRC-001 | partial | OTLP JSON export, including `execute_tool` spans | No reference schema or SDK method exists; per-response model and subagent instructions are not recorded |
-| Projects and keys | (BEH-001, BEH-003, G13) | BEH-003 verified, BEH-001 partial | Project API keys with permissions (CLI-managed), 401/403/404 swept over every operation, every resource project-scoped | Beta-header requirements per route. Admin API out of scope by decision (2026-10-12); executors use project keys holding `api.environments.connect` |
+| Projects and keys | (BEH-001, BEH-003, G13) | BEH-001 and BEH-003 verified | Project API keys with permissions (CLI-managed), 401/403/404 swept over every operation, every resource project-scoped; the `OpenAI-Beta` header is accepted and ignored everywhere (decision 2026-10-12) | None. Admin API out of scope by decision (2026-10-12); executors use project keys holding `api.environments.connect` |
 | Service operation | (BEH-017) | partial | Managed worker supervision with backoff, reconnect fencing, turn/function reconciliation, Unix orphan reclaim, data-directory lock, migrations, Modal deployment, per-project list indexes | Windows orphan containment; the spawn-to-record window; durable identity (G02) |
 
 ### Path to `verified`
@@ -77,12 +80,7 @@ Ordered by the number of rows each item unblocks:
 
 1. **Capability gaps:** deferred functions and tool search (G06), built-in
    capability slices (G07), compaction and programmatic tool calling (G08).
-2. **Webhook event types (WHK-001, WHK-003):** accept subscriptions to the
-   other OpenAI event types, even though this service never produces them.
-3. **Files variants (FIL-001..005):** decide whether upload parts, batch
-   processing, and range requests belong to the target, then close or exclude
-   them; the remaining file rows are otherwise complete.
-4. **Platform evidence (G12):** Windows and cross-OS worker/executor runs, SDK
+2. **Platform evidence (G12):** Windows and cross-OS worker/executor runs, SDK
    scenarios for every implemented resource, and
    provider interoperability (BEH-018).
 

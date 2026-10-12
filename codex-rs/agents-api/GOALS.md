@@ -1957,6 +1957,47 @@ operation; pre-G13 data directories migrate into the default project with
 no loss; the existing suite passes unchanged with the bootstrap token; and
 the README documents the CLI and the shared-worker limit.
 
+## Contract gaps closed without provider dependencies (2026-10-12)
+
+Five small gaps that needed decisions or evidence, not provider support:
+
+- [x] **Webhook event types (WHK-001, WHK-003, WHK-007, WHK-008).** Endpoints
+  accept the five `agent.session.*` types and the 18 others the pinned SDK
+  lists (`WebhookCreateParams`). Only session events are produced, so the
+  others are never delivered; test deliveries send a sample of any type, with
+  `data` shaped as the SDK's event models expect.
+  Evidence: `webhooks::webhook_endpoints_sign_test_deliveries_and_keep_secrets_private`
+  checks the list, unknown types, and sample payloads;
+  `webhooks::session_events_are_queued_retried_and_survive_restart` checks an
+  endpoint subscribed to the other types receives nothing; the SDK lifecycle
+  check derives the list from the SDK's own `Literal` and parses a
+  `response.completed` test delivery with `webhooks.unwrap`.
+- [x] **Beta header (BEH-001).** Decision: the `OpenAI-Beta` header is
+  accepted and ignored on every route. The SDK sends it; other clients need
+  not. The prototype, which used its absence to select its own agent format
+  on `/v1/agents`, moves to `/v1/prototype/agents`, so `/v1/agents` speaks
+  only the public format.
+  Evidence: `errors::every_inventoried_operation_answers_with_the_public_error_shape`
+  sends every operation with and without the header and expects identical
+  answers.
+- [x] **Pagination (BEH-004).** Every list already ordered by a monotonic
+  sequence with exclusive cursors; the gap was evidence, and the goal's
+  "1..100 everywhere" contradicted the SDK (vault, credential, and webhook
+  lists clamp; files allow 10,000).
+  Evidence: `errors::every_list_walks_its_pages_in_both_orders` walks eight
+  lists one item at a time in both orders and fails if an inventoried list is
+  neither walked there nor named as walked elsewhere.
+- [x] **Cursor expiry (AGT-004).** The SDK documents `after` as a resource ID;
+  no source documents expiry, so none is implemented.
+- [x] **Files variants (FIL-001..005).** Decision: upload parts (the Uploads
+  API), batch processing (the Batch API), and range requests are outside the
+  parity target.
+
+Result: AGT-004, FIL-001..005, WHK-001, WHK-003, WHK-008, BEH-001, and BEH-004
+are verified: 42 verified, 2 implemented, 18 partial, and 5 missing
+operations. `cargo nextest run -p codex-agents-api` passed 72/72, and the 3
+pinned-SDK tests passed with `openai==3.17.0` (mock provider, macOS).
+
 ## Immediate next implementation slices
 
 Updated 2026-10-12. G00–G05 slices and the G01/G02 recovery slices that
@@ -1969,10 +2010,12 @@ above and in git.
 2. **Second inventory promotion pass (G12, G13 slice 6): done 2026-10-12.**
 3. **Skills API (SKL-001..006, SKV-001..005): complete locally 2026-10-12,**
    including pinned skills for self-hosted sessions (local extension).
-4. **Deferred functions and tool search (G06), then built-in capability
+4. **Contract gaps without provider dependencies: done 2026-10-12** (webhook
+   event types, beta header, pagination evidence, cursor expiry, Files scope).
+5. **Deferred functions and tool search (G06), then built-in capability
    slices (G07).** Both need provider/model support reported by the worker.
-5. **G08 compaction controls and programmatic tool calling.**
-6. **G12 evidence gaps.** SDK scenarios for every implemented resource
+6. **G08 compaction controls and programmatic tool calling.**
+7. **G12 evidence gaps.** SDK scenarios for every implemented resource
    a Windows/cross-OS worker and executor run, and
    provider interoperability (BEH-018).
 

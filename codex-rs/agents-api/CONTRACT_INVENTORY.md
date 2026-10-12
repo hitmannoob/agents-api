@@ -15,8 +15,9 @@ operations required by documented Agents API workflows.
   [official guide index](https://developers.openai.com/api/docs/llms.txt).
 - SDK baseline: official Python SDK `openai==3.17.0`.
 - Review date: 2026-09-22.
-- Agents requests use `OpenAI-Beta: agents=v1` unless the operation is a listed
-  Files, Skills, or Webhooks dependency with its own contract.
+- The pinned SDK sends `OpenAI-Beta: agents=v1` on Agents API requests, but
+  not on the Files, Skills, or Webhooks dependencies. This service accepts and
+  ignores the header on every route (decision 2026-10-12).
 
 The operation denominator is 67:
 
@@ -51,11 +52,11 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-12) is 33 verified, 2 implemented, 27 partial, and
+The current count (2026-10-12) is 42 verified, 2 implemented, 18 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
 of scope since 2026-10-06. Verified: ART-001..004, SUB-002..006, TRN-002,
-AGT-005, SES-004, VLT-001..004, CRD-002, CRD-004, WHK-002, WHK-004..006,
-SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
+AGT-004..005, SES-004, VLT-001..004, CRD-002, CRD-004, FIL-001..005,
+WHK-001..006, WHK-008, SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
 evidence: ENV-002..003. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
 per-area summary.
 
@@ -144,3 +145,12 @@ Amendments under the same `openai==3.17.0` pin:
   By project decision, the OpenAI Admin API (`/organization/projects` and
   project API key management) stays outside the denominator; the CLI manages
   projects and keys.
+- 2026-10-12: contract decisions with no provider dependency. The
+  `OpenAI-Beta` header is accepted and ignored on every route; the
+  prototype's agent routes move to `/v1/prototype/agents`. Webhook endpoints
+  accept and test every event type the pinned SDK lists, though only
+  `agent.session.*` events are produced (additive). Upload parts (the Uploads
+  API), batch processing (the Batch API), and file range requests leave the
+  parity target (scope reduction). List cursors are resource IDs and do not
+  expire. The third promotion pass moved AGT-004, FIL-001..005, WHK-001,
+  WHK-003, WHK-008, BEH-001, and BEH-004 to verified.
