@@ -220,6 +220,8 @@ async fn migrations_record_a_ledger_and_adopt_a_legacy_database() -> anyhow::Res
         "DROP TABLE generations",
         "DROP TABLE environments",
         "DROP TABLE files",
+        "DROP TABLE skills",
+        "DROP TABLE skill_versions",
         "DROP TABLE api_keys",
         "DROP TABLE projects",
         "DROP TABLE public_records",

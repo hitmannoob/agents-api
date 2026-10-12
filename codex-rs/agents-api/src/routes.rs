@@ -58,6 +58,7 @@ pub(crate) fn router(state: Arc<State>) -> Router {
         .merge(crate::webhooks::router())
         .merge(crate::registry::router())
         .merge(crate::files::router())
+        .merge(crate::skills::router())
         // Route layers see the matched route template, which labels metrics.
         .route_layer(middleware::from_fn(crate::telemetry::route))
         .layer(DefaultBodyLimit::max(/*limit*/ 16 * 1024))
@@ -97,6 +98,7 @@ async fn authorize(
     let compatible = request.uri().path().starts_with("/v1/agents/sessions")
         || request.uri().path().starts_with("/v1/webhook_")
         || request.uri().path().starts_with("/v1/files")
+        || request.uri().path().starts_with("/v1/skills")
         || request
             .headers()
             .get("openai-beta")

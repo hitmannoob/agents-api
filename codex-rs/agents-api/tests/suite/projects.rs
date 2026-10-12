@@ -294,9 +294,9 @@ pub(super) async fn sweep(
     Ok(observed.len())
 }
 
-/// Another project's vaults (with their credentials), files, and
-/// environments read as missing, stay out of lists, are not cursors, and
-/// cannot be referenced from the caller's own sessions or environments.
+/// Another project's vaults (with their credentials), files, environments,
+/// and skills read as missing, stay out of lists, are not cursors, and cannot
+/// be referenced from the caller's own sessions or environments.
 #[tokio::test]
 async fn projects_cannot_reach_each_others_vaults_files_or_environments() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(/*secs*/ 60), async {
@@ -325,11 +325,14 @@ async fn projects_cannot_reach_each_others_vaults_files_or_environments() -> any
         let file_id = file["id"].as_str().context("file id")?.to_owned();
         let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), self_hosted.clone()).await?;
         let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
+        let skill = skills::create(&client, &base, TOKEN, "owned").await?;
+        let skill_id = skill["id"].as_str().context("skill id")?.to_owned();
 
         let swept = sweep(&client, &base, &outsider, &inventory, &[
             ("{vault_id}", &vault_id, "vault not found"),
             ("{file_id}", &file_id, "file not found"),
             ("{environment_id}", &environment_id, "environment not found"),
+            ("{skill_id}", &skill_id, "skill not found"),
         ]).await?;
         assert_eq!(swept, 13);
 
@@ -341,7 +344,7 @@ async fn projects_cannot_reach_each_others_vaults_files_or_environments() -> any
                 anyhow::Ok((status, response.json::<Value>().await?))
             }
         };
-        for (path, cursor) in [("/vaults", vault_id.as_str()), ("/files", file_id.as_str())] {
+        for (path, cursor) in [("/vaults", vault_id.as_str()), ("/files", file_id.as_str()), ("/skills", skill_id.as_str())] {
             let (status, page) = send(reqwest::Method::GET, format!("{base}{path}"), Value::Null).await?;
             assert_eq!((status, page["data"].clone()), (200, json!([])), "{path}");
             let (status, _) = send(reqwest::Method::GET, format!("{base}{path}?after={cursor}"), Value::Null).await?;
@@ -364,6 +367,7 @@ async fn projects_cannot_reach_each_others_vaults_files_or_environments() -> any
         request(&client, reqwest::Method::GET, &format!("{base}/vaults/{vault_id}"), Value::Null).await?;
         request(&client, reqwest::Method::GET, &format!("{base}/files/{file_id}"), Value::Null).await?;
         request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?;
+        request(&client, reqwest::Method::GET, &format!("{base}/skills/{skill_id}"), Value::Null).await?;
         Ok::<_, anyhow::Error>(())
     })
     .await?
@@ -387,6 +391,8 @@ fn needed(operation: &Value) -> Vec<&'static str> {
         pick("api.files.read", "api.files.write")
     } else if path.starts_with("/webhook_") {
         pick("api.webhooks.read", "api.webhooks.write")
+    } else if path.starts_with("/skills") {
+        pick("api.skills.read", "api.skills.write")
     } else {
         pick("api.agents.read", "api.agents.write")
     };

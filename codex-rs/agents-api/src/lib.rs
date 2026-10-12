@@ -22,6 +22,7 @@ mod routes;
 mod secrets;
 mod sessions;
 mod skill_bundle;
+mod skills;
 mod stdio_env;
 mod store;
 mod streaming;
@@ -99,6 +100,8 @@ struct State {
     pending_cancels: Mutex<HashSet<String>>,
     /// Uploaded file contents.
     files: files::Files,
+    /// Skill version contents.
+    skills: skills::Skills,
     /// This service's own connections to self-hosted executors, for
     /// environment files.
     executors: codex_exec_server::EnvironmentManager,
@@ -239,6 +242,7 @@ impl AgentsApi {
             started_turns: Mutex::default(),
             pending_cancels: Mutex::default(),
             files: files::Files(directory.join("files").to_path_buf()),
+            skills: skills::Skills(directory.join("skills").to_path_buf()),
             executors: codex_exec_server::EnvironmentManager::without_environments(
                 codex_http_client::HttpClientFactory::new(
                     codex_http_client::OutboundProxyPolicy::ReqwestDefault,
@@ -252,6 +256,7 @@ impl AgentsApi {
         });
         environments::recover(&state).await?;
         files::sweep(&state).await?;
+        skills::sweep(&state).await?;
         let router = routes::router(Arc::clone(&state));
         let stop = watch::channel(/*stopping*/ false).0;
         let dispatcher = tokio::spawn(webhook_outbox::dispatch(

@@ -123,7 +123,7 @@ pub(crate) async fn read(state: &State, project_id: &str, id: &str) -> Result<Ve
 }
 
 /// Check a stored file against its digest without holding it in memory.
-async fn verify(path: &std::path::Path, expected: &str) -> Result<(), ApiError> {
+pub(crate) async fn verify(path: &std::path::Path, expected: &str) -> Result<(), ApiError> {
     let mut file = tokio::fs::File::open(path).await.map_err(|_| not_found())?;
     let mut hasher = Sha256::new();
     let mut chunk = vec![0; 64 * 1024];

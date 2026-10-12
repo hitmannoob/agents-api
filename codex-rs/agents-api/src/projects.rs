@@ -26,10 +26,11 @@ use uuid::Uuid;
 pub const DEFAULT_PROJECT: &str = "proj_default";
 
 /// Every permission a key can hold. Agents, Responses, Vaults, and Files names
-/// follow the official guides. The guides name no string for webhooks or for
-/// the environment key's "connect environments" permission, so
-/// `api.webhooks.*` and `api.environments.connect` are local choices.
-pub const PERMISSIONS: [&str; 10] = [
+/// follow the official guides. The guides name no string for webhooks, skills,
+/// or the environment key's "connect environments" permission, so
+/// `api.webhooks.*`, `api.skills.*`, and `api.environments.connect` are local
+/// choices.
+pub const PERMISSIONS: [&str; 12] = [
     "api.agents.read",
     "api.agents.write",
     "api.responses.write",
@@ -39,6 +40,8 @@ pub const PERMISSIONS: [&str; 10] = [
     "api.files.write",
     "api.webhooks.read",
     "api.webhooks.write",
+    "api.skills.read",
+    "api.skills.write",
     "api.environments.connect",
 ];
 
@@ -141,6 +144,11 @@ pub(crate) async fn foreign(
             *id,
             "file not found",
         ),
+        ["skills", id, ..] => (
+            "SELECT project_id FROM skills WHERE id = ?",
+            *id,
+            "skill not found",
+        ),
         ["sessions", id, ..] => (
             "SELECT project_id FROM sessions WHERE id = ?",
             *id,
@@ -188,6 +196,12 @@ pub(crate) fn required(method: &axum::http::Method, path: &str) -> &'static [&'s
             &["api.files.read"]
         } else {
             &["api.files.write"]
+        }
+    } else if under("/v1/skills") {
+        if read {
+            &["api.skills.read"]
+        } else {
+            &["api.skills.write"]
         }
     } else if under("/v1/webhook_endpoints") || under("/v1/webhook_event_types") {
         if read {

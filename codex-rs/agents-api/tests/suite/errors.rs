@@ -91,12 +91,15 @@ async fn every_list_bounds_its_pagination() -> anyhow::Result<()> {
         let (base, _server) = capabilities::serve(&api).await?;
         api.configure_environments("an-environment-key-for-pagination-checks".into(), format!("{}/registry", base.trim_end_matches("/v1")))?;
         let client = reqwest::Client::new();
-        // Parents that need no model call: an idle self-hosted session and a vault.
+        // Parents that need no model call: an idle self-hosted session, a vault,
+        // and a skill.
         let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), json!({"agent":{"model":"mock-model"},
             "environment":{"type":"self_hosted","workspace_directory":workspace.path().to_str().context("workspace")?}})).await?;
         let vault: Value = client.post(format!("{base}/vaults")).bearer_auth(TOKEN).header("OpenAI-Beta", "agents=v1")
             .json(&json!({"name":"pages"})).send().await?.error_for_status()?.json().await?;
+        let skill = skills::create(&client, &base, TOKEN, "pages").await?;
         let parent = |name: &str| match name {
+            "{skill_id}" => skill["id"].as_str().map(str::to_owned),
             "{session_id}" => session["id"].as_str().map(str::to_owned),
             "{vault_id}" => vault["id"].as_str().map(str::to_owned),
             "{environment_id}" => session["environment"]["id"].as_str().map(str::to_owned),

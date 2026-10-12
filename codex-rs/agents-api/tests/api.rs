@@ -481,6 +481,9 @@ mod environments;
 #[path = "suite/files.rs"]
 mod files;
 
+#[path = "suite/skills.rs"]
+mod skills;
+
 #[path = "suite/errors.rs"]
 mod errors;
 
