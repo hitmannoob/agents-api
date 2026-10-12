@@ -1836,9 +1836,14 @@ Checklist:
   project-scoped. `webhooks::endpoints_receive_only_their_projects_session_events`
   checks routing with one endpoint per project and sweeps the 5 inventoried
   operations that name an endpoint.
-- [ ] **Slice 5: permission sweep.** For every inventoried operation, a key
+- [x] **Slice 5: permission sweep.** For every inventoried operation, a key
   without the required permission gets 403 in the public error shape, and a
   key with only that permission succeeds.
+  Evidence (2026-10-12): `projects::every_operation_requires_its_permissions`
+  states each implemented operation's permissions from its method and path,
+  independently of `projects::required`. For every operation it checks that
+  a key lacking each needed permission gets 403 naming it, and that a key
+  holding exactly those permissions is admitted (more than 100 cases).
 - [ ] **Slice 6: inventory.** Record the decision as an amendment, update
   BEH-001 and BEH-003, remove "project scope" from each row's remaining gap
   where it was the only blocker, and run the second promotion pass.

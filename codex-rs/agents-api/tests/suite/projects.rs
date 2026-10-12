@@ -368,3 +368,109 @@ async fn projects_cannot_reach_each_others_vaults_files_or_environments() -> any
     })
     .await?
 }
+
+/// The permissions an inventoried operation needs, stated from its method and
+/// path independently of the server's own mapping.
+fn needed(operation: &Value) -> Vec<&'static str> {
+    let path = operation["path"].as_str().unwrap_or_default();
+    let read = operation["method"] == "GET";
+    let pick = |read_permission, write_permission| {
+        if read {
+            read_permission
+        } else {
+            write_permission
+        }
+    };
+    let base = if path.starts_with("/vaults") {
+        pick("api.vaults.read", "api.vaults.write")
+    } else if path.starts_with("/files") {
+        pick("api.files.read", "api.files.write")
+    } else if path.starts_with("/webhook_") {
+        pick("api.webhooks.read", "api.webhooks.write")
+    } else {
+        pick("api.agents.read", "api.agents.write")
+    };
+    // Creating a session and posting session events start model work.
+    if matches!(operation["id"].as_str(), Some("SES-001" | "EVT-001")) {
+        vec![base, "api.responses.write"]
+    } else {
+        vec![base]
+    }
+}
+
+/// Every implemented operation refuses a key that lacks one of its
+/// permissions with 403 in the public error shape, naming that permission,
+/// and admits a key holding exactly its permissions.
+#[tokio::test]
+async fn every_operation_requires_its_permissions() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 60), async {
+        let inventory: Value = serde_json::from_str(&std::fs::read_to_string(find_resource!("CONTRACT_INVENTORY.json")?)?)?;
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let provider = create_mock_responses_server_repeating_assistant("unused").await;
+        MockResponsesConfig::new(&provider.uri()).write(home.path())?;
+        let directory = AbsolutePathBuf::from_absolute_path(data.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, directory.clone(), TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let admin = Admin::open(directory).await?;
+        let project = admin.create_project("Permissions").await?;
+        let client = reqwest::Client::new();
+        let mut keys = std::collections::HashMap::<Vec<String>, String>::new();
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for operation in inventory["operations"].as_array().context("operations")? {
+            if operation["status"] == "missing" {
+                continue;
+            }
+            let needed = needed(operation);
+            let path = operation["path"].as_str().context("path")?
+                .split('/')
+                .map(|segment| if segment.starts_with('{') { "placeholder" } else { segment })
+                .collect::<Vec<_>>()
+                .join("/");
+            let method = reqwest::Method::from_bytes(operation["method"].as_str().context("method")?.as_bytes())?;
+            // Holding everything else but one needed permission, then exactly
+            // the needed ones.
+            let mut cases: Vec<(Vec<String>, Option<&str>)> = needed.iter().map(|&missing| {
+                let held = codex_agents_api::projects::PERMISSIONS.iter()
+                    .filter(|&&permission| permission != missing)
+                    .map(|&permission| permission.to_owned())
+                    .collect();
+                (held, Some(missing))
+            }).collect();
+            cases.push((needed.iter().map(|&permission| permission.to_owned()).collect(), None));
+            for (held, missing) in cases {
+                let secret = match keys.get(&held) {
+                    Some(secret) => secret.clone(),
+                    None => {
+                        let secret = admin.create_key(&project.id, "", &held).await?.value;
+                        keys.insert(held.clone(), secret.clone());
+                        secret
+                    }
+                };
+                let response = client.request(method.clone(), format!("{base}{path}")).bearer_auth(&secret)
+                    .header("OpenAI-Beta", "agents=v1").json(&json!({})).send().await?;
+                let status = response.status().as_u16();
+                let body: Value = response.json().await.unwrap_or(Value::Null);
+                match missing {
+                    Some(missing) => {
+                        observed.push(json!({"id":operation["id"],"missing":missing,"status":status,"error":body["error"]}));
+                        expected.push(json!({"id":operation["id"],"missing":missing,"status":403,"error":{
+                            "message":format!("this API key lacks the {missing} permission"),
+                            "type":"invalid_request_error","param":null,"code":null}}));
+                    }
+                    None => {
+                        let admitted = !matches!(status, 401 | 403);
+                        observed.push(json!({"id":operation["id"],"admitted":admitted}));
+                        expected.push(json!({"id":operation["id"],"admitted":true}));
+                    }
+                }
+            }
+        }
+        assert_eq!(observed, expected);
+        // 51 implemented operations, each refused and then admitted.
+        assert!(observed.len() >= 104, "{}", observed.len());
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
