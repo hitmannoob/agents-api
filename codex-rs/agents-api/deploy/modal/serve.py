@@ -1,9 +1,9 @@
 """Run the Agents API in a detached Modal Sandbox behind an encrypted tunnel.
 
-The service, its Codex worker, and the `codex` CLI are built from the
-repository's committed `HEAD` into a cached Modal image layer, so later starts
-take seconds. The provider key comes from a Modal secret you create; this
-script never reads it.
+The service, its Codex worker, the JavaScript code-mode host, and the `codex`
+CLI are built from the repository's committed `HEAD` into a cached Modal
+image layer, so later starts take seconds. The provider key comes from a
+Modal secret you create; this script never reads it.
 
 Usage:
   serve.py build STATE_DIR   build (or reuse) the image
@@ -45,13 +45,43 @@ wire_api = "responses"
 # A non-login shell: a login shell resets PATH and loses the Rust toolchain.
 BUILD = """
 set -euo pipefail
-export CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
+export CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH CARGO_INCREMENTAL=0
 mkdir -p /build && tar xf /src/codex.tar -C /build
-cd /build/codex-rs
-cargo build -p codex-agents-api -p codex-app-server -p codex-cli \
-  --bin codex-agents-api --bin codex-app-server --bin codex
+cd /build
+version="$(python3 .github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)"
+case "$(uname -m)" in
+  x86_64) target=x86_64-unknown-linux-gnu ;;
+  aarch64) target=aarch64-unknown-linux-gnu ;;
+  *) echo "Unsupported V8 build architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+profile=ptrcomp_sandbox_release
+base_url="https://github.com/openai/codex/releases/download/rusty-v8-v${version}"
+binding_dir=/build/rusty_v8
+archive_name="librusty_v8_${profile}_${target}.a.gz"
+binding_name="src_binding_${profile}_${target}.rs"
+checksums_name="rusty_v8_${profile}_${target}.sha256"
+trusted_checksums="third_party/v8/rusty_v8_${version//./_}_release_manifests.sha256"
+expected_manifest_checksum="$(awk -v name="${checksums_name}" '$2 == name { print $1 }' "${trusted_checksums}")"
+if [[ ! "${expected_manifest_checksum}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "No unique trusted V8 checksum for ${target} in ${trusted_checksums}" >&2
+  exit 1
+fi
+mkdir -p "${binding_dir}"
+curl -fsSL "${base_url}/${checksums_name}" -o "${binding_dir}/${checksums_name}"
+printf '%s  %s\\n' "${expected_manifest_checksum}" "${binding_dir}/${checksums_name}" | sha256sum --check -
+curl -fsSL "${base_url}/${archive_name}" -o "${binding_dir}/${archive_name}"
+curl -fsSL "${base_url}/${binding_name}" -o "${binding_dir}/${binding_name}"
+if [[ "$(wc -l < "${binding_dir}/${checksums_name}")" -ne 2 ]]; then
+  echo "Expected exactly two V8 checksums for ${target}" >&2
+  exit 1
+fi
+(cd "${binding_dir}" && tr -d '\\r' < "${checksums_name}" | sha256sum --check -)
+export RUSTY_V8_ARCHIVE="${binding_dir}/${archive_name}" RUSTY_V8_SRC_BINDING_PATH="${binding_dir}/${binding_name}"
+cd codex-rs
+cargo build -p codex-agents-api -p codex-app-server -p codex-cli -p codex-code-mode-host \
+  --bin codex-agents-api --bin codex-app-server --bin codex --bin codex-code-mode-host
 mkdir -p /opt/agents-api/bin
-cp target/debug/codex-agents-api target/debug/codex-app-server target/debug/codex /opt/agents-api/bin/
+cp target/debug/codex-agents-api target/debug/codex-app-server target/debug/codex target/debug/codex-code-mode-host /opt/agents-api/bin/
 cd / && rm -rf /build /src/codex.tar /usr/local/cargo/registry
 """
 

@@ -14,10 +14,12 @@ the service and are not run by its tests.
 
 ## Hosting
 
-`serve.py` builds the service, its Codex worker, and the `codex` CLI from the
-repository's committed `HEAD` into a cached image layer (about 20–40 minutes
-on 16 CPUs the first time; later starts take seconds). It then runs them in a
-Sandbox with 4 CPUs and 8 GB:
+`serve.py` builds `codex-agents-api`, `codex-app-server`, `codex-code-mode-host`,
+and the `codex` CLI from the repository's committed `HEAD` into a cached image
+layer (about 20–40 minutes on 16 CPUs the first time; later starts take seconds).
+The code-mode host sits alongside the app-server and uses Codex's V8 artifacts
+verified against the repository's trusted checksums. The Sandbox has 4 CPUs
+and 8 GB:
 
     python serve.py start STATE_DIR     # prints the https endpoint
     python serve.py logs STATE_DIR
