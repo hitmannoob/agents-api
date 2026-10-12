@@ -437,10 +437,13 @@ only the registry endpoints under `/registry/`.
 - **Waiting input:** input sent while the executor is offline sets the session
   to `requires_action` with an `environment_connection` action. It waits up to
   five minutes (`--environment-connection-wait-secs` changes this), then
-  starts in order. Input that times out is dropped and the
-  session fails; a later connection does not replay it. Cancelling drops waiting
-  input and returns the session to idle, and a service restart drops it and
-  fails the session.
+  starts in order. If no turn is running, the first waiting input queues a
+  turn (`status: "queued"`), which keeps its ID when Codex starts it; later
+  waiting input steers that turn. Input that times out is dropped, its queued
+  turn fails (`sandbox_error`), and the session fails; a later connection does
+  not replay it. Cancelling drops waiting input, cancels its queued turn, and
+  returns the session to idle; a service restart drops it, fails its queued
+  turn (`internal_error`), and fails the session.
 - **Execution:** commands run unsandboxed in the workspace directory; the
   caller's compute is the isolation boundary, and code there can read the
   environment key. Each command is a `command_execution` item with its exit

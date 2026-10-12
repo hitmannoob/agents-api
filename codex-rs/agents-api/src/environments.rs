@@ -317,11 +317,13 @@ pub(crate) async fn submit(
         .execute(&mut *tx)
         .await
         .map_err(anyhow::Error::from)?;
-    let event =
-        crate::records::transition(&mut tx, session_id, "requires_action", /*error*/ None).await?;
+    let mut events = crate::turns::queue(&mut tx, session_id).await?;
+    events.extend(
+        crate::records::transition(&mut tx, session_id, "requires_action", /*error*/ None).await?,
+    );
     tx.commit().await.map_err(anyhow::Error::from)?;
     drop(admission);
-    if let Some(event) = event {
+    for event in events {
         crate::records::emit(state, event);
     }
     tokio::spawn(wait(
@@ -414,6 +416,10 @@ async fn wait(state: Weak<State>, session_id: String, environment_id: String, ge
         };
         if let Err(error) = crate::routes::start_turn(&state, &session_id, items).await {
             crate::lock(&state.waits.inputs).remove(&session_id);
+            let failure = json!({"code": "internal_error", "message": error.1});
+            if let Err(error) = end_queued(&state, &session_id, Some(failure)).await {
+                tracing::warn!(error = format!("{error:#}"), "queued turn not ended");
+            }
             let _ =
                 crate::records::session_status(&state, &session_id, "failed", Some(&error.1)).await;
             return;
@@ -434,14 +440,35 @@ async fn settle(
         .bind(session_id)
         .execute(&mut *tx)
         .await?;
-    let event = match dropped {
-        Some((status, error)) => {
-            crate::records::transition(&mut tx, session_id, status, error).await?
-        }
-        None => None,
-    };
+    let mut events = Vec::new();
+    if let Some((status, error)) = dropped {
+        // The turn the dropped input queued never starts: cancelled with the
+        // input, or failed in the environment (a timeout) or the service (a
+        // restart).
+        let failure = error.map(|message| {
+            let code = if message == RESTARTED {
+                "internal_error"
+            } else {
+                "sandbox_error"
+            };
+            json!({"code": code, "message": message})
+        });
+        events.extend(crate::turns::end_queued(&mut tx, session_id, failure).await?);
+        events.extend(crate::records::transition(&mut tx, session_id, status, error).await?);
+    }
     tx.commit().await?;
-    if let Some(event) = event {
+    for event in events {
+        crate::records::emit(state, event);
+    }
+    Ok(())
+}
+
+/// End the session's queued turn on its own transaction.
+async fn end_queued(state: &State, session_id: &str, error: Option<Value>) -> anyhow::Result<()> {
+    let mut tx = state.store.0.begin_with("BEGIN IMMEDIATE").await?;
+    let events = crate::turns::end_queued(&mut tx, session_id, error).await?;
+    tx.commit().await?;
+    for event in events {
         crate::records::emit(state, event);
     }
     Ok(())

@@ -244,6 +244,7 @@ pub(crate) async fn delete(
         "DELETE FROM turn_usage WHERE session_id = ?",
         "DELETE FROM generations WHERE session_id = ?",
         "DELETE FROM turn_models WHERE session_id = ?",
+        "DELETE FROM turn_aliases WHERE session_id = ?",
         "DELETE FROM thread_usage_totals WHERE thread_id IN (SELECT thread_id FROM sessions WHERE id = ?1 UNION SELECT thread_id FROM subagents WHERE session_id = ?1)",
         "DELETE FROM subagents WHERE session_id = ?",
         "DELETE FROM public_sessions WHERE id = ?",

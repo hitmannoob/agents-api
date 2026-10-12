@@ -265,7 +265,7 @@ async fn execute(state: &Arc<State>, id: &str, events: Vec<Event>) -> Result<(),
                     match state
                         .rpc(
                             "turn/interrupt",
-                            json!({"threadId": thread_id, "turnId": turn_id}),
+                            json!({"threadId": thread_id, "turnId": state.turn_aliases.codex(&turn_id)}),
                         )
                         .await
                     {
@@ -295,7 +295,7 @@ async fn cancel_started_turn(
     thread_id: String,
     turn_id: String,
 ) -> Result<(), ApiError> {
-    let interrupt = json!({"threadId": thread_id, "turnId": turn_id});
+    let interrupt = json!({"threadId": thread_id, "turnId": state.turn_aliases.codex(&turn_id)});
     if state.rpc("turn/interrupt", interrupt.clone()).await.is_ok() {
         return Ok(());
     }

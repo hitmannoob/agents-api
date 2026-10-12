@@ -143,10 +143,101 @@ fn provider_error(message: &str) -> Option<ProviderError> {
     Some(ProviderError { status, message })
 }
 
+/// A turn record that has not started.
+fn queued_record(id: &str, agent_id: &str, turn_id: &str) -> Value {
+    json!({"id":turn_id,"object":"agent.session.turn","session_id":id,"agent_id":agent_id,"created_at":crate::contract::now(),
+        "started_at":null,"completed_at":null,"status":"queued","usage":null,"subagent_id":null,"error":null})
+}
+
+/// The session's queued turn: the one its waiting input will start.
+pub(crate) async fn queued(
+    connection: &mut sqlx::SqliteConnection,
+    id: &str,
+) -> anyhow::Result<Option<Value>> {
+    let data: Option<String> = sqlx::query_scalar("SELECT data FROM public_records WHERE session_id = ? AND kind = 'turn' AND subagent_id IS NULL AND json_extract(data, '$.status') = 'queued' ORDER BY seq LIMIT 1")
+        .bind(id)
+        .fetch_optional(&mut *connection)
+        .await?;
+    Ok(data.as_deref().map(serde_json::from_str).transpose()?)
+}
+
+/// Queue a turn for input that waits for the session's executor, unless a
+/// turn is already running or queued: the input then steers that turn when it
+/// starts. Returns the events announcing the turn.
+pub(crate) async fn queue(
+    connection: &mut sqlx::SqliteConnection,
+    id: &str,
+) -> anyhow::Result<Vec<Value>> {
+    let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public_records WHERE session_id = ? AND kind = 'turn' AND subagent_id IS NULL AND json_extract(data, '$.status') IN ('queued', 'in_progress', 'waiting'))")
+        .bind(id)
+        .fetch_one(&mut *connection)
+        .await?;
+    let agent_id: Option<String> = sqlx::query_scalar(
+        "SELECT json_extract(data, '$.agent.id') FROM public_sessions WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let (false, Some(agent_id)) = (busy, agent_id) else {
+        return Ok(Vec::new());
+    };
+    let turn_id = format!("turn_{}", Uuid::new_v4());
+    let turn = queued_record(id, &agent_id, &turn_id);
+    crate::records::save(
+        &mut *connection,
+        id,
+        "turn",
+        &turn,
+        &turn_id,
+        /*subagent*/ None,
+    )
+    .await?;
+    Ok(vec![
+        json!({"type":"agent.session.turn.created","session_id":id,"turn_id":turn_id,"turn":turn}),
+    ])
+}
+
+/// End the session's queued turn without starting it: cancelled, or failed
+/// with `error`. Returns the events reporting it.
+pub(crate) async fn end_queued(
+    connection: &mut sqlx::SqliteConnection,
+    id: &str,
+    error: Option<Value>,
+) -> anyhow::Result<Vec<Value>> {
+    let Some(mut turn) = queued(&mut *connection, id).await? else {
+        return Ok(Vec::new());
+    };
+    let turn_id = turn["id"].as_str().unwrap_or_default().to_owned();
+    let status = if error.is_some() {
+        "failed"
+    } else {
+        "cancelled"
+    };
+    turn["status"] = json!(status);
+    turn["completed_at"] = json!(crate::contract::now());
+    turn["error"] = error.clone().unwrap_or(Value::Null);
+    crate::records::save(
+        &mut *connection,
+        id,
+        "turn",
+        &turn,
+        &turn_id,
+        /*subagent*/ None,
+    )
+    .await?;
+    let mut events = Vec::new();
+    if let Some(error) = error {
+        events.push(json!({"type":"error","session_id":id,"error":{"type":"error","code":error["code"],"message":error["message"],"param":null}}));
+    }
+    events.push(json!({"type":format!("agent.session.turn.{status}"),"session_id":id,"turn_id":turn_id,"turn":turn}));
+    Ok(events)
+}
+
 /// Record a turn that failed before the worker could start it, such as when a
-/// required MCP server cannot initialize. The worker never assigned it an ID,
-/// so it gets one here, and the session returns to idle as after any failed
-/// turn. Returns `false` for sessions without public records.
+/// required MCP server cannot initialize: the session's queued turn, or else
+/// a new one, since the worker never assigned it an ID. The session returns
+/// to idle as after any failed turn. Returns `false` for sessions without
+/// public records.
 pub(crate) async fn fail_unstarted_turn(
     state: &State,
     id: &str,
@@ -168,23 +259,17 @@ pub(crate) async fn fail_unstarted_turn(
     let Some(agent_id) = agent_id else {
         return Ok(false);
     };
-    let now = crate::contract::now();
-    let turn_id = format!("turn_{}", Uuid::new_v4());
-    let queued = json!({"id":turn_id,"object":"agent.session.turn","session_id":id,"agent_id":agent_id,"created_at":now,
-        "started_at":null,"completed_at":null,"status":"queued","usage":null,"subagent_id":null,"error":null});
-    let mut failed = queued.clone();
-    failed["status"] = json!("failed");
-    failed["completed_at"] = json!(now);
-    failed["error"] = error.clone();
-    crate::records::save(
-        &mut *tx, id, "turn", &failed, &turn_id, /*subagent*/ None,
-    )
-    .await?;
-    let mut events = vec![
-        json!({"type":"agent.session.turn.created","session_id":id,"turn_id":turn_id,"turn":queued}),
-        json!({"type":"error","session_id":id,"error":{"type":"error","code":error["code"],"message":error["message"],"param":null}}),
-        json!({"type":"agent.session.turn.failed","session_id":id,"turn_id":turn_id,"turn":failed}),
-    ];
+    let mut events = Vec::new();
+    if queued(&mut tx, id).await?.is_none() {
+        let turn_id = format!("turn_{}", Uuid::new_v4());
+        let turn = queued_record(id, &agent_id, &turn_id);
+        crate::records::save(
+            &mut *tx, id, "turn", &turn, &turn_id, /*subagent*/ None,
+        )
+        .await?;
+        events.push(json!({"type":"agent.session.turn.created","session_id":id,"turn_id":turn_id,"turn":turn}));
+    }
+    events.extend(end_queued(&mut tx, id, Some(error)).await?);
     events.extend(crate::records::transition(&mut tx, id, "idle", /*error*/ None).await?);
     tx.commit().await.map_err(anyhow::Error::from)?;
     for event in events {

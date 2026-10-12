@@ -184,6 +184,11 @@ async fn self_hosted_input_waits_for_the_executor_and_runs_in_its_workspace() ->
             (&waiting["status"], &waiting["required_actions"]),
             (&json!("requires_action"), &json!([{"type":"environment_connection","environment_id":environment_id}]))
         );
+        // The waiting input queued a turn, which keeps its ID once it starts.
+        let turns = request(&client, reqwest::Method::GET, &format!("{url}/turns"), Value::Null).await?;
+        let queued_id = turns["data"][0]["id"].clone();
+        assert_eq!((turns["data"].as_array().map(Vec::len), &turns["data"][0]["status"], &turns["data"][0]["started_at"]),
+            (Some(1), &json!("queued"), &Value::Null));
         let running = executor(&format!("{origin}/registry"), &environment_id)?;
         assert_eq!(lifecycle(&until_idle(&mut stream).await?), vec![
             "agent.session.requires_action", "agent.session.environment.connected",
@@ -201,6 +206,10 @@ async fn self_hosted_input_waits_for_the_executor_and_runs_in_its_workspace() ->
             (&command["status"], &command["exit_code"], &command["cwd"], command["output"].as_str().map(str::trim)),
             (&json!("completed"), &json!(0), &json!(workspace_directory), Some("written"))
         );
+        let turns = request(&client, reqwest::Method::GET, &format!("{url}/turns"), Value::Null).await?;
+        assert_eq!((turns["data"].as_array().map(Vec::len), &turns["data"][0]["id"], &turns["data"][0]["status"], &command["turn_id"]),
+            (Some(1), &queued_id, &json!("completed"), &queued_id));
+        assert!(turns["data"][0]["started_at"].is_u64(), "{turns}");
 
         // Losing the executor is reported; later input waits again and can be
         // cancelled without starting a turn.
@@ -211,8 +220,10 @@ async fn self_hosted_input_waits_for_the_executor_and_runs_in_its_workspace() ->
         assert_eq!(send(&client, &url, json!({"type":"agent.session.input.cancel"})).await?, reqwest::StatusCode::ACCEPTED);
         let cancelled = idle(&client, &url, /*expected_turns*/ 1).await?;
         assert_eq!(cancelled["required_actions"], json!([]));
+        // The input queued a turn, which the cancel ends before it starts.
         let turns = request(&client, reqwest::Method::GET, &format!("{url}/turns"), Value::Null).await?;
-        assert_eq!(turns["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!((turns["data"].as_array().map(Vec::len), &turns["data"][0]["status"], &turns["data"][0]["started_at"]),
+            (Some(2), &json!("cancelled"), &Value::Null));
 
         // Self-hosted files are never published as artifacts.
         assert_eq!(
@@ -337,8 +348,10 @@ async fn executor_and_worker_loss_never_replay_commands_and_recover() -> anyhow:
         assert_eq!(send(&client, &url, message("after restart")).await?, reqwest::StatusCode::ACCEPTED);
         until_idle(&mut stream).await?;
         assert_eq!(std::fs::read_to_string(&runs)?.lines().count(), 1);
+        // The input waiting at shutdown queued a turn, which the restart failed.
         let turns = request(&client, reqwest::Method::GET, &format!("{url}/turns"), Value::Null).await?;
-        assert_eq!(turns["data"].as_array().map(Vec::len), Some(3));
+        assert_eq!((turns["data"].as_array().map(Vec::len), &turns["data"][0]["status"], &turns["data"][1]["status"], &turns["data"][1]["error"]["code"]),
+            (Some(4), &json!("completed"), &json!("failed"), &json!("internal_error")));
         Ok::<_, anyhow::Error>(())
     })
     .await?
@@ -554,8 +567,10 @@ async fn input_waiting_past_the_connection_wait_fails_the_session() -> anyhow::R
             "status":"failed","error":{"type":"environment_error","code":"environment_connection_timeout","message":timed_out}})));
         let failed = request(&client, reqwest::Method::GET, &url, Value::Null).await?;
         assert_eq!((&failed["status"], &failed["error"], &failed["required_actions"]), (&json!("failed"), &json!(timed_out), &json!([])));
+        // The input's queued turn failed in its environment.
         let turns = request(&client, reqwest::Method::GET, &format!("{url}/turns"), Value::Null).await?;
-        assert_eq!(turns["data"], json!([]));
+        assert_eq!((turns["data"].as_array().map(Vec::len), &turns["data"][0]["status"], &turns["data"][0]["error"]),
+            (Some(1), &json!("failed"), &json!({"code":"sandbox_error","message":timed_out})));
         // The environment reads as failed, as its event reported.
         let environment = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{}", environment_id.as_str().context("environment id")?), Value::Null).await?;
         assert_eq!(environment["status"], json!("failed"));

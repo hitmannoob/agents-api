@@ -20,7 +20,8 @@ pub(crate) async fn disconnected(pool: &sqlx::SqlitePool) -> anyhow::Result<()> 
     for id in failed {
         crate::webhook_outbox::session_status(&mut tx, &id, "failed").await?;
     }
-    sqlx::query("UPDATE public_records SET data = json_set(data, '$.status', 'failed', '$.completed_at', ?, '$.error', json(?)) WHERE kind = 'turn' AND json_extract(data, '$.status') IN ('queued', 'in_progress', 'waiting')")
+    // Turns queued for an executor keep waiting; the worker never had them.
+    sqlx::query("UPDATE public_records SET data = json_set(data, '$.status', 'failed', '$.completed_at', ?, '$.error', json(?)) WHERE kind = 'turn' AND json_extract(data, '$.status') IN ('queued', 'in_progress', 'waiting') AND session_id NOT IN (SELECT session_id FROM environments WHERE waiting)")
         .bind(crate::contract::now() as i64).bind(json!({"code":crate::reconcile::CONNECTION_LOST_CODE,"message":"backend connection lost"}).to_string()).execute(&mut *tx).await?;
     sqlx::query("UPDATE public_records SET data = json_set(data, '$.status', 'incomplete') WHERE kind = 'item' AND json_extract(data, '$.status') = 'in_progress'").execute(&mut *tx).await?;
     tx.commit().await?;
@@ -255,7 +256,10 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
             let turn_id = source["id"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("turn missing ID"))?;
-            let turn = json!({"id":turn_id,"object":"agent.session.turn","session_id":id,"agent_id":owner.agent_id,"created_at":source["startedAt"].as_u64().unwrap_or_else(crate::contract::now),
+            // A turn queued before it started keeps its record and creation time.
+            let earlier: Option<i64> = sqlx::query_scalar("SELECT json_extract(data, '$.created_at') FROM public_records WHERE session_id = ? AND kind = 'turn' AND id = ?")
+                .bind(&id).bind(turn_id).fetch_optional(&mut *tx).await.map_err(anyhow::Error::from)?;
+            let turn = json!({"id":turn_id,"object":"agent.session.turn","session_id":id,"agent_id":owner.agent_id,"created_at":earlier.map_or_else(|| json!(source["startedAt"].as_u64().unwrap_or_else(crate::contract::now)), |created| json!(created)),
                 "started_at":source["startedAt"],"completed_at":source["completedAt"],"status":status,"usage":crate::usage::usage(&mut tx, &id, Some(turn_id)).await?,"subagent_id":subagent,
                 "error":if status == "failed" {crate::turns::turn_error(&source["error"])} else {Value::Null}});
             if status != "in_progress" {
@@ -293,7 +297,9 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
                         cancelled = Some(turn_id.to_owned());
                     }
                 }
-                events.push(json!({"type":"agent.session.turn.created","session_id":id,"turn_id":turn_id,"turn":turn}));
+                if earlier.is_none() {
+                    events.push(json!({"type":"agent.session.turn.created","session_id":id,"turn_id":turn_id,"turn":turn}));
+                }
             }
             events.push(json!({"type":format!("agent.session.turn.{status}"),"session_id":id,"turn_id":turn_id,"turn":turn}));
             if status != "in_progress" && root {
@@ -469,7 +475,8 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
     }
     if let Some(turn_id) = cancelled {
         let state = Arc::clone(state);
-        let interrupt = json!({"threadId": thread_id, "turnId": turn_id});
+        let interrupt =
+            json!({"threadId": thread_id, "turnId": state.turn_aliases.codex(&turn_id)});
         tokio::spawn(async move {
             if let Err(error) = state.rpc("turn/interrupt", interrupt).await {
                 tracing::warn!(error = error.1, "cancel of a just-started turn failed");

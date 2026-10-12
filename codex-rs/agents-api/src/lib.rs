@@ -32,6 +32,7 @@ mod streaming;
 mod subagents;
 mod telemetry;
 mod traces;
+mod turn_aliases;
 mod turns;
 mod upload;
 mod usage;
@@ -96,6 +97,8 @@ struct State {
     registry: registry::Registry,
     /// Input waiting for a self-hosted executor to connect.
     waits: environments::Waits,
+    /// Public IDs of turns that were queued before Codex started them.
+    turn_aliases: turn_aliases::TurnAliases,
     /// Each session's most recently started turn, as (thread ID, turn ID),
     /// for a cancel that arrives before Codex reports the turn.
     started_turns: Mutex<std::collections::HashMap<String, (String, String)>>,
@@ -239,8 +242,11 @@ impl AgentsApi {
             token.len() >= 32,
             "API token must contain at least 32 bytes"
         );
+        let store = store::Store::open(directory.clone()).await?;
+        let turn_aliases = turn_aliases::TurnAliases::load(&store.0).await?;
         let state = Arc::new(State {
-            store: store::Store::open(directory.clone()).await?,
+            store,
+            turn_aliases,
             backend: Mutex::new(None),
             input_gates: gates::Gates::default(),
             streams: streaming::Streams::default(),
@@ -467,7 +473,15 @@ async fn pump(
         };
         match event {
             AppServerEvent::ServerNotification(notification) => {
-                if let Ok(value) = serde_json::to_value(notification) {
+                if let Ok(mut value) = serde_json::to_value(notification) {
+                    if state
+                        .turn_aliases
+                        .translate(&state.store.0, &mut value)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                     if actions::notification(&state, &value).await.is_err() {
                         break;
                     }
@@ -482,8 +496,11 @@ async fn pump(
             }
             AppServerEvent::ServerRequest(request) => {
                 let request_id = request.id().clone();
-                if let ServerRequest::DynamicToolCall { params, .. } = *request
-                    && actions::register(&state, &request_id, params).await.is_ok()
+                if let ServerRequest::DynamicToolCall { mut params, .. } = *request
+                    && {
+                        params.turn_id = state.turn_aliases.public(&params.turn_id);
+                        actions::register(&state, &request_id, params).await.is_ok()
+                    }
                 {
                     continue;
                 }

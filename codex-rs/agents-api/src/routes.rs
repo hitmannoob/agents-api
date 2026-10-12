@@ -568,6 +568,15 @@ pub(crate) async fn start_turn(
         }
         Err(error) => return Err(error),
     };
+    // Input that waited for the session's executor queued a turn, which the
+    // turn Codex now starts becomes.
+    let mut connection = state.store.0.acquire().await.map_err(anyhow::Error::from)?;
+    if let Some(queued) = crate::turns::queued(&mut connection, id).await? {
+        state
+            .turn_aliases
+            .expect(&thread_id, id, queued["id"].as_str().unwrap_or_default());
+    }
+    drop(connection);
     let started = state
             .rpc(
                 "turn/start",
@@ -597,10 +606,27 @@ pub(crate) async fn start_turn(
                     },
                 }),
             )
+            .await;
+    if let Some(codex_id) = started
+        .as_ref()
+        .ok()
+        .and_then(|started| started.pointer("/turn/id"))
+        .and_then(Value::as_str)
+    {
+        state
+            .turn_aliases
+            .started(&state.store.0, &thread_id, codex_id)
             .await?;
+    }
+    state.turn_aliases.abandon(&thread_id);
+    let mut started = started?;
     // A cancel can arrive before Codex reports this turn started.
-    if let Some(turn_id) = started.pointer("/turn/id").and_then(Value::as_str) {
-        crate::lock(&state.started_turns).insert(id.to_owned(), (thread_id, turn_id.to_owned()));
+    if let Some(slot) = started.pointer_mut("/turn/id")
+        && let Some(codex_id) = slot.as_str()
+    {
+        let turn_id = state.turn_aliases.public(codex_id);
+        *slot = json!(turn_id);
+        crate::lock(&state.started_turns).insert(id.to_owned(), (thread_id, turn_id.clone()));
         // Traces name the model each response came from. A reroute Codex
         // already reported for this turn wins.
         sqlx::query(
@@ -642,7 +668,7 @@ pub(crate) async fn cancel(
         state
             .rpc(
                 "turn/interrupt",
-                json!({"threadId": thread_id, "turnId": turn_id}),
+                json!({"threadId": thread_id, "turnId": state.turn_aliases.codex(&turn_id)}),
             )
             .await?,
     ))
