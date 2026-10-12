@@ -8,6 +8,28 @@ use std::sync::Mutex;
 
 const PASSPHRASE: &str = "operator-webhook-passphrase-for-tests-0123456789";
 
+/// The non-Agents event types the pinned SDK accepts, in its order.
+const OTHER_EVENT_TYPES: [&str; 18] = [
+    "batch.completed",
+    "batch.failed",
+    "batch.expired",
+    "batch.cancelled",
+    "response.completed",
+    "response.failed",
+    "response.cancelled",
+    "response.incomplete",
+    "eval.run.succeeded",
+    "eval.run.failed",
+    "eval.run.canceled",
+    "fine_tuning.job.succeeded",
+    "fine_tuning.job.failed",
+    "fine_tuning.job.cancelled",
+    "realtime.call.incoming",
+    "video.completed",
+    "video.failed",
+    "safety.alert.created",
+];
+
 /// One request a receiver got: its path, webhook headers, and parsed body.
 #[derive(Clone, Debug)]
 struct Received {
@@ -103,7 +125,8 @@ async fn webhook_endpoints_sign_test_deliveries_and_keep_secrets_private() -> an
         // Event types need no passphrase; endpoints, whose secrets are
         // encrypted, do.
         assert_eq!(request(&client, reqwest::Method::GET, &format!("{base}/webhook_event_types"), Value::Null).await?,
-            json!({"object":"list","data":["agent.session.created","agent.session.action_required","agent.session.in_progress","agent.session.idle","agent.session.failed"]}));
+            json!({"object":"list","data":(["agent.session.created","agent.session.action_required","agent.session.in_progress","agent.session.idle","agent.session.failed"]
+                .iter().chain(&OTHER_EVENT_TYPES).collect::<Vec<_>>())}));
         let hook = json!({"name":"ops","url":format!("{hooks}/hook"),"event_types":["agent.session.idle","agent.session.idle","agent.session.failed"]});
         let public = json!({"name":"ops","url":"https://93.184.216.34/hook","event_types":["agent.session.idle"]});
         assert_eq!(outcome(post(endpoints.clone(), public).await?).await?.0, reqwest::StatusCode::NOT_IMPLEMENTED);
@@ -114,7 +137,8 @@ async fn webhook_endpoints_sign_test_deliveries_and_keep_secrets_private() -> an
         for (invalid, message) in [
             (json!({"name":"ops","url":format!("{hooks}/hook"),"event_types":["agent.session.idle"]}), "url must be an absolute https URL"),
             (json!({"name":"ops","url":"https://10.0.0.1/hook","event_types":["agent.session.idle"]}), "url resolves to a non-public address; the operator must allow its host"),
-            (json!({"name":"ops","url":"https://93.184.216.34/hook","event_types":["response.completed"]}), "event_types accepts only agent.session.created, agent.session.action_required, agent.session.in_progress, agent.session.idle, agent.session.failed"),
+            (json!({"name":"ops","url":"https://93.184.216.34/hook","event_types":["response.created"]}), "unknown event type \"response.created\"; /v1/webhook_event_types lists the supported ones"),
+            (json!({"name":"ops","url":"https://93.184.216.34/hook","event_types":["agent.session.idle",7]}), "unknown event type 7; /v1/webhook_event_types lists the supported ones"),
             (json!({"name":"ops","url":"https://93.184.216.34/hook","event_types":[]}), "event_types must list at least one event type"),
             (json!({"url":"https://93.184.216.34/hook","event_types":["agent.session.idle"]}), "name must contain 1 to 256 UTF-8 bytes after trimming"),
             (json!({"name":"ops","url":"https://93.184.216.34/hook","event_types":["agent.session.idle"],"secret":"x"}), "unknown field secret"),
@@ -150,18 +174,34 @@ async fn webhook_endpoints_sign_test_deliveries_and_keep_secrets_private() -> an
         assert!(delivery.timestamp.parse::<u64>()?.abs_diff(body["created_at"].as_u64().context("created_at")?) <= 5);
         assert_eq!(delivery.signature, sign(&secret, &delivery)?);
 
+        // Event types this service never produces can still be tested, with
+        // data shaped as the SDK's event models expect.
+        for (event_type, data) in [
+            ("response.completed", json!({"id":"resp_test"})),
+            ("fine_tuning.job.failed", json!({"id":"ftjob_test"})),
+            ("realtime.call.incoming", json!({"call_id":"rtc_test","sip_headers":[]})),
+            ("safety.alert.created", json!({"id":"alert_test"})),
+        ] {
+            assert_eq!(outcome(test(event_type).await?).await?.1["event_type"], json!(event_type));
+            let delivery = received.lock().unwrap_or_else(std::sync::PoisonError::into_inner).last().cloned().context("delivery")?;
+            let body: Value = serde_json::from_str(&delivery.body)?;
+            assert_eq!((body["type"].clone(), body["data"].clone()), (json!(event_type), data));
+        }
+        assert_eq!(outcome(test("response.created").await?).await?.0, reqwest::StatusCode::BAD_REQUEST);
+
         // Failures are reported as the receiver's status; redirects are not
         // followed, and an unreachable receiver is a gateway error.
         for (path, status) in [("fail", 500), ("redirect", 307)] {
             request(&client, reqwest::Method::POST, &endpoint_url, json!({"url":format!("{hooks}/{path}")})).await?;
             assert_eq!(outcome(test("agent.session.idle").await?).await?.1["status_code"], json!(status));
         }
-        assert_eq!(received.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().map(|r| r.path.clone()).collect::<Vec<_>>(), vec!["/hook", "/fail", "/redirect"]);
+        assert_eq!(received.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().map(|r| r.path.clone()).collect::<Vec<_>>(),
+            vec!["/hook", "/hook", "/hook", "/hook", "/hook", "/fail", "/redirect"]);
         let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await?.local_addr()?;
         request(&client, reqwest::Method::POST, &endpoint_url, json!({"url":format!("http://{closed}/hook")})).await?;
         assert_eq!(outcome(test("agent.session.idle").await?).await?.0, reqwest::StatusCode::BAD_GATEWAY);
-        let updated = request(&client, reqwest::Method::POST, &endpoint_url, json!({"url":format!("{hooks}/hook"),"event_types":["agent.session.created"]})).await?;
-        expected["event_types"] = json!(["agent.session.created"]);
+        let updated = request(&client, reqwest::Method::POST, &endpoint_url, json!({"url":format!("{hooks}/hook"),"event_types":["agent.session.created","batch.completed"]})).await?;
+        expected["event_types"] = json!(["agent.session.created","batch.completed"]);
         expected["updated_at"] = updated["updated_at"].clone();
         assert_eq!(updated, expected);
 
@@ -258,6 +298,9 @@ async fn session_events_are_queued_retried_and_survive_restart() -> anyhow::Resu
         let all = endpoint("all", format!("{hooks}/hook"), json!(["agent.session.created","agent.session.action_required","agent.session.in_progress","agent.session.idle","agent.session.failed"])).await?;
         let flaky = endpoint("flaky", format!("{hooks}/flaky"), json!(["agent.session.idle"])).await?;
         let failures = endpoint("failures", format!("{hooks}/failed"), json!(["agent.session.failed"])).await?;
+        // Subscribing to event types this service never produces is allowed,
+        // and delivers nothing.
+        endpoint("others", format!("{hooks}/others"), json!(OTHER_EVENT_TYPES)).await?;
         let secret = |endpoint: &Value| endpoint["signing_secret"].as_str().map(str::to_owned).context("signing secret");
         let sessions = format!("{base}/agents/sessions");
 
@@ -301,7 +344,7 @@ async fn session_events_are_queued_retried_and_survive_restart() -> anyhow::Resu
         // One event reaches every subscribed endpoint under its own delivery ID.
         let idle_event = at(&seen, "/hook")[4];
         assert_eq!((retried[0].body == idle_event.body, retried[0].id != idle_event.id), (true, true));
-        assert_eq!(at(&seen, "/failed").len(), 0);
+        assert_eq!((at(&seen, "/failed").len(), at(&seen, "/others").len()), (0, 0));
 
         // Stop with an undeliverable event queued and a turn still running.
         let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await?.local_addr()?;

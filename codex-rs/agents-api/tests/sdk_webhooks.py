@@ -2,9 +2,12 @@
 
 import json
 import threading
+import typing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import openai
+from openai.types.webhooks import ResponseCompletedWebhookEvent
+from openai.types.webhooks.webhook_create_params import WebhookCreateParams
 
 from sdk_sessions import rejected
 
@@ -28,6 +31,14 @@ def receiver():
     return server, deliveries
 
 
+def sdk_event_types():
+    """The event types the pinned SDK accepts when creating an endpoint."""
+    listed = typing.get_type_hints(WebhookCreateParams)["event_types"]
+    while typing.get_origin(listed) is not typing.Literal:
+        (listed,) = typing.get_args(listed)
+    return list(typing.get_args(listed))
+
+
 def check_webhooks(client):
     webhooks = client.webhooks
     assert webhooks.event_types.list().data == [
@@ -36,6 +47,7 @@ def check_webhooks(client):
         "agent.session.in_progress",
         "agent.session.idle",
         "agent.session.failed",
+        *sdk_event_types(),
     ]
     server, deliveries = receiver()
     url = f"http://127.0.0.1:{server.server_address[1]}/hook"
@@ -61,6 +73,15 @@ def check_webhooks(client):
         event = json.loads(body)
         assert event["type"] == "agent.session.idle" and event["object"] == "event"
 
+        # Event types this service never produces can be subscribed to, and
+        # their test deliveries parse as the SDK's event models.
+        updated = webhooks.update(created.id, event_types=sdk_event_types())
+        assert updated.event_types == sdk_event_types()
+        webhooks.test(created.id, event_type="response.completed")
+        body, headers = deliveries[-1]
+        event = webhooks.unwrap(body, headers, secret=created.signing_secret)
+        assert isinstance(event, ResponseCompletedWebhookEvent), event
+
         rotated = webhooks.rotate_secret(
             created.id, keep_old_secret_active_for_24_hours=True
         )
@@ -73,7 +94,7 @@ def check_webhooks(client):
         updated = webhooks.update(created.id, name="sdk-hooks-renamed")
         assert updated.name == "sdk-hooks-renamed"
         for params in [
-            {"event_types": ["response.completed"]},
+            {"event_types": ["response.created"]},
             {"url": "https://10.0.0.1/hook"},
         ]:
             rejected(openai.BadRequestError, webhooks.update, created.id, **params)

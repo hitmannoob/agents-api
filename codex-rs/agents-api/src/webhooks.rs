@@ -24,14 +24,59 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// The Agents API events an endpoint can subscribe to, as the guide lists them.
-pub(crate) const EVENT_TYPES: [&str; 5] = [
+/// The events an endpoint can subscribe to: the Agents API session events the
+/// guide lists, then the other event types the pinned SDK accepts. This
+/// service produces only the session events; subscribing to the others is
+/// allowed so endpoints configured for OpenAI work unchanged, and test
+/// deliveries send a sample of any of them.
+pub(crate) const EVENT_TYPES: [&str; 23] = [
     "agent.session.created",
     "agent.session.action_required",
     "agent.session.in_progress",
     "agent.session.idle",
     "agent.session.failed",
+    "batch.completed",
+    "batch.failed",
+    "batch.expired",
+    "batch.cancelled",
+    "response.completed",
+    "response.failed",
+    "response.cancelled",
+    "response.incomplete",
+    "eval.run.succeeded",
+    "eval.run.failed",
+    "eval.run.canceled",
+    "fine_tuning.job.succeeded",
+    "fine_tuning.job.failed",
+    "fine_tuning.job.cancelled",
+    "realtime.call.incoming",
+    "video.completed",
+    "video.failed",
+    "safety.alert.created",
 ];
+
+/// The `data` of a test delivery, shaped as the pinned SDK's event models
+/// expect for that type.
+fn sample_data(event_type: &str) -> Value {
+    let prefix = match event_type
+        .rsplit_once('.')
+        .map_or(event_type, |(family, _)| family)
+    {
+        "agent.session" => "sess",
+        "batch" => "batch",
+        "response" => "resp",
+        "eval.run" => "evalrun",
+        "fine_tuning.job" => "ftjob",
+        "realtime.call" => return json!({"call_id":"rtc_test","sip_headers":[]}),
+        "video" => "video",
+        _ => "alert",
+    };
+    let mut data = json!({"id":format!("{prefix}_test")});
+    if event_type == "agent.session.action_required" {
+        data["required_action"] = json!({"type":"function_call"});
+    }
+    data
+}
 
 pub(crate) fn router() -> Router<Arc<State>> {
     Router::new()
@@ -59,6 +104,15 @@ fn fields<'a>(body: &'a Value, allowed: &[&str]) -> Result<&'a Map<String, Value
     }
 }
 
+fn known_event_type(value: &Value) -> Result<&str, ApiError> {
+    match value.as_str() {
+        Some(event_type) if EVENT_TYPES.contains(&event_type) => Ok(event_type),
+        _ => Err(invalid(format!(
+            "unknown event type {value}; /v1/webhook_event_types lists the supported ones"
+        ))),
+    }
+}
+
 /// Validate `event_types`, dropping repeats and keeping their order.
 fn event_type_list(value: Option<&Value>) -> Result<Vec<String>, ApiError> {
     let listed = value
@@ -67,15 +121,7 @@ fn event_type_list(value: Option<&Value>) -> Result<Vec<String>, ApiError> {
         .ok_or_else(|| invalid("event_types must list at least one event type"))?;
     let mut event_types: Vec<String> = Vec::new();
     for event_type in listed {
-        let event_type = event_type
-            .as_str()
-            .filter(|event_type| EVENT_TYPES.contains(event_type))
-            .ok_or_else(|| {
-                invalid(format!(
-                    "event_types accepts only {}",
-                    EVENT_TYPES.join(", ")
-                ))
-            })?;
+        let event_type = known_event_type(event_type)?;
         if !event_types.iter().any(|seen| seen == event_type) {
             event_types.push(event_type.to_owned());
         }
@@ -323,22 +369,9 @@ async fn test(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let fields = fields(&body, &["event_type"])?;
-    let event_type = fields
-        .get("event_type")
-        .and_then(Value::as_str)
-        .filter(|event_type| EVENT_TYPES.contains(event_type))
-        .ok_or_else(|| {
-            invalid(format!(
-                "event_type must be one of {}",
-                EVENT_TYPES.join(", ")
-            ))
-        })?;
+    let event_type = known_event_type(fields.get("event_type").unwrap_or(&Value::Null))?;
     let endpoint = endpoint(&state, &id).await?.ok_or_else(not_found)?;
-    let mut data = json!({"id":"sess_test"});
-    if event_type == "agent.session.action_required" {
-        data["required_action"] = json!({"type":"function_call"});
-    }
-    let body = crate::webhook_delivery::event(event_type, data).to_string();
+    let body = crate::webhook_delivery::event(event_type, sample_data(event_type)).to_string();
     let secrets = crate::webhook_delivery::signing_secrets(&state, &id).await?;
     let status_code = crate::webhook_delivery::send(
         &state,

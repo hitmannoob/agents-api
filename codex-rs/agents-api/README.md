@@ -515,8 +515,13 @@ Webhook endpoints are managed with the SDK's `client.webhooks` API
 passphrase, because signing secrets are kept in the same encrypted store.
 - **Event types:** `agent.session.created`, `agent.session.action_required`,
   `agent.session.in_progress`, `agent.session.idle`, and
-  `agent.session.failed`. Repeated types are collapsed. Other OpenAI event
-  types are rejected, since this service never produces them.
+  `agent.session.failed`, plus the other event types the pinned SDK lists
+  (`batch.*`, `response.*`, `eval.run.*`, `fine_tuning.job.*`,
+  `realtime.call.incoming`, `video.*`, `safety.alert.created`), so endpoints
+  configured for OpenAI work unchanged. This service produces only the
+  session events; the others are never delivered, but test deliveries send a
+  sample of any listed type. Repeated types are collapsed, and unknown types
+  are rejected.
 - **Secrets:** the `whsec_` signing secret is returned only when an endpoint is
   created or its secret rotated. Responses otherwise carry
   `signing_secret_hint`. Rotation with
