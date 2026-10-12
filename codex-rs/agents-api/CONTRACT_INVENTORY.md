@@ -52,10 +52,10 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-12) is 49 verified, 2 implemented, 11 partial, and
+The current count (2026-10-12) is 52 verified, 2 implemented, 8 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
 of scope since 2026-10-06. Verified: ART-001..004, SUB-001..006, TRN-002,
-AGT-003..005, SES-004, VLT-001..004, CRD-001..005, FIL-001..005,
+AGT-003..005, SES-004..005, EVT-001, ENV-001, VLT-001..004, CRD-001..005, FIL-001..005,
 WHK-001..008, TRC-001, SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
 evidence: ENV-002..003. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
 per-area summary.
@@ -169,3 +169,9 @@ Amendments under the same `openai==3.17.0` pin:
   session, and input requests 8 MiB bodies; the contract documents no
   limits, so these are local bounds sized to Codex's input limit (additive).
   AGT-003 moved to verified.
+- 2026-10-12: remote https input images are fetched by the service under
+  the egress rules and passed to Codex inline; environments report `failed`
+  after a connection timeout, keep "connected once" across restarts, and
+  never report `expired`; session deletion was confirmed against the
+  lifecycle guide; `create_subagent_call` carries the model Codex reports.
+  EVT-001, ENV-001, and SES-005 moved to verified (additive).
