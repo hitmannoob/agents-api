@@ -82,7 +82,9 @@ impl Record {
 
     /// Inputs to the model: user messages and function results.
     fn is_input(&self) -> bool {
-        self.data["role"] == "user" || self.kind() == "function_call_output"
+        // A message from another agent is input to the agent receiving it.
+        self.data["role"] == "user"
+            || matches!(self.kind(), "function_call_output" | "agent_message")
     }
 
     /// Calls the model made, as opposed to its messages and reasoning.

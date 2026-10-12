@@ -65,12 +65,20 @@ pub(crate) async fn register(
         return Ok(None);
     };
     let id = format!("subagent_{thread_id}");
+    let path = activity["agentPath"].as_str();
     let known: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM subagents WHERE thread_id = ?)")
             .bind(thread_id)
             .fetch_one(&mut **tx)
             .await?;
     if known {
+        sqlx::query(
+            "UPDATE subagents SET agent_path = ? WHERE thread_id = ? AND agent_path IS NULL",
+        )
+        .bind(path)
+        .bind(thread_id)
+        .execute(&mut **tx)
+        .await?;
         return Ok(Some((id, None)));
     }
     // Codex addresses agents by path, such as `/root/researcher`.
@@ -81,11 +89,12 @@ pub(crate) async fn register(
     let subagent = json!({"id":id,"object":"agent.session.subagent","session_id":owner.session_id,
         "parent_agent_id":owner.agent_id,"name":name,"instructions":null,
         "opened_at":crate::contract::now(),"closed_at":null,"status":"active"});
-    sqlx::query("INSERT INTO subagents (session_id, id, thread_id, data) VALUES (?, ?, ?, ?)")
+    sqlx::query("INSERT INTO subagents (session_id, id, thread_id, data, agent_path) VALUES (?, ?, ?, ?, ?)")
         .bind(&owner.session_id)
         .bind(&id)
         .bind(thread_id)
         .bind(subagent.to_string())
+        .bind(path)
         .execute(&mut **tx)
         .await?;
     Ok(Some((
@@ -95,8 +104,8 @@ pub(crate) async fn register(
 }
 
 /// The public call item for a subagent activity in a parent turn. Codex does
-/// not report the task text, model, or effort with these activities, so the
-/// content is empty and the settings are null. A subagent's completion has no
+/// not report the task text with these activities, so the content is empty;
+/// a creation carries the model and effort Codex resolved. A subagent's completion has no
 /// item of its own: its turn events report it. A creation names the agent that
 /// requested it, as the SDK documents; the new subagent's ID is on its
 /// `subagent.created` event.
@@ -117,6 +126,80 @@ pub(crate) fn activity_item(owner: &Owner, subagent_id: &str, activity: &Value) 
         ),
         _ => None,
     }
+}
+
+/// The public `agent_message` for a message Codex delivered between agent
+/// threads: a task or message to a subagent, or a subagent's result. Codex
+/// wraps plaintext in an envelope (`Message Type: …` through `Payload:`),
+/// which is dropped; encrypted content passes through as Codex sent it.
+pub(crate) async fn agent_message(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    owner: &Owner,
+    item: &Value,
+) -> anyhow::Result<Option<Value>> {
+    let (Some(author), Some(recipient)) = (item["author"].as_str(), item["recipient"].as_str())
+    else {
+        return Ok(None);
+    };
+    let parts = item["content"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let text = parts
+        .iter()
+        .filter_map(|part| {
+            part["text"]
+                .as_str()
+                .filter(|_| part["type"] == "input_text")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let payload = text
+        .split_once("Payload:\n")
+        .map_or(text.as_str(), |(_, payload)| payload);
+    let mut content: Vec<Value> = Vec::new();
+    if !payload.trim().is_empty() {
+        content.push(json!({"type":"output_text","text":payload}));
+    }
+    content.extend(
+        parts
+            .iter()
+            .filter(|part| part["type"] == "encrypted_content")
+            .map(|part| json!({"type":"encrypted_content","encrypted_content":part["encrypted_content"]})),
+    );
+    if content.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        json!({"type":"agent_message","sender_agent_id":agent_id(tx, owner, author).await?,
+        "recipient_agent_id":agent_id(tx, owner, recipient).await?,"content":content}),
+    ))
+}
+
+/// The public ID of the agent Codex addresses by `path`: the session's root
+/// agent, or a known subagent; otherwise the path itself, which the SDK
+/// accepts as a name.
+async fn agent_id(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    owner: &Owner,
+    path: &str,
+) -> anyhow::Result<String> {
+    if path == "/root" {
+        let root: Option<String> = sqlx::query_scalar(
+            "SELECT json_extract(data, '$.agent.id') FROM public_sessions WHERE id = ?",
+        )
+        .bind(&owner.session_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        return Ok(root.unwrap_or_else(|| path.to_owned()));
+    }
+    let id: Option<String> =
+        sqlx::query_scalar("SELECT id FROM subagents WHERE session_id = ? AND agent_path = ?")
+            .bind(&owner.session_id)
+            .bind(path)
+            .fetch_optional(&mut **tx)
+            .await?;
+    Ok(id.unwrap_or_else(|| path.to_owned()))
 }
 
 async fn subagent(state: &State, session_id: &str, id: &str) -> Result<Value, ApiError> {

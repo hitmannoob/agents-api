@@ -222,6 +222,7 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
             | "item/completed"
             | "thread/tokenUsage/updated"
             | "model/rerouted"
+            | "rawResponseItem/completed"
     ) {
         return Ok(());
     }
@@ -315,6 +316,27 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
                 return Ok(());
             };
             crate::usage::record(&mut tx, &id, thread_id, turn_id, &params["tokenUsage"]).await?;
+        }
+        // Messages between agents arrive only as raw Responses items, on the
+        // recipient's thread.
+        "rawResponseItem/completed" => {
+            let Some(turn_id) = params["turnId"].as_str() else {
+                return Ok(());
+            };
+            let Some(mut public) =
+                crate::subagents::agent_message(&mut tx, &owner, &params["item"]).await?
+            else {
+                return Ok(());
+            };
+            let codex_id = params["item"]["id"]
+                .as_str()
+                .map_or_else(|| Uuid::new_v4().to_string(), str::to_owned);
+            public["id"] = json!(format!("item_{turn_id}_{codex_id}"));
+            public["turn_id"] = json!(turn_id);
+            let published =
+                publish_item(&mut tx, &id, turn_id, &public, /*done*/ true, subagent).await?;
+            events.extend(published.added);
+            events.extend(published.done);
         }
         // Later responses in the turn come from the model the provider chose.
         "model/rerouted" => {
@@ -558,7 +580,10 @@ async fn publish_item(
             &[("type", tool), ("status", status)],
         );
     }
-    let input = item["role"] == "user" || item["type"] == "function_call_output";
+    // Inputs to an agent, including messages from other agents, are not
+    // model output, so they are not streamed as output items.
+    let input = item["role"] == "user"
+        || matches!(item["type"].as_str(), Some("function_call_output" | "agent_message"));
     let output_index = if input {
         None
     } else {

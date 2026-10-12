@@ -524,6 +524,9 @@ pub(crate) async fn start_turn(
                         "type": "function", "name": tool.name, "description": tool.description, "inputSchema": tool.parameters
                     })).collect::<Vec<_>>(),
                     "approvalPolicy": "never", "sandbox": sandbox, "ephemeral": false,
+                    // Messages between agents reach the service only as raw
+                    // Responses items; subagent threads inherit the opt-in.
+                    "experimentalRawEvents": session.agent.config.multi_agent.as_ref().is_some_and(|settings| settings.enabled),
                 }),
             )
             .await?;

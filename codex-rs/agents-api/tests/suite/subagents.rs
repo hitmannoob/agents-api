@@ -94,7 +94,8 @@ async fn subagents_are_registered_attributed_and_kept_apart() -> anyhow::Result<
         let created = events.iter().filter(|e| e["type"] == "agent.session.subagent.created").collect::<Vec<_>>();
         assert_eq!(created.iter().map(|e| e["subagent"].clone()).collect::<Vec<_>>(), vec![subagent.clone()]);
 
-        // Root history holds only the spawn; subagent work stays under the subagent.
+        // Root history holds only the spawn; subagent work stays under the
+        // subagent until its result is delivered (below).
         let root_items = request(&client, reqwest::Method::GET, &format!("{url}/items?order=asc"), Value::Null).await?;
         let root_items = root_items["data"].as_array().context("items")?;
         let spawn = root_items.iter().find(|item| item["type"] == "create_subagent_call").context("spawn item")?;
@@ -115,6 +116,11 @@ async fn subagents_are_registered_attributed_and_kept_apart() -> anyhow::Result<
         let sub_items = request(&client, reqwest::Method::GET, &format!("{url}/subagents/{sub_id}/items"), Value::Null).await?;
         assert_eq!(turn_items["data"], sub_items["data"]);
         assert!(sub_items["data"].to_string().contains("child-report"), "{sub_items}");
+        // The task reached the subagent as a message from the root agent; Codex
+        // sent its text as encrypted content.
+        let task = sub_items["data"].as_array().into_iter().flatten().find(|item| item["type"] == "agent_message").context("task message")?;
+        assert_eq!(json!([task["sender_agent_id"], task["recipient_agent_id"], task["content"]]),
+            json!([session["agent"]["id"], sub_id, [{"type":"encrypted_content","encrypted_content":"child-task"}]]));
         // Subagent turns stream on the session, tagged; only root turns idle it.
         let completions = events.iter().filter(|e| e["type"] == "agent.session.turn.completed")
             .map(|e| e["turn"]["subagent_id"].clone()).collect::<Vec<_>>();
@@ -133,6 +139,17 @@ async fn subagents_are_registered_attributed_and_kept_apart() -> anyhow::Result<
         let child_work = spans.iter().filter(|span| span["parentSpanId"] == child["spanId"]).map(|span| span["name"].clone()).collect::<Vec<_>>();
         assert_eq!(child_work, vec![json!("chat")]);
         assert!(spans.iter().any(|span| span["parentSpanId"] == root["spanId"] && span["name"] == "execute_tool create_subagent_call"), "{spans:?}");
+
+        // The subagent's result reaches the root as a message, recorded in the
+        // root's next turn.
+        let check_in = client.post(format!("{url}/events")).bearer_auth(TOKEN)
+            .json(&json!({"events":[{"type":"agent.session.input.message","input":"check-in"}]})).send().await?;
+        assert_eq!(check_in.status(), reqwest::StatusCode::ACCEPTED);
+        idle(&client, &url, /*expected_turns*/ 2).await?;
+        let root_items = request(&client, reqwest::Method::GET, &format!("{url}/items?order=asc"), Value::Null).await?;
+        let result = root_items["data"].as_array().into_iter().flatten().find(|item| item["type"] == "agent_message").context("result message")?;
+        assert_eq!(json!([result["sender_agent_id"], result["recipient_agent_id"], result["content"]]),
+            json!([sub_id, session["agent"]["id"], [{"type":"output_text","text":"child-report"}]]));
 
         // Subagents get no function tools, and Codex goal tools stay off.
         let captures = provider.received_requests().await.context("captures")?;

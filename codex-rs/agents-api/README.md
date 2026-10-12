@@ -349,11 +349,22 @@ root agent can spawn subagents, each a Codex child thread, up to
   change the session's status.
 - **Call items:** root history records `create_subagent_call`,
   `send_subagent_input_call`, and `interrupt_subagent_call`. Codex does not
-  report the task text, model, or effort for these, so `content` is empty and
-  the settings are null. A `create_subagent_call`'s `agent_id` is the agent
+  report the task text with these, so `content` is empty; a
+  `create_subagent_call` carries the model and effort Codex resolved. A `create_subagent_call`'s `agent_id` is the agent
   that requested it, as the SDK documents. The new subagent's ID arrives in
   `agent.session.subagent.created`, and its `parent_agent_id` names the
   requester.
+- **Messages between agents:** each task or message an agent sends another,
+  and each subagent result, is an `agent_message` item in the recipient's
+  history, naming its sender and recipient by ID. Codex reports these only as
+  raw Responses items, so threads of agents with `multi_agent` opt into
+  Codex's experimental raw events. Plaintext loses Codex's `Message Type …
+  Payload:` envelope and becomes `output_text`; encrypted task text passes
+  through as `encrypted_content`. A result delivered while its recipient is
+  idle is recorded in the recipient's next turn. Like user messages, these are
+  inputs, so they are not streamed as output items. `thread/resume` has no
+  raw-event opt-in, so after a session resumes on a new worker connection its
+  messages are no longer recorded.
 - **Delegation quality depends on the model:** see G12 in GOALS.md. With models
   Codex does not treat as V2, subagents cannot delegate and may announce a
   spawn instead of doing their task.
