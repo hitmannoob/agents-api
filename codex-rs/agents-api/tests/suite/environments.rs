@@ -117,6 +117,96 @@ fn lifecycle(events: &[Value]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn self_hosted_command_output_deltas_arrive_in_order_before_item_done() -> anyhow::Result<()>
+{
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        // Emit immediately, then space stdout/stderr chunks without a TTY.
+        let command = if cfg!(windows) {
+            vec![
+                "powershell.exe".to_owned(), "-NoProfile".to_owned(), "-Command".to_owned(),
+                "[Console]::Out.WriteLine('remote-first'); Start-Sleep -Milliseconds 500; [Console]::Error.WriteLine('remote-second'); Start-Sleep -Milliseconds 500; [Console]::Out.WriteLine('remote-third')".to_owned(),
+            ]
+        } else {
+            vec![
+                "/bin/sh".to_owned(), "-c".to_owned(),
+                "printf 'remote-first\\n'; sleep 0.5; printf 'remote-second\\n' >&2; sleep 0.5; printf 'remote-third\\n'".to_owned(),
+            ]
+        };
+        let fast_command = if cfg!(windows) {
+            vec![
+                "powershell.exe".to_owned(), "-NoProfile".to_owned(), "-Command".to_owned(),
+                "[Console]::Out.WriteLine('remote-fast')".to_owned(),
+            ]
+        } else {
+            vec!["/bin/sh".to_owned(), "-c".to_owned(), "printf 'remote-fast\\n'".to_owned()]
+        };
+        let provider = create_mock_responses_server_sequence_unchecked(vec![
+            create_command_execution_sse_response(command, /*workdir*/ None, Some(/*timeout_ms*/ 10_000), "stream-call")?,
+            create_final_assistant_message_sse_response("done")?,
+            create_command_execution_sse_response(fast_command, /*workdir*/ None, Some(/*timeout_ms*/ 10_000), "fast-call")?,
+            create_final_assistant_message_sse_response("done")?,
+        ]).await;
+        MockResponsesConfig::new(&provider.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let registry = format!("{}/registry", base.trim_end_matches("/v1"));
+        api.configure_environments(ENVIRONMENT_KEY.into(), registry.clone())?;
+        let client = reqwest::Client::new();
+        let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), json!({
+            "agent":{"model":"mock-model"},
+            "environment":{"type":"self_hosted","workspace_directory":workspace_path}
+        })).await?;
+        let session_id = session["id"].as_str().context("session id")?;
+        let environment_id = session["environment"]["id"].as_str().context("environment id")?;
+        let url = format!("{base}/agents/sessions/{session_id}");
+        let mut stream = client.get(format!("{url}/events")).bearer_auth(TOKEN).send().await?.error_for_status()?;
+        let running = executor(&registry, environment_id)?;
+        until_event(&mut stream, "agent.session.environment.connected").await?;
+        for (call_id, input, expected, minimum_deltas) in [
+            ("stream-call", "stream command output", "remote-first\nremote-second\nremote-third\n", 3),
+            ("fast-call", "run a fast command", "remote-fast\n", 1),
+        ] {
+            assert_eq!(send(&client, &url, message(input)).await?, reqwest::StatusCode::ACCEPTED);
+            let events = until_idle(&mut stream).await?;
+            let command = command_item(&client, &url, call_id).await?;
+            let added = events.iter().position(|event| {
+                event["type"] == "agent.session.turn.item.added" && event["item"]["id"] == command["id"]
+            }).context("command item added")?;
+            let done = events.iter().position(|event| {
+                event["type"] == "agent.session.turn.item.done" && event["item"]["id"] == command["id"]
+            }).context("command item done")?;
+            let deltas = events.iter().enumerate().filter(|(_, event)| {
+                event["type"] == "agent.output.command_execution_output.delta"
+            }).collect::<Vec<_>>();
+            assert!(deltas.len() >= minimum_deltas, "missing output deltas for {call_id}: {events:?}");
+            let mut output = String::new();
+            for (index, delta) in deltas {
+                assert!(added < index && index < done, "delta outside command lifecycle: {events:?}");
+                assert_eq!(
+                    (&delta["session_id"], &delta["turn_id"], &delta["item_id"], &delta["output_index"]),
+                    (&session["id"], &command["turn_id"], &command["id"], &events[added]["output_index"])
+                );
+                output.push_str(delta["delta"].as_str().context("command output delta")?);
+            }
+            assert_eq!(output.replace("\r\n", "\n"), expected);
+            assert_eq!(&events[done]["item"], &command);
+            assert_eq!(
+                (&command["status"], &command["exit_code"], &command["cwd"], command["output"].as_str()),
+                (&json!("completed"), &json!(0), &json!(workspace_path), Some(output.as_str()))
+            );
+        }
+        running.abort();
+        api.shutdown().await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+
+#[tokio::test]
 async fn self_hosted_input_waits_for_the_executor_and_runs_in_its_workspace() -> anyhow::Result<()>
 {
     tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {

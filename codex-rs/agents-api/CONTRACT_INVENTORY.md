@@ -54,18 +54,41 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-13) is 59 verified, 0 implemented, 3 partial, and
+The current count (2026-10-13) is 60 verified, 0 implemented, 2 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
 of scope since 2026-10-06. Verified: ART-001..004, SUB-001..006, TRN-002,
-AGT-001, AGT-003..005, SES-001..002, SES-004..005, EVT-001, ENV-001..003,
+AGT-001, AGT-003..005, SES-001..002, SES-004..005, EVT-001..002, ENV-001..003,
 ITM-001, TRN-001, VLT-001..004, CRD-001..005, FIL-001..005, WHK-001..008,
 TRC-001, SKL-001..006, and SKV-001..005.
 ENV-002..003 moved to verified after the 2026-10-13 scope decision removed
-their only remaining evidence requirement. BEH-017 stays partial: the
-spawn-to-record window remains open, lost function waiters become unresolved
-rather than re-driven, and executor loss is tracked separately in BEH-010.
+their only remaining evidence requirement. The 18 behavior rows are 13 verified,
+3 partial, and 2 missing (BEH-011 out of scope; BEH-018 open).
 A partial operation does not count as completed parity.
 [PARITY.md](PARITY.md#current-status) has a per-area summary.
+
+BEH-017 is verified locally (2026-10-13): a synced atomic pre-spawn intent and
+inherited lock close the spawn-to-record window. Exact command/start-time checks
+preserve foreign processes; a lock held past 10 seconds fails startup safely.
+Evidence: `runtime::worker_spawned_before_record_is_reclaimed_after_owner_crash`,
+`runtime::pid_reused_record_does_not_signal_foreign_process`, and
+`runtime::stale_spawn_intent_does_not_signal_another_worker`; recorded macOS
+runtime 16/16 and lib 24/24 passed, Linux not run. Lost function waiters stay
+unresolved/unavailable by decision: callbacks exist only in memory, resume
+replays only live requests, and new workers restart their request-ID counter.
+Legacy records remain supported; external workers are untouched. Executor loss
+is tracked separately in BEH-010.
+
+EVT-002 is verified locally (2026-10-13):
+`environments::self_hosted_command_output_deltas_arrive_in_order_before_item_done`
+passed 3/3 macOS runs with a mock provider, including immediate stdout, spaced
+stdout/stderr, and fast exit; IDs/output_index and saved output match. Core
+`unified_exec` retains the receiver before the early-exit wait and drains before
+End. Recorded core evidence: `unified_exec_emits_initial_output_deltas_in_order`,
+`exec_server_output_preserves_bytes_before_watcher`, and
+`streaming_output_drains_lagged_receiver` (lib 92/92, `--test all unified_exec`
+101/101). Best-effort limits: 10,000 deltas per call; more than 64 chunks before
+the watcher starts drops the oldest from deltas on lag. Aggregated output is
+unaffected; streams remain live-only.
 
 G08 closes AGT-001 and SES-001's last gaps (2026-10-12):
 `programmatic::programmatic_tool_calls_reach_the_application_and_respect_the_model`
@@ -234,3 +257,10 @@ Amendments under the same `openai==3.17.0` pin:
   recovery limitations. The operation denominator remains 67: 59 verified,
   0 implemented, 3 partial, and 5 missing. The 18 behavior rows remain
   12 verified, 4 partial, and 2 missing.
+- 2026-10-13: BEH-017 and EVT-002 move from partial to verified (additive).
+  Managed-worker spawn-to-record recovery and initial/fast-exit command deltas
+  have local evidence named above. Lost function waiters remain unresolved/
+  unavailable by decision; deltas retain the 10,000-per-call and 64-chunk
+  pre-watcher limits. Counts: 67 operations, 60 verified, 0 implemented,
+  2 partial, 5 missing (out of scope); 18 behaviors, 13 verified, 3 partial,
+  2 missing (BEH-011 out of scope; BEH-018 open).

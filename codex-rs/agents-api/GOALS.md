@@ -55,9 +55,11 @@ These capabilities already exist; extend them rather than rebuilding them:
   authoritative rollout history and recovered when the worker actually
   completed them, without falsely recovering interrupted work or re-driving a
   lost waiter.
-- API-process crash recovery on Unix: a worker orphaned by an API SIGKILL is
-  authenticated (PID plus process start time) and reclaimed on the next managed
-  startup before a replacement spawns, so two app-servers never share a home.
+- API-process crash recovery on Linux/macOS: managed spawn holds the home lock,
+  publishes a synced atomic spawn intent before spawning, and passes its lock
+  through unused stdin. Recovery matches the exact executable/private socket
+  command and process start time, then awaits lock release before replacing the
+  worker. This covers the spawn-to-record window; legacy records still work.
 - Data-directory ownership: `Store::open` holds an advisory lock on the API data
   directory for its lifetime, rejecting a second API process in any worker mode.
 - Atomic public records with post-commit events: each notification handler writes
@@ -76,9 +78,9 @@ Current boundaries:
 
 - One managed app-server serves this API process's sessions. A crashed managed
   worker is restarted with bounded backoff while durable reads keep serving (the
-  CLI exits only when restart attempts are exhausted), and a worker orphaned by
-  an API-process crash is authenticated and reclaimed on the next Unix startup.
-  The brief spawn-to-record window is not yet covered.
+  CLI exits only when restart attempts are exhausted). Linux/macOS startup covers
+  API crashes before and after the PID record write. Failed identity inspection
+  or an intent lock held past the 10-second deadline prevents another spawn.
 - Sessions accept environment `none` or `self_hosted` (executor attachment
   through the rendezvous relay). `openai_hosted` and environment templates are
   out of scope by decision (2026-10-06).
@@ -87,8 +89,10 @@ Current boundaries:
   holding `api.environments.connect` (or the operator's environment key).
 - Event streams are live-only. Recovery reads saved state/history; it must not
   promise replay of missed events.
-- Persisted function records cannot recreate a lost JSON-RPC request waiter.
-  Calls interrupted by backend loss become unresolved/unavailable.
+- Decision (2026-10-13): lost function waiters stay unresolved/unavailable.
+  Saved JSON-RPC IDs cannot recreate in-memory callbacks or continuations and
+  must never re-drive a side effect. A surviving worker can replay live pending
+  requests; completed rollout history can reconcile uncertain deliveries.
 - Function results are limited to 10,000 text bytes, a local decision because
   the public docs publish no limit.
 - The Skills API is complete locally (2026-10-12). Self-hosted sessions can
@@ -110,7 +114,7 @@ fixture design may start earlier.
 | ID | Goal | Dependencies | Suggested landing units |
 | --- | --- | --- | --- |
 | G00 | Complete and pin the contract inventory (complete) | None | Inventory, fixtures, coverage mapping |
-| G01 | Keep the service available through worker failure (complete locally; spawn-to-record window open) | G00 recovery/error contract | Replaceable connection, supervisor, reconciliation, process-crash handling |
+| G01 | Keep the service available through worker failure (complete locally; lost function waiters are an explicit limit) | G00 recovery/error contract | Replaceable connection, supervisor, reconciliation, process-crash handling |
 | G02 | Version persistence and define ownership (open: durable identity/project scope, list indexes) | Existing store; coordinate with G01 | Migrations, durable identity, transactional updates |
 | G03 | Complete saved agents and configuration (complete locally) | G00, G02 | List, update/delete, field families |
 | G04 | Complete sessions and input semantics (complete locally) | G00, G01, G02 | List, update/delete, input variants, idempotency |
@@ -282,10 +286,32 @@ separate from worker-crash handling (the supervisor, which reaps its own child).
 Test: `orphaned_worker_is_reclaimed_after_api_crash` (tests/suite/runtime_cli.rs)
 SIGKILLs the real API binary, confirms its worker is orphaned and alive, then
 starts a second API on the same data directory and confirms the orphan is gone,
-a fresh worker replaced it, and the API serves. The remaining API-crash gap is
-the sub-second window between child spawn and record write. Windows containment
+a fresh worker replaced it, and the API serves. The spawn-to-record gap in this
+original protocol is closed by the 2026-10-13 slice below. Windows containment
 (Job Object / `LockFileEx` / `GetProcessTimes`) is outside the parity target by
 project decision (2026-10-13).
+
+Slice evidence (2026-10-13, spawn-to-record recovery): `Worker::spawn` holds the
+home lock before reclaim, atomically publishes and fsyncs
+`agents-api-worker-intent.json` with the exact executable/unique private socket
+command before spawn, and passes its flocked fd through unused stdin. The lock
+survives fork/exec and owner death; the PID/start-time record is now required.
+Recovery matches the command and re-checks start time across two scans before
+signaling, then waits for the intent lock to release (10 seconds, otherwise
+startup fails safely). Legacy records remain supported, external workers are
+untouched, and other platforms are unchanged. Evidence in tests/runtime.rs:
+`worker_spawned_before_record_is_reclaimed_after_owner_crash`,
+`pid_reused_record_does_not_signal_foreign_process`, and
+`stale_spawn_intent_does_not_signal_another_worker`. Recorded macOS runs:
+runtime 16/16 and lib 24/24 passed; Linux was not run. BEH-017 is verified within
+the parity target.
+
+Function-waiter decision (2026-10-13): app-server's
+`OutgoingMessageSender::request_id_to_callback` (src/outgoing_message.rs) holds
+callbacks only in memory; `thread/resume` replays only live pending requests.
+A new worker restarts its request-ID counter. Saved IDs therefore cannot safely
+recreate a lost callback or continuation, or re-drive a function side effect.
+Such calls stay unresolved/unavailable; rollout-based reconciliation remains.
 
 ## G02 — Durable storage evolution and ownership
 
@@ -638,6 +664,18 @@ Tests:
 - Unit tests in `src/contract_tests.rs` show that a lagged subscriber is closed,
   and that a stream carries only its own session and ends on deletion.
 
+Slice evidence (2026-10-13, command-output streaming):
+`environments::self_hosted_command_output_deltas_arrive_in_order_before_item_done`
+checks immediate stdout, spaced stdout/stderr, and a fast-exit command through
+public SSE. IDs/output_index match, deltas arrive in order before `item.done`,
+and joined deltas equal saved output. The focused test passed 3/3 macOS runs
+with a mock provider. EVT-002 is verified. Core `unified_exec` now retains its
+broadcast receiver from process construction, before the up-to-150 ms early-exit
+wait, and drains output before End for fast exits (local and remote commands).
+Best-effort limits remain: 10,000 deltas per call; more than 64 chunks before the
+watcher starts drops the oldest from deltas on lag. Aggregated output is
+unaffected by these delta limits; streams remain live-only.
+
 Not covered:
 - Cancellation leaving a partially streamed item: the mock provider cannot
   stall mid-stream. The failure path exercises the same sweep.
@@ -869,6 +907,12 @@ correct session, event, and ownership semantics.
   `mcp_tool_call_request_meta_includes_turn_metadata_for_custom_server`,
   `blocking_replace_mcp_servers_preserves_request_meta`, and app-server
   `model_list` tests. API secrets and public adaptation stay in this crate.
+  Harness addition (2026-10-13): core `unified_exec` retains initial output for
+  the delta watcher and waits for its drain before fast-exit End. Evidence:
+  `unified_exec_emits_initial_output_deltas_in_order`,
+  `exec_server_output_preserves_bytes_before_watcher`, and
+  `streaming_output_drains_lagged_receiver`. Recorded macOS runs: unified_exec
+  lib 92/92 and `--test all unified_exec` 101/101 passed.
 
 Acceptance: one contract fixture per capability plus combined scenarios: child
 cancellation, compaction followed by cold resume, nested function callbacks, and
@@ -2091,9 +2135,9 @@ Programmatic calls, automatic compaction, inline MCP authorization, and request
 metadata are implemented; local behavioral evidence is named in G07/G08 above.
 AGT-001 and SES-001 have no remaining in-scope variants and move to verified.
 BEH-008 stays partial only for a real-provider web search run. Current inventory
-after the 2026-10-13 scope decision:
-59 verified, 0 implemented, 3 partial, and 5 missing operations (all missing
-outside the parity target); 12 of 18 behavior rows verified.
+after the 2026-10-13 scope and recovery/streaming slices:
+60 verified, 0 implemented, 2 partial, and 5 missing operations (all missing
+outside the parity target); 13 of 18 behavior rows verified.
 
 Verification (local macOS, mock provider/MCP, real V8 host): `CARGO_INCREMENTAL=0`
 and the verified `RUSTY_V8_ARCHIVE` / `RUSTY_V8_SRC_BINDING_PATH` were set for all
@@ -2134,18 +2178,24 @@ remain in the changed code.
 Windows and cross-OS worker/executor runs, including Windows orphan containment,
 are outside the parity target by project decision (scope reduction). ENV-002 and
 ENV-003 move from implemented to verified: those runs were their only remaining
-evidence requirement, and their recorded evidence is unchanged. BEH-017 stays
-partial for the spawn-to-record window and its other recovery limitations.
-The denominator remains 67 operations: 59 verified, 0 implemented, 3 partial,
-and 5 missing (all out of scope). The 18 behavior rows remain 12 verified,
-4 partial, and 2 missing. Earlier dated counts record the inventory at those
-milestones.
+evidence requirement, and their recorded evidence is unchanged. The recovery
+and streaming slices above also verify BEH-017 and EVT-002. Current counts:
+67 operations, 60 verified, 0 implemented, 2 partial, and 5 missing (all out of
+scope); 18 behavior rows, 13 verified, 3 partial, and 2 missing (BEH-011 out of
+scope; BEH-018 open). Earlier dated counts record their respective milestones.
 
 ## Immediate next implementation slices
 
 Updated 2026-10-13. G00–G05 slices and the G01/G02 recovery slices that
 previously led this list are complete; their history is in the goal sections
 above and in git.
+
+Only six in-scope inventory rows remain non-verified: AGT-002, SES-003,
+BEH-002, BEH-008, BEH-010, and BEH-018. All require real-provider evidence:
+saved configuration/updates, web search, environment lifecycle beyond one run,
+and executor interoperability with an actual provider. BEH-017 and EVT-002 have
+local verification; lost function waiters and bounded best-effort deltas are
+recorded limits, not remaining implementation slices.
 
 1. **Projects, API keys, and permissions (G13): complete locally
    2026-10-12,** including project-scoped executor keys. The Admin API is out

@@ -87,17 +87,25 @@ Model request latency is measured inside the worker. Configure its own
 `[otel]` section in the worker home's `config.toml` to export it.
 
 An API-process crash (for example SIGKILL of the API itself) skips graceful
-shutdown, orphaning the managed worker. On Unix, the next managed start reclaims
-it before spawning: an ownership record written at spawn time
-(`agents-api-worker.json` in the worker home, holding the worker PID and its
-process start time) is re-read, and a live process matching both PID and start
-time — the start time defeats PID reuse — is terminated and awaited so two
-app-servers never share one home. A stale or reused record is cleared without
-signaling anything. Windows orphan containment is not implemented; Windows and
-cross-OS worker/executor runs are outside the parity target by project decision
-(2026-10-13). This reclaim applies only to managed workers, never to an external
-worker. This worker is the Codex harness; it does not provision a sandbox or
-launch a separate executor.
+shutdown, orphaning the managed worker. On Linux/macOS, managed spawn holds the
+home lock before reclaim, then atomically publishes and fsyncs
+`agents-api-worker-intent.json` with the exact executable/unique private socket
+command before spawning. The worker inherits its flocked fd through unused stdin,
+covering fork/exec and the spawn-to-record window. The PID/start-time record
+(`agents-api-worker.json`) is now required; legacy records remain supported.
+Recovery matches the exact command and re-checks start time across two scans
+before signaling, then awaits intent-lock release (10 seconds, otherwise startup
+fails safely). Failed identity inspection also prevents another spawn; stale or
+reused records never select an unrelated process. External workers are never
+reclaimed. Other platforms are unchanged; Windows and cross-OS worker/executor
+runs are outside the parity target (decision 2026-10-13). This worker is the
+Codex harness; it does not provision a sandbox or launch a separate executor.
+
+Lost function waiters stay unresolved/unavailable (decision 2026-10-13).
+App-server callbacks exist only in memory, `thread/resume` replays only live
+pending requests, and a new worker restarts its request-ID counter. Saved IDs
+cannot safely re-drive a function side effect. Completed rollout history can
+still reconcile uncertain deliveries.
 
 To use an externally managed worker, retain the explicit socket mode:
 
@@ -252,6 +260,12 @@ it left in progress is saved and closed as `incomplete`. A final provider error
 emits an `error` event before `turn.failed`. Failed turns carry the documented
 error codes (for example `context_length_exceeded` or `connection_failed`); a
 Codex error without a public counterpart is `internal_error`.
+
+Command-output deltas include initial output for local and self-hosted commands;
+fast-exit commands drain their deltas before `item.done` (verified locally
+2026-10-13). Delivery is best effort: at most 10,000 deltas per call, and more
+than 64 chunks before the watcher starts drops the oldest from deltas on lag.
+These limits do not affect aggregated output on the saved command item.
 
 Turn and session `usage` is best effort. It comes from Codex's running token
 totals: each update adds only its increase to the turn, so repeated updates and

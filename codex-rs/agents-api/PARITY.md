@@ -37,10 +37,10 @@ in [GOALS.md](GOALS.md).
 Updated: 2026-10-13. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
 per-operation detail lives in its `remaining` fields.
 
-**Scorecard:** 67 operations: 59 `verified`, 0 `implemented`, 3 `partial`,
+**Scorecard:** 67 operations: 60 `verified`, 0 `implemented`, 2 `partial`,
 5 `missing`. The 5 missing (environment templates) are outside the parity
-target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 12 are verified (BEH-001, BEH-003..007, BEH-009,
-BEH-012..016), 4 are partial, and 2 are missing (BEH-011 is out of scope;
+target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 13 are verified (BEH-001, BEH-003..007, BEH-009,
+BEH-012..017), 3 are partial, and 2 are missing (BEH-011 is out of scope;
 BEH-018, provider interoperability, is open).
 
 Two promotion passes on 2026-10-12 moved rows whose only gaps were out of
@@ -54,10 +54,13 @@ nothing (trace format, batching and idempotency, subagent engine limits,
 OAuth refresh), and added environment data to webhook events and the model
 to trace spans.
 The 2026-10-13 scope decision moves ENV-002..003 to verified on their recorded
-evidence; BEH-017 stays partial for its other recovery gaps.
-The remaining partial rows each have a concrete variant or evidence gap
-listed below; evidence still comes from mock providers plus OpenRouter runs
-only. See
+evidence. The same day's recovery/streaming slices verify BEH-017 and EVT-002:
+the spawn-to-record window is closed, and initial/fast-exit command output
+streams before `item.done` (test names in the inventory). Lost function waiters
+remain unresolved/unavailable by decision. Recovery evidence is macOS-only;
+Linux was not run. Only AGT-002, SES-003, BEH-002, BEH-008, BEH-010, and BEH-018
+remain non-verified within scope; each needs real-provider evidence. Existing
+provider evidence comes from OpenRouter runs. See
 [Path to `verified`](#path-to-verified).
 
 | Area | Ops | Status | Works today | Remaining gap |
@@ -65,7 +68,7 @@ only. See
 | Saved agents | AGT-001..005 | 4 verified (AGT-001, AGT-003..005), 1 partial | Full CRUD, creation-order pagination, every pinned configuration family with omit/null/replace semantics, snapshots after deletion and cold resume, programmatic calling with catalog-mode refusals, project-scoped | Real-provider acceptance (AGT-002). Instructions and input take up to 1 MiB and agents 128 tools |
 | Sessions | SES-001..005 | 4 verified (SES-001..002, SES-004..005), 1 partial | CRUD, initial input/streaming, `none` and `self_hosted`, `vault_ids`, next-turn model/effort/tier, durable deletion, programmatic calls and automatic compaction through cold resume, project-scoped | Provider-specific model compatibility (SES-003). Every SDK create, read, and update field is handled (audited 2026-10-12) |
 | Input events | EVT-001 | verified | Validated ordered batches, text up to 1 MiB, data-URL and remote https images (fetched under the egress rules), string and content-part function results (10,000 bytes), session-scoped `Idempotency-Key` replay | None. Batching and idempotency semantics are the contract by decision (2026-10-12) |
-| Streaming | EVT-002 | partial | Lifecycle, item, text and reasoning deltas, content parts, `error`, subagent, environment, and command-output events | Codex sends no command-output deltas for remote commands (output arrives on the item); no replay, by contract |
+| Streaming | EVT-002 | verified | Lifecycle, item, text/reasoning, content-part, error, subagent, environment, and command-output events; initial stdout and fast-exit output arrive before item.done with matching IDs/output_index and saved output (local mock evidence, 2026-10-13) | None within the parity target. Live-only; best-effort limits: 10,000 deltas per call, and oldest deltas dropped on lag beyond 64 chunks before the watcher starts; aggregated output unaffected |
 | Items and turns | ITM-001, TRN-001..002 | 3 verified | Message, reasoning, function, MCP, web search, command, and subagent create/send/interrupt items (with the subagent's model), and `agent_message` items between agents; `queued` turns while input waits for an executor; turn usage, error codes, and pagination | None. Engine limit: wait/close/resume subagent items |
 | Subagents | SUB-001..006 | 6 verified | Resources, paginated items and turns per subagent, cancellation, restart continuity | None. `instructions` is always null and `closed` never occurs: Codex V2 reports neither, accepted as engine limits (2026-10-12) |
 | Functions | (in EVT/BEH-007) | verified | Tagged functions, result/error flow, content parts, duplicate and race handling, deferred functions found through tool search (offered up front on models without it) | None |
@@ -80,7 +83,7 @@ only. See
 | Webhooks | WHK-001..008 | 8 verified | Endpoint CRUD, every event type the SDK lists (only `agent.session.*` are produced), signed and retried deliveries that survive restarts, secret rotation with a 24h overlap, test delivery of any type; endpoints and deliveries project-scoped | None. Events carry environment data and the actual required action; delivery order is not guaranteed, as in the guide |
 | Traces | TRC-001 | verified | OTLP JSON export, including `execute_tool` spans and each response's model | None. With no reference schema, this format is the contract (decision 2026-10-12); subagent instructions are a Codex limit |
 | Projects and keys | (BEH-001, BEH-003, G13) | BEH-001 and BEH-003 verified | Project API keys with permissions (CLI-managed), 401/403/404 swept over every operation, every resource project-scoped; the `OpenAI-Beta` header is accepted and ignored everywhere (decision 2026-10-12) | None. Admin API out of scope by decision (2026-10-12); executors use project keys holding `api.environments.connect` |
-| Service operation | (BEH-017) | partial | Managed worker supervision with backoff, reconnect fencing, turn/function reconciliation, Unix orphan reclaim, data-directory lock, migrations, Modal deployment, per-project list indexes | The spawn-to-record window; lost function waiters become unresolved rather than re-driven; executor loss is tracked separately in BEH-010; durable identity (G02) |
+| Service operation | (BEH-017) | verified | Managed supervision, fencing, reconciliation, data-directory lock, migrations, and per-project indexes; Linux/macOS spawn-to-record recovery via synced pre-spawn intent, inherited lock, and exact command/start-time checks (macOS runtime 16/16, lib 24/24; Linux not run) | None within the parity target. Lost function waiters stay unresolved/unavailable by decision (2026-10-13); failed inspection or intent lock held past 10 seconds fails startup safely. Legacy records supported; external workers untouched; executor loss is BEH-010 |
 
 ### Path to `verified`
 
