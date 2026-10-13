@@ -1,6 +1,6 @@
 # Remaining Agents API parity work
 
-Updated: 2026-10-12.
+Updated: 2026-10-13.
 
 ## Objective and scope
 
@@ -13,6 +13,9 @@ This is the implementation plan for the gaps summarized in [PARITY.md](PARITY.md
 is the previously reviewed Agents API reference and Python SDK `openai==3.17.0`.
 G00 pins the full known operation inventory in `CONTRACT_INVENTORY.json`; its
 open rows now establish the denominator for parity tracking.
+
+Project decision (2026-10-13): Windows and cross-OS worker/executor runs,
+including Windows shutdown and orphan containment, are outside the parity target.
 
 Proposed module names below are implementation suggestions, not existing files
 or commitments to create scaffolding before it is needed. Exact public field
@@ -66,8 +69,8 @@ every partial row to existing tests, and `tests/real_provider.py` passed against
 `openai/gpt-5-mini` through OpenRouter. A 15-model OpenRouter sweep passed every
 check that does not involve subagents. The Modal deployment and
 `deploy/modal/harness_evals.py` passed 8/8 coding tasks on `gpt-5-mini`, both on
-Modal and locally (2026-10-07). All runs were on macOS. Windows, cross-OS, and
-OpenAI-API (not OpenRouter) evidence remain open.
+Modal and locally (2026-10-07). All runs were on macOS.
+OpenAI-API (not OpenRouter) evidence remains open.
 
 Current boundaries:
 
@@ -75,8 +78,7 @@ Current boundaries:
   worker is restarted with bounded backoff while durable reads keep serving (the
   CLI exits only when restart attempts are exhausted), and a worker orphaned by
   an API-process crash is authenticated and reclaimed on the next Unix startup.
-  Windows orphan containment and the brief spawn-to-record window are not yet
-  covered.
+  The brief spawn-to-record window is not yet covered.
 - Sessions accept environment `none` or `self_hosted` (executor attachment
   through the rendezvous relay). `openai_hosted` and environment templates are
   out of scope by decision (2026-10-06).
@@ -108,7 +110,7 @@ fixture design may start earlier.
 | ID | Goal | Dependencies | Suggested landing units |
 | --- | --- | --- | --- |
 | G00 | Complete and pin the contract inventory (complete) | None | Inventory, fixtures, coverage mapping |
-| G01 | Keep the service available through worker failure (complete locally; Windows orphan containment open) | G00 recovery/error contract | Replaceable connection, supervisor, reconciliation, process-crash handling |
+| G01 | Keep the service available through worker failure (complete locally; spawn-to-record window open) | G00 recovery/error contract | Replaceable connection, supervisor, reconciliation, process-crash handling |
 | G02 | Version persistence and define ownership (open: durable identity/project scope, list indexes) | Existing store; coordinate with G01 | Migrations, durable identity, transactional updates |
 | G03 | Complete saved agents and configuration (complete locally) | G00, G02 | List, update/delete, field families |
 | G04 | Complete sessions and input semantics (complete locally) | G00, G01, G02 | List, update/delete, input variants, idempotency |
@@ -119,7 +121,7 @@ fixture design may start earlier.
 | G09 | Implement environment lifecycle (self-hosted complete locally; managed out of scope) | G00, G01, G02 | Self-hosted attachment, managed provisioning, lifecycle recovery |
 | G10 | Implement files and artifacts (complete locally for self-hosted, including the Skills API) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
 | G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
-| G12 | Prove end-to-end parity (open: SDK scenarios for every resource, Windows/cross-OS) | All applicable goals | Contract suite, real providers, platforms, failure matrix |
+| G12 | Prove end-to-end parity (open: SDK scenarios for every resource, provider interoperability) | All applicable goals | Contract suite, real providers, failure matrix |
 | G13 | Projects, API keys, and permissions (complete locally 2026-10-12; Admin API out of scope) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
 
 Ship bounded changes within each goal. Do not combine a supervisor rewrite,
@@ -159,8 +161,8 @@ and 18 cross-cutting behavior rows. `tests/sdk_inventory.py` resolved all 58
 SDK-backed operations against `openai==3.17.0`; trace export is the one documented
 raw-HTTP operation absent from that SDK. The full crate run passed 15 tests with
 ignored tests enabled, including strict fixture parsing and the SDK lifecycle.
-Execution used macOS and a mock model; platform and real-provider evidence remain
-separate G12 work.
+Execution used macOS and a mock model; real-provider evidence remains separate
+G12 work.
 
 ## G01 — Worker supervision, reconnect, and reconciliation
 
@@ -280,9 +282,10 @@ separate from worker-crash handling (the supervisor, which reaps its own child).
 Test: `orphaned_worker_is_reclaimed_after_api_crash` (tests/suite/runtime_cli.rs)
 SIGKILLs the real API binary, confirms its worker is orphaned and alive, then
 starts a second API on the same data directory and confirms the orphan is gone,
-a fresh worker replaced it, and the API serves. Remaining API-crash gaps:
-Windows containment (Job Object / `LockFileEx` / `GetProcessTimes`) and the
-sub-second window between child spawn and record write are not yet covered.
+a fresh worker replaced it, and the API serves. The remaining API-crash gap is
+the sub-second window between child spawn and record write. Windows containment
+(Job Object / `LockFileEx` / `GetProcessTimes`) is outside the parity target by
+project decision (2026-10-13).
 
 ## G02 — Durable storage evolution and ownership
 
@@ -400,7 +403,7 @@ so cancelled text in history cannot stall the post-restart request.
 The session feature `features.explicit_default_service_tier` defaults off in
 Codex and is enabled only by this facade's configuration overrides. The core
 integration test for ordinary Codex requests still verifies omitted default.
-Real-provider and cross-platform acceptance remain G12; project ownership
+Real-provider acceptance remains G12; project ownership
 remains G11 and extended capability execution remains G06–G08.
 
 Review staging (the combined working diff exceeds 800 lines): land saved-agent
@@ -558,7 +561,7 @@ G04 acceptance, all on macOS with a mock provider:
 - Deletion during active work: covered.
 - Restart around input acceptance: covered by a simulated crash state.
 
-Real-provider and Windows acceptance remain G12.
+Real-provider acceptance remains G12.
 
 ## G05 — Events, items, turns, and usage (complete locally 2026-09-28)
 
@@ -1226,7 +1229,7 @@ consumer.
 - **Slice 4, SDK and inventory:** `tests/sdk_skills.py`, run by
   `contract::official_sdk_session_lifecycle` with strict response validation,
   drives every operation through `openai==3.17.0`. SKL-001..006 and
-  SKV-001..005 are verified. The inventory now has 33 verified,
+  SKV-001..005 are verified. At this pass (2026-10-12), the inventory had 33 verified,
   2 implemented, 27 partial, and 5 missing (all environment templates, out of
   scope).
 - Commands (macOS, mock provider, `RUST_MIN_STACK=8388608`):
@@ -1555,14 +1558,15 @@ and traceable failures across API, worker, provider, and environment boundaries.
 
 **Outcome:** parity claims are backed by repeatable tests and a closed inventory.
 
+Scope decision (2026-10-13): Windows and cross-OS worker/executor runs,
+including Windows shutdown and orphan containment, are outside the parity target.
+
 - [x] Map every G00 inventory entry to a behavior test and evidence. Verify schema
   variants, exact errors, pagination, timestamps, transitions, and size boundaries.
 - [ ] Expand official SDK scenarios to every implemented resource/capability.
   Include raw HTTP fixtures where SDK parsing hides a wire-contract discrepancy.
 - [x] Run a controlled real-provider suite with explicitly configured credentials
   and budget. Separate provider-dependent failures from service contract failures.
-- [ ] Run actual supported-platform worker/executor scenarios, including Windows
-  shutdown and cross-OS execution. Do not count a macOS pass as Windows evidence.
 - [x] Exercise concurrent sessions, slow subscribers, process crashes, network
   interruptions, expired credentials, partial persistence, and resource cleanup.
 - [x] Verify upgrade compatibility for saved configuration/history and any retained
@@ -1632,8 +1636,6 @@ Evidence (2026-10-06, real providers, faults, and operations):
   - `worker_loss::store_reads_survive_worker_loss_and_reconnect_restores_service`
     checks 200 → 503 → 200 across a worker kill and reconnect.
   - Distributed routing is not provided and is not needed for parity.
-- **Still open:** Windows and cross-OS worker/executor runs. This machine is
-  macOS, and a macOS pass is not Windows evidence.
 
 Evidence (2026-10-06, inventory sweep):
 - **Every implemented row cites tests:** all 67 operation and behavior rows that
@@ -2088,8 +2090,9 @@ of 18 behavior rows verified.
 Programmatic calls, automatic compaction, inline MCP authorization, and request
 metadata are implemented; local behavioral evidence is named in G07/G08 above.
 AGT-001 and SES-001 have no remaining in-scope variants and move to verified.
-BEH-008 stays partial only for a real-provider web search run. Current inventory:
-57 verified, 2 implemented, 3 partial, and 5 missing operations (all missing
+BEH-008 stays partial only for a real-provider web search run. Current inventory
+after the 2026-10-13 scope decision:
+59 verified, 0 implemented, 3 partial, and 5 missing operations (all missing
 outside the parity target); 12 of 18 behavior rows verified.
 
 Verification (local macOS, mock provider/MCP, real V8 host): `CARGO_INCREMENTAL=0`
@@ -2126,9 +2129,21 @@ Seven pre-existing warnings remain in untouched code: app-server
 and `tests/suite/scenarios.rs:42` (`ReasoningEffort`) unused imports. No warnings
 remain in the changed code.
 
+## Platform scope decision (2026-10-13)
+
+Windows and cross-OS worker/executor runs, including Windows orphan containment,
+are outside the parity target by project decision (scope reduction). ENV-002 and
+ENV-003 move from implemented to verified: those runs were their only remaining
+evidence requirement, and their recorded evidence is unchanged. BEH-017 stays
+partial for the spawn-to-record window and its other recovery limitations.
+The denominator remains 67 operations: 59 verified, 0 implemented, 3 partial,
+and 5 missing (all out of scope). The 18 behavior rows remain 12 verified,
+4 partial, and 2 missing. Earlier dated counts record the inventory at those
+milestones.
+
 ## Immediate next implementation slices
 
-Updated 2026-10-12. G00–G05 slices and the G01/G02 recovery slices that
+Updated 2026-10-13. G00–G05 slices and the G01/G02 recovery slices that
 previously led this list are complete; their history is in the goal sections
 above and in git.
 
@@ -2148,9 +2163,9 @@ above and in git.
    nested calls, cancellation, model refusals, and compaction followed by cold
    resume have mock-provider evidence. Capability-directory skills, plugin
    skills, and pinned Skills API versions stay isolated through cold resume.
-7. **G12 evidence gaps.** SDK scenarios for every implemented resource
-   a Windows/cross-OS worker and executor run, and
-   provider interoperability (BEH-018).
+7. **G12 evidence gaps.** SDK scenarios for every implemented resource and
+   provider interoperability (BEH-018). Windows and cross-OS worker/executor
+   runs are out of scope by decision (2026-10-13).
 
 ## How to maintain this plan
 

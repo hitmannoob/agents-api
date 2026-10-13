@@ -93,10 +93,11 @@ it before spawning: an ownership record written at spawn time
 process start time) is re-read, and a live process matching both PID and start
 time — the start time defeats PID reuse — is terminated and awaited so two
 app-servers never share one home. A stale or reused record is cleared without
-signaling anything. Windows orphan containment is not yet implemented, and this
-reclaim applies only to managed workers, never to an external worker. This worker
-is the Codex harness; it does not provision a sandbox or launch a separate
-executor.
+signaling anything. Windows orphan containment is not implemented; Windows and
+cross-OS worker/executor runs are outside the parity target by project decision
+(2026-10-13). This reclaim applies only to managed workers, never to an external
+worker. This worker is the Codex harness; it does not provision a sandbox or
+launch a separate executor.
 
 To use an externally managed worker, retain the explicit socket mode:
 

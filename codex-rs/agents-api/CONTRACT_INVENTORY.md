@@ -18,6 +18,8 @@ operations required by documented Agents API workflows.
 - The pinned SDK sends `OpenAI-Beta: agents=v1` on Agents API requests, but
   not on the Files, Skills, or Webhooks dependencies. This service accepts and
   ignores the header on every route (decision 2026-10-12).
+- Windows and cross-OS worker/executor runs, including Windows orphan
+  containment, are outside the parity target by project decision (2026-10-13).
 
 The operation denominator is 67:
 
@@ -52,13 +54,18 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-13) is 57 verified, 2 implemented, 3 partial, and
+The current count (2026-10-13) is 59 verified, 0 implemented, 3 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
 of scope since 2026-10-06. Verified: ART-001..004, SUB-001..006, TRN-002,
-AGT-001, AGT-003..005, SES-001..002, SES-004..005, EVT-001, ENV-001, ITM-001, TRN-001, VLT-001..004, CRD-001..005, FIL-001..005,
-WHK-001..008, TRC-001, SKL-001..006, and SKV-001..005. Implemented, awaiting cross-OS
-evidence: ENV-002..003. A partial operation does not count as completed parity. [PARITY.md](PARITY.md#current-status) has a
-per-area summary.
+AGT-001, AGT-003..005, SES-001..002, SES-004..005, EVT-001, ENV-001..003,
+ITM-001, TRN-001, VLT-001..004, CRD-001..005, FIL-001..005, WHK-001..008,
+TRC-001, SKL-001..006, and SKV-001..005.
+ENV-002..003 moved to verified after the 2026-10-13 scope decision removed
+their only remaining evidence requirement. BEH-017 stays partial: the
+spawn-to-record window remains open, lost function waiters become unresolved
+rather than re-driven, and executor loss is tracked separately in BEH-010.
+A partial operation does not count as completed parity.
+[PARITY.md](PARITY.md#current-status) has a per-area summary.
 
 G08 closes AGT-001 and SES-001's last gaps (2026-10-12):
 `programmatic::programmatic_tool_calls_reach_the_application_and_respect_the_model`
@@ -219,3 +226,11 @@ Amendments under the same `openai==3.17.0` pin:
   `codex-config`/`codex-core` `request_meta`. AGT-001 and SES-001 moved to
   verified; BEH-008 stays partial only for real-provider web search. Evidence
   is local, mock-provider/MCP with the real V8 host (tests named above).
+- 2026-10-13: by project decision, Windows and cross-OS worker/executor runs,
+  including Windows orphan containment, leave the parity target (scope
+  reduction). ENV-002..003 move from implemented to verified because no other
+  gaps remain; their recorded evidence is unchanged. BEH-017 loses the Windows
+  requirement but stays partial for the spawn-to-record window and its other
+  recovery limitations. The operation denominator remains 67: 59 verified,
+  0 implemented, 3 partial, and 5 missing. The 18 behavior rows remain
+  12 verified, 4 partial, and 2 missing.

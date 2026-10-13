@@ -29,13 +29,15 @@ in [GOALS.md](GOALS.md).
   Mock-provider tests and real-provider acceptance are separate evidence.
 - Do not infer private OpenAI implementation details or promise stronger recovery
   guarantees than the documented contract.
+- Windows and cross-OS worker/executor runs, including Windows orphan
+  containment, are outside the parity target by project decision (2026-10-13).
 
 ## Current status
 
 Updated: 2026-10-13. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
 per-operation detail lives in its `remaining` fields.
 
-**Scorecard:** 67 operations: 57 `verified`, 2 `implemented`, 3 `partial`,
+**Scorecard:** 67 operations: 59 `verified`, 0 `implemented`, 3 `partial`,
 5 `missing`. The 5 missing (environment templates) are outside the parity
 target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 12 are verified (BEH-001, BEH-003..007, BEH-009,
 BEH-012..016), 4 are partial, and 2 are missing (BEH-011 is out of scope;
@@ -51,9 +53,11 @@ pass recorded decisions where the docs define nothing or Codex reports
 nothing (trace format, batching and idempotency, subagent engine limits,
 OAuth refresh), and added environment data to webhook events and the model
 to trace spans.
+The 2026-10-13 scope decision moves ENV-002..003 to verified on their recorded
+evidence; BEH-017 stays partial for its other recovery gaps.
 The remaining partial rows each have a concrete variant or evidence gap
 listed below; evidence still comes from mock providers plus OpenRouter runs
-only, and there is no Windows evidence. See
+only. See
 [Path to `verified`](#path-to-verified).
 
 | Area | Ops | Status | Works today | Remaining gap |
@@ -67,7 +71,7 @@ only, and there is no Windows evidence. See
 | Functions | (in EVT/BEH-007) | verified | Tagged functions, result/error flow, content parts, duplicate and race handling, deferred functions found through tool search (offered up front on models without it) | None |
 | MCP and built-ins | (BEH-008) | partial | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence) | A real-provider web search run |
 | Harness features | (BEH-009, G08) | BEH-009 verified; G08 complete locally (2026-10-13) | Multi-agent delegation within Codex V2 limits; automatic compaction preserves full public history through cold resume; sandboxed V8 nested function calls, cancellation, fail-closed host and model-mode refusals; capability-directory skills, plugin skills, and pinned Skills API versions isolated through API/worker restart | None within the parity target; no public compaction controls/items in the pinned contract |
-| Environments | ENV-001..003 | 1 verified (ENV-001), 2 implemented | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss | One real-provider run; Windows and cross-OS execution (ENV-002..003). Self-hosted environments never expire |
+| Environments | ENV-001..003 | 3 verified | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss | None for ENV-001..003 within the parity target. BEH-010 still needs real-provider evidence beyond one run. Self-hosted environments never expire |
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
 | Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |
 | Files | FIL-001..005 | 5 verified | Streaming multipart upload (50 MiB) with SHA-256, six purposes, `expires_after`, integrity-checked download, project-scoped | None; upload parts, batch processing, and range requests are **out of scope** (decision 2026-10-12) |
@@ -76,7 +80,7 @@ only, and there is no Windows evidence. See
 | Webhooks | WHK-001..008 | 8 verified | Endpoint CRUD, every event type the SDK lists (only `agent.session.*` are produced), signed and retried deliveries that survive restarts, secret rotation with a 24h overlap, test delivery of any type; endpoints and deliveries project-scoped | None. Events carry environment data and the actual required action; delivery order is not guaranteed, as in the guide |
 | Traces | TRC-001 | verified | OTLP JSON export, including `execute_tool` spans and each response's model | None. With no reference schema, this format is the contract (decision 2026-10-12); subagent instructions are a Codex limit |
 | Projects and keys | (BEH-001, BEH-003, G13) | BEH-001 and BEH-003 verified | Project API keys with permissions (CLI-managed), 401/403/404 swept over every operation, every resource project-scoped; the `OpenAI-Beta` header is accepted and ignored everywhere (decision 2026-10-12) | None. Admin API out of scope by decision (2026-10-12); executors use project keys holding `api.environments.connect` |
-| Service operation | (BEH-017) | partial | Managed worker supervision with backoff, reconnect fencing, turn/function reconciliation, Unix orphan reclaim, data-directory lock, migrations, Modal deployment, per-project list indexes | Windows orphan containment; the spawn-to-record window; durable identity (G02) |
+| Service operation | (BEH-017) | partial | Managed worker supervision with backoff, reconnect fencing, turn/function reconciliation, Unix orphan reclaim, data-directory lock, migrations, Modal deployment, per-project list indexes | The spawn-to-record window; lost function waiters become unresolved rather than re-driven; executor loss is tracked separately in BEH-010; durable identity (G02) |
 
 ### Path to `verified`
 
@@ -86,9 +90,8 @@ Ordered by the number of rows each item unblocks:
    Tool search, automatic compaction, programmatic calling, and skills/plugins
    cross-session isolation through cold resume have local mock-provider evidence
    (2026-10-12/13); named tests live in the inventory.
-2. **Platform evidence (G12):** Windows and cross-OS worker/executor runs, SDK
-   scenarios for every implemented resource, and
-   provider interoperability (BEH-018).
+2. **SDK and provider evidence (G12):** SDK scenarios for every implemented
+   resource and provider interoperability (BEH-018).
 
 ## Implementation sequence
 
