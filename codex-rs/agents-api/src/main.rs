@@ -257,9 +257,6 @@ async fn main() -> anyhow::Result<()> {
                 Some(path) => AbsolutePathBuf::relative_to_current_dir(path)?,
                 None => directory.join("codex-home"),
             };
-            // Reclaim a worker orphaned by a prior API-process crash before
-            // starting our own, so two app-servers never share this home.
-            runtime::reclaim_orphan(&home).await?;
             let owned = runtime::Worker::spawn(executable.clone(), home.clone()).await?;
             // This line and the listening line stay plain, outside `tracing`:
             // supervisors read the worker PID and the address from them.

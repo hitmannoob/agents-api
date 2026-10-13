@@ -6,6 +6,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fs::File;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::io::Write;
 use std::process::ExitStatus;
 use std::process::Stdio;
 use std::time::Duration;
@@ -18,6 +20,16 @@ const RECLAIM_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 10);
 /// File in the worker home that records which process currently owns it, so a
 /// worker orphaned by an API-process crash can be found and reclaimed.
 const WORKER_RECORD: &str = "agents-api-worker.json";
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const WORKER_INTENT: &str = "agents-api-worker-intent.json";
+
+/// Written before fork. The private, randomly named socket distinguishes this
+/// spawn from any other process, including a reused PID.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Serialize, Deserialize)]
+struct SpawnIntent {
+    command: String,
+}
 
 /// Durable identity of the managed worker owning a home. The PID alone is
 /// insufficient to reclaim an orphan because PIDs are reused; `start_time`
@@ -33,6 +45,8 @@ struct OwnershipRecord {
 /// longer runs and so no longer touches the home.
 struct ProcessInfo {
     start_time: u64,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    start_time_subsecond: u64,
     zombie: bool,
 }
 
@@ -58,6 +72,7 @@ impl Worker {
         home_lock
             .try_lock()
             .context("worker home is already in use")?;
+        reclaim_orphan(&home).await?;
         // Keep the socket path short even when the persistent data path is deep.
         let socket_directory = tempfile::Builder::new().prefix("agents-").tempdir()?;
         let private_directory = socket_directory.path().join("private");
@@ -85,20 +100,49 @@ impl Worker {
         }
         #[cfg(windows)]
         command.env(codex_app_server_transport::DAEMON_SHUTDOWN_SOCKET_ENV, "1");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let intent = {
+            let intent = write_record(
+                &home,
+                WORKER_INTENT,
+                &SpawnIntent {
+                    command: format!(
+                        "{} --listen unix://{} --strict-config",
+                        executable.display(),
+                        socket.display()
+                    ),
+                },
+            )?;
+            intent.try_lock()?;
+            // Unix socket mode does not read stdin. Inheriting this locked file
+            // keeps recovery waiting even if the owner dies during fork/exec,
+            // before the worker's identifying argv becomes visible.
+            command.stdin(Stdio::from(intent.try_clone()?));
+            intent
+        };
         let child = command
             .spawn()
             .with_context(|| format!("failed to start app-server at {}", executable.display()))?;
-        // Record this worker's authenticated identity so a later API process can
-        // reclaim it if this one crashes before shutting it down. Best-effort:
-        // a missing record only forgoes reclaim, never correctness while live.
-        if let Some(pid) = child.id()
-            && let Some(info) = probe(pid)
-            && let Ok(bytes) = serde_json::to_vec(&OwnershipRecord {
-                pid,
-                start_time: info.start_time,
-            })
+        #[cfg(test)]
+        if let Some(path) = std::env::var_os("CODEX_AGENTS_API_TEST_SPAWN_WINDOW_PID") {
+            std::fs::write(path, child.id().context("worker process ID")?.to_string())?;
+            loop {
+                std::thread::park();
+            }
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let _ = std::fs::write(home.join(WORKER_RECORD).as_path(), bytes);
+            let pid = child.id().context("worker process ID")?;
+            let info = probe(pid).context("failed to identify spawned worker")?;
+            write_record(
+                &home,
+                WORKER_RECORD,
+                &OwnershipRecord {
+                    pid,
+                    start_time: info.start_time,
+                },
+            )?;
+            drop(intent);
         }
         Ok(Self {
             child,
@@ -223,12 +267,24 @@ pub(crate) async fn worker_exit(worker: &mut Option<Worker>) -> anyhow::Result<(
 /// A crash (for example SIGKILL of the API) skips graceful shutdown, so the
 /// managed worker keeps running against this home with no owner and its home
 /// lock is released; starting a second worker would then let two app-servers
-/// write one home. The ownership record authenticates the orphan by PID and
-/// start time: a live match is SIGKILLed and awaited until it no longer runs,
-/// so the home is exclusively ours before we spawn. A missing, stale, or
-/// PID-reused record signals no process and is simply cleared. Only managed
-/// startup calls this; an externally owned worker is never recorded or touched.
+/// write one home. New workers inherit a locked spawn intent; recovery matches
+/// its unique command and authenticates the process start time before signaling.
+/// Legacy records use PID and start time. The caller holds the home lock, so a
+/// live owner cannot be reclaimed. External workers are never recorded or touched.
 pub(crate) async fn reclaim_orphan(home: &AbsolutePathBuf) -> anyhow::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if home.join(WORKER_INTENT).exists() {
+        reclaim_intent(home).await?;
+        std::fs::remove_file(home.join(WORKER_RECORD)).or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })?;
+        std::fs::remove_file(home.join(WORKER_INTENT))?;
+        return Ok(());
+    }
     let record_path = home.join(WORKER_RECORD);
     let Ok(bytes) = std::fs::read(record_path.as_path()) else {
         return Ok(());
@@ -241,7 +297,7 @@ pub(crate) async fn reclaim_orphan(home: &AbsolutePathBuf) -> anyhow::Result<()>
             pid = record.pid,
             "reclaiming worker orphaned by a prior API crash"
         );
-        terminate(record.pid);
+        terminate(record.pid)?;
         let deadline = Instant::now() + RECLAIM_TIMEOUT;
         while Instant::now() < deadline
             && probe(record.pid)
@@ -249,9 +305,93 @@ pub(crate) async fn reclaim_orphan(home: &AbsolutePathBuf) -> anyhow::Result<()>
         {
             tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
         }
+        anyhow::ensure!(
+            !probe(record.pid)
+                .is_some_and(|info| !info.zombie && info.start_time == record.start_time),
+            "orphaned worker did not exit"
+        );
     }
     let _ = std::fs::remove_file(record_path.as_path());
     Ok(())
+}
+
+/// Atomically publish a synced record, so an API crash cannot leave partial JSON.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_record(
+    home: &AbsolutePathBuf,
+    name: &str,
+    record: &impl Serialize,
+) -> anyhow::Result<File> {
+    let mut file = tempfile::NamedTempFile::new_in(home)?;
+    file.write_all(&serde_json::to_vec(record)?)?;
+    file.as_file().sync_all()?;
+    let file = file.persist(home.join(name))?;
+    File::open(home)?.sync_all()?;
+    Ok(file)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn reclaim_intent(home: &AbsolutePathBuf) -> anyhow::Result<()> {
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open(home.join(WORKER_INTENT))?;
+    let intent: SpawnIntent = serde_json::from_reader(&file)?;
+    let deadline = Instant::now() + RECLAIM_TIMEOUT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(error) => return Err(error.into()),
+        }
+        // A child may not have exec'd yet. Its inherited lock prevents a new
+        // spawn until its unique argv appears, or it exits and releases the lock.
+        for pid in processes_with_command(&intent.command, deadline).await? {
+            if let Some(info) = probe(pid)
+                && !info.zombie
+                && processes_with_command(&intent.command, deadline)
+                    .await?
+                    .contains(&pid)
+                && probe(pid).is_some_and(|current| {
+                    current.start_time == info.start_time
+                        && current.start_time_subsecond == info.start_time_subsecond
+                })
+            {
+                tracing::warn!(pid, "reclaiming worker from spawn intent");
+                terminate(pid)?;
+            }
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "spawn intent is still in use; refusing to start another worker"
+        );
+        tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn processes_with_command(command: &str, deadline: Instant) -> anyhow::Result<Vec<u32>> {
+    let output = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        Command::new("/bin/ps")
+            .args(["-axww", "-o", "pid=", "-o", "command="])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("spawn intent is still in use; process inspection timed out")??;
+    anyhow::ensure!(
+        output.status.success(),
+        "failed to inspect worker process identity"
+    );
+    Ok(String::from_utf8(output.stdout)?
+        .lines()
+        .filter_map(|line| {
+            let (pid, args) = line.trim_start().split_once(char::is_whitespace)?;
+            let pid = pid.parse().ok()?;
+            (args.trim_start() == command).then_some(pid)
+        })
+        .collect())
 }
 
 /// Read a process's start time and whether it has become a zombie, or `None`
@@ -264,6 +404,7 @@ fn probe(pid: u32) -> Option<ProcessInfo> {
     let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
     Some(ProcessInfo {
         start_time: fields.get(/*starttime*/ 19)?.parse().ok()?,
+        start_time_subsecond: 0,
         zombie: fields.first().is_some_and(|state| *state == "Z"),
     })
 }
@@ -284,6 +425,7 @@ fn probe(pid: u32) -> Option<ProcessInfo> {
     };
     (written == size).then_some(ProcessInfo {
         start_time: info.pbi_start_tvsec,
+        start_time_subsecond: info.pbi_start_tvusec,
         zombie: info.pbi_status == libc::SZOMB,
     })
 }
@@ -296,14 +438,20 @@ fn probe(_pid: u32) -> Option<ProcessInfo> {
 }
 
 #[cfg(unix)]
-fn terminate(pid: u32) {
-    if let Ok(pid) = i32::try_from(pid) {
-        // SAFETY: sends SIGKILL to a PID authenticated as our orphaned worker.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
+fn terminate(pid: u32) -> anyhow::Result<()> {
+    let pid = i32::try_from(pid)?;
+    anyhow::ensure!(pid > 0, "invalid worker process ID");
+    // SAFETY: sends SIGKILL to a PID authenticated as our orphaned worker.
+    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error.into());
         }
     }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn terminate(_pid: u32) {}
+fn terminate(_pid: u32) -> anyhow::Result<()> {
+    Ok(())
+}

@@ -5,7 +5,11 @@ mod runtime;
 use anyhow::Context;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cargo_bin::cargo_bin;
+use serde_json::Value;
+use serde_json::json;
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::process::Command;
 
 const DEADLINE: Duration = Duration::from_secs(/*secs*/ 30);
 
@@ -85,6 +89,152 @@ async fn missing_worker_executable_is_reported() -> anyhow::Result<()> {
         .err()
         .context("missing executable should fail")?;
     assert!(error.to_string().contains("failed to start app-server"));
+    Ok(())
+}
+
+// Run in a subprocess so SIGKILL skips both Worker::drop and the record write.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn spawn_window_owner() -> anyhow::Result<()> {
+    if let Some(home) = std::env::var_os("CODEX_AGENTS_API_TEST_SPAWN_WINDOW_HOME") {
+        worker(std::path::Path::new(&home))
+            .await?
+            .shutdown()
+            .await?;
+        anyhow::bail!("spawn window hook did not stop the owner");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn worker_spawned_before_record_is_reclaimed_after_owner_crash() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let pid_path = home.path().join("spawned-pid");
+    let mut owner = Command::new(std::env::current_exe()?)
+        .args(["--exact", "spawn_window_owner", "--nocapture"])
+        .env("CODEX_AGENTS_API_TEST_SPAWN_WINDOW_HOME", home.path())
+        .env("CODEX_AGENTS_API_TEST_SPAWN_WINDOW_PID", &pid_path)
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let pid: u32 = tokio::time::timeout(DEADLINE, async {
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_path)
+                && let Ok(pid) = pid.parse()
+            {
+                return anyhow::Ok(pid);
+            }
+            anyhow::ensure!(
+                owner.try_wait()?.is_none(),
+                "spawn window owner exited early"
+            );
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        }
+    })
+    .await??;
+    assert!(!home.path().join("agents-api-worker.json").exists());
+    let intent: Value = serde_json::from_slice(&std::fs::read(
+        home.path().join("agents-api-worker-intent.json"),
+    )?)?;
+    let (_, socket) = intent["command"]
+        .as_str()
+        .context("spawn command")?
+        .strip_suffix(" --strict-config")
+        .context("strict config")?
+        .split_once(" --listen unix://")
+        .context("worker socket")?;
+    let socket = AbsolutePathBuf::try_from(std::path::PathBuf::from(socket))?;
+    runtime::connect(socket.clone(), DEADLINE)
+        .await?
+        .shutdown()
+        .await?;
+    owner.kill().await?;
+    // It really outlived its owner with no completed ownership record.
+    runtime::connect(socket.clone(), DEADLINE)
+        .await?
+        .shutdown()
+        .await?;
+    let replacement = worker(home.path()).await?;
+    pretty_assertions::assert_ne!(replacement.id(), Some(pid));
+    runtime::connect(replacement.socket().clone(), DEADLINE)
+        .await?
+        .shutdown()
+        .await?;
+    assert!(
+        runtime::connect(socket, Duration::from_millis(/*millis*/ 200))
+            .await
+            .is_err()
+    );
+    replacement.shutdown().await?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn pid_reused_record_does_not_signal_foreign_process() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let mut foreign = Command::new("/bin/sleep")
+        .arg("30")
+        .kill_on_drop(true)
+        .spawn()?;
+    std::fs::write(
+        home.path().join("agents-api-worker.json"),
+        serde_json::to_vec(&json!({
+            "pid": foreign.id().context("foreign PID")?,
+            "start_time": u64::MAX,
+        }))?,
+    )?;
+    let replacement = worker(home.path()).await?;
+    assert!(
+        foreign.try_wait()?.is_none(),
+        "a reused PID must not be signaled"
+    );
+    replacement.shutdown().await?;
+    foreign.kill().await?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn stale_spawn_intent_does_not_signal_another_worker() -> anyhow::Result<()> {
+    let foreign_home = tempfile::tempdir()?;
+    let foreign = worker(foreign_home.path()).await?;
+    let home = tempfile::tempdir()?;
+    // Even an authentic PID/start time is insufficient when it belongs to a
+    // different spawn. The stale intent's unique command does not match it.
+    std::fs::copy(
+        foreign_home.path().join("agents-api-worker.json"),
+        home.path().join("agents-api-worker.json"),
+    )?;
+    std::fs::write(
+        home.path().join("agents-api-worker-intent.json"),
+        serde_json::to_vec(&json!({
+            "command": "codex-app-server --listen unix:///missing-worker.sock --strict-config",
+        }))?,
+    )?;
+    let intent = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(home.path().join("agents-api-worker-intent.json"))?;
+    intent.try_lock()?;
+    let error = worker(home.path())
+        .await
+        .err()
+        .context("unidentified locked intent must prevent another spawn")?;
+    assert!(error.to_string().contains("spawn intent is still in use"));
+    runtime::connect(foreign.socket().clone(), DEADLINE)
+        .await?
+        .shutdown()
+        .await?;
+    drop(intent);
+    let replacement = worker(home.path()).await?;
+    runtime::connect(foreign.socket().clone(), DEADLINE)
+        .await?
+        .shutdown()
+        .await?;
+    replacement.shutdown().await?;
+    foreign.shutdown().await?;
     Ok(())
 }
 
