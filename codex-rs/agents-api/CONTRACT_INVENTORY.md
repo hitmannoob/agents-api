@@ -1,6 +1,6 @@
 # Agents API contract inventory
 
-Updated: 2026-10-12 (contract review date 2026-09-22).
+Updated: 2026-10-13 (contract review date 2026-09-22).
 
 This is the pinned G00 parity denominator for this service. The machine-readable
 inventory is [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json). It records every
@@ -52,7 +52,7 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-12) is 57 verified, 2 implemented, 3 partial, and
+The current count (2026-10-13) is 57 verified, 2 implemented, 3 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
 of scope since 2026-10-06. Verified: ART-001..004, SUB-001..006, TRN-002,
 AGT-001, AGT-003..005, SES-001..002, SES-004..005, EVT-001, ENV-001, ITM-001, TRN-001, VLT-001..004, CRD-001..005, FIL-001..005,
@@ -70,6 +70,14 @@ has no public compaction settings or items. BEH-008 stays partial only for a
 real-provider web search run; inline authorization and request metadata are
 verified by `mcp::mcp_inline_authorization_and_metadata_survive_session_snapshots`
 and the authorization unit tests (mock MCP server).
+
+G08 skills/plugins isolation is verified locally (2026-10-13):
+`environments::skills_and_plugins_stay_isolated_between_sessions_across_cold_resume`
+checks distinct capability-directory skills, plugin skills, and pinned Skills
+API versions in two sessions' model-visible developer catalogs before and after
+API/worker restart and executor reconnection. Later defaults do not replace the
+pins; neither session receives the other's selections. Inventory statuses and
+counts are unchanged.
 
 ## What is pinned
 

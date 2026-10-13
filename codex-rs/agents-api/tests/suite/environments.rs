@@ -811,3 +811,118 @@ async fn self_hosted_sessions_install_their_pinned_skills() -> anyhow::Result<()
     })
     .await?
 }
+
+#[tokio::test]
+async fn skills_and_plugins_stay_isolated_between_sessions_across_cold_resume() -> anyhow::Result<()>
+{
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspaces = [tempfile::tempdir()?, tempfile::tempdir()?];
+        let provider = create_mock_responses_server_repeating_assistant("finished").await;
+        MockResponsesConfig::new(&provider.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let client = reqwest::Client::new();
+        let mut selections = Vec::new();
+
+        for round in 0..2 {
+            let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+            let (base, server) = capabilities::serve(&api).await?;
+            let registry = format!("{}/registry", base.trim_end_matches("/v1"));
+            api.configure_environments(ENVIRONMENT_KEY.into(), registry.clone())?;
+
+            if round == 0 {
+                for (label, workspace) in ["alpha", "beta"].into_iter().zip(&workspaces) {
+                    let workspace = workspace.path().canonicalize()?;
+                    let capability_path = workspace.join("capabilities");
+                    std::fs::create_dir_all(capability_path.join(format!("directory-{label}")))?;
+                    std::fs::write(capability_path.join(format!("directory-{label}/SKILL.md")),
+                        format!("---\nname: directory-{label}\ndescription: Directory skill for {label}.\n---\nUse it.\n"))?;
+                    let plugin_path = workspace.join(format!("plugin-{label}"));
+                    std::fs::create_dir_all(plugin_path.join(".codex-plugin"))?;
+                    std::fs::create_dir_all(plugin_path.join("skills/demo"))?;
+                    std::fs::write(plugin_path.join(".codex-plugin/plugin.json"),
+                        serde_json::to_vec(&json!({"name":format!("plugin-{label}"),"interface":{"displayName":format!("Plugin {label}")}}))?)?;
+                    std::fs::write(plugin_path.join("skills/demo/SKILL.md"),
+                        format!("---\nname: plugin-skill-{label}\ndescription: Plugin skill for {label}.\n---\nUse it.\n"))?;
+                    let directories = json!([capability_path, plugin_path]);
+                    let skill = skills::create(&client, &base, TOKEN, &format!("pinned-{label}")).await?;
+                    let skill_id = skill["id"].as_str().context("skill id")?;
+                    let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), json!({
+                        "agent":{"model":"mock-model"},"environment":{"type":"self_hosted",
+                        "workspace_directory":workspace,"capability_directories":directories,
+                        "skills":[{"type":"skill_reference","skill_id":skill_id}]}
+                    })).await?;
+                    let session_id = session["id"].as_str().context("session id")?.to_owned();
+                    let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
+                    let pins = json!([{"type":"skill_reference","skill_id":skill_id,"version":"1",
+                        "name":format!("pinned-{label}"),"description":"A skill for tests. Use when testing."}]);
+                    selections.push((label, session_id, environment_id, directories, pins));
+
+                    // Later defaults must not replace either session's pin.
+                    let later = skills::skill_zip(&format!("pinned-{label}"), &format!("Changed default for {label}."), &[])?;
+                    skills::upload(&client, &format!("{base}/skills/{skill_id}/versions"), TOKEN,
+                        &[("default", "true")], &[("later.zip", &later)]).await?.error_for_status()?;
+                }
+            }
+
+            let mut urls = Vec::new();
+            let mut executors = Vec::new();
+            for (_, session_id, environment_id, directories, pins) in &selections {
+                let url = format!("{base}/agents/sessions/{session_id}");
+                let session = request(&client, reqwest::Method::GET, &url, Value::Null).await?;
+                assert_eq!(&session["environment"]["capability_directories"], directories);
+                let environment = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?;
+                assert_eq!(&environment["skills"], pins);
+                let mut stream = client.get(format!("{url}/events")).bearer_auth(TOKEN).send().await?.error_for_status()?;
+                executors.push(executor(&registry, environment_id)?);
+                until_event(&mut stream, "agent.session.environment.connected").await?;
+                urls.push(url);
+            }
+
+            // Submit both sessions together to exercise the shared worker.
+            let (alpha, beta) = tokio::try_join!(
+                send(&client, &urls[0], message("isolation-alpha")),
+                send(&client, &urls[1], message("isolation-beta")),
+            )?;
+            assert_eq!((alpha, beta), (reqwest::StatusCode::ACCEPTED, reqwest::StatusCode::ACCEPTED));
+            tokio::try_join!(
+                idle(&client, &urls[0], /*expected_turns*/ round + 1),
+                idle(&client, &urls[1], /*expected_turns*/ round + 1),
+            )?;
+
+            let captures = provider.received_requests().await.context("requests")?;
+            let requests = captures.iter().filter(|request| request.url.path().ends_with("/responses"))
+                .map(|request| serde_json::from_slice::<Value>(&request.body)).collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(requests.len(), (round + 1) * 2);
+            for (label, other) in [("alpha", "beta"), ("beta", "alpha")] {
+                let requests = requests.iter().skip(round * 2).filter(|request| request["input"].to_string().contains(&format!("isolation-{label}"))).collect::<Vec<_>>();
+                assert_eq!(requests.len(), 1, "{label}, round {round}");
+                // Codex offers directory, plugin, and pinned skills in a
+                // developer message, not in the caller's user input.
+                let catalog = requests[0]["input"].as_array().context("model input")?.iter()
+                    .filter(|item| item["role"] == "developer")
+                    .flat_map(|item| item["content"].as_array().into_iter().flatten())
+                    .filter_map(|part| part["text"].as_str())
+                    .filter(|text| text.contains("<skills_instructions>"))
+                    .collect::<Vec<_>>().join("\n");
+                for name in [format!("directory-{label}"), format!("plugin-{label}:plugin-skill-{label}"), format!("pinned-{label}")] {
+                    assert!(catalog.contains(&name), "{name} missing in round {round}: {catalog}");
+                }
+                let offered = requests[0].to_string();
+                for name in [format!("directory-{other}"), format!("plugin-{other}"), format!("plugin-skill-{other}"), format!("pinned-{other}"), "Changed default".to_owned()] {
+                    assert!(!offered.contains(&name), "{name} leaked in round {round}: {offered}");
+                }
+            }
+
+            // Shut down the API and worker; the next round reopens the same
+            // home/data directories and reconnects both executors.
+            for executor in executors {
+                executor.abort();
+            }
+            server.abort();
+            api.shutdown().await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}

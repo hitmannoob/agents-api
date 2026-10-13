@@ -32,7 +32,7 @@ in [GOALS.md](GOALS.md).
 
 ## Current status
 
-Updated: 2026-10-12. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
+Updated: 2026-10-13. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
 per-operation detail lives in its `remaining` fields.
 
 **Scorecard:** 67 operations: 57 `verified`, 2 `implemented`, 3 `partial`,
@@ -66,7 +66,7 @@ only, and there is no Windows evidence. See
 | Subagents | SUB-001..006 | 6 verified | Resources, paginated items and turns per subagent, cancellation, restart continuity | None. `instructions` is always null and `closed` never occurs: Codex V2 reports neither, accepted as engine limits (2026-10-12) |
 | Functions | (in EVT/BEH-007) | verified | Tagged functions, result/error flow, content parts, duplicate and race handling, deferred functions found through tool search (offered up front on models without it) | None |
 | MCP and built-ins | (BEH-008) | partial | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence) | A real-provider web search run |
-| Harness features | (BEH-009, G08) | BEH-009 verified; G08 compaction/programmatic verified locally | Multi-agent delegation within Codex V2 limits; automatic compaction preserves full public history through cold resume; sandboxed V8 nested function calls, cancellation, fail-closed host and model-mode refusals | Skills/plugins cross-session isolation (G08); no public compaction controls/items in the pinned contract |
+| Harness features | (BEH-009, G08) | BEH-009 verified; G08 complete locally (2026-10-13) | Multi-agent delegation within Codex V2 limits; automatic compaction preserves full public history through cold resume; sandboxed V8 nested function calls, cancellation, fail-closed host and model-mode refusals; capability-directory skills, plugin skills, and pinned Skills API versions isolated through API/worker restart | None within the parity target; no public compaction controls/items in the pinned contract |
 | Environments | ENV-001..003 | 1 verified (ENV-001), 2 implemented | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss | One real-provider run; Windows and cross-OS execution (ENV-002..003). Self-hosted environments never expire |
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
 | Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |
@@ -82,10 +82,10 @@ only, and there is no Windows evidence. See
 
 Ordered by the number of rows each item unblocks:
 
-1. **Capability evidence:** a real-provider web search run (BEH-008) and
-   skills/plugins cross-session isolation (G08). Tool search, automatic
-   compaction, and programmatic calling have local mock-provider evidence
-   (2026-10-12); named tests live in the inventory.
+1. **Capability evidence:** a real-provider web search run (BEH-008).
+   Tool search, automatic compaction, programmatic calling, and skills/plugins
+   cross-session isolation through cold resume have local mock-provider evidence
+   (2026-10-12/13); named tests live in the inventory.
 2. **Platform evidence (G12):** Windows and cross-OS worker/executor runs, SDK
    scenarios for every implemented resource, and
    provider interoperability (BEH-018).

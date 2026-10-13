@@ -94,8 +94,9 @@ Current boundaries:
   `self_hosted` environments.
 - Tool search, programmatic calling, inline MCP authorization, request metadata,
   and automatic compaction execute locally (2026-10-12; evidence in G06–G08).
-  Web search still needs a real-provider run; skills/plugins need cross-session
-  isolation evidence. The pinned contract has no compaction controls/items.
+  Web search still needs a real-provider run; skills/plugins stay isolated
+  through cold resume (2026-10-13). The pinned contract has no compaction
+  controls/items.
   `environment_variable` credentials and OAuth refresh are out of scope.
 
 ## Execution order and tracking
@@ -114,7 +115,7 @@ fixture design may start earlier.
 | G05 | Complete events, items, turns, and usage (complete locally) | G00, G02 | Text deltas, item families, transitions, usage |
 | G06 | Complete function-tool behavior (complete locally except deferred functions/tool search) | G00, G04, G05 | Content/limits, deferred tools, failure cases |
 | G07 | Complete MCP and built-in controls (HTTP MCP complete locally; built-in capabilities open) | G00, G03, G05 | MCP, built-in capabilities, isolation |
-| G08 | Expose remaining harness capabilities (subagents, automatic compaction, programmatic calls complete locally; skills/plugins isolation open) | G00, G03, G05, G07 | Delegation, compaction, programmatic calls, skills/plugins |
+| G08 | Expose remaining harness capabilities (complete locally 2026-10-13) | G00, G03, G05, G07 | Delegation, compaction, programmatic calls, skills/plugins |
 | G09 | Implement environment lifecycle (self-hosted complete locally; managed out of scope) | G00, G01, G02 | Self-hosted attachment, managed provisioning, lifecycle recovery |
 | G10 | Implement files and artifacts (complete locally for self-hosted, including the Skills API) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
 | G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
@@ -823,7 +824,7 @@ Remaining:
   (mock provider); a real-provider run is still required.
 - Programmatic tool calling belongs to G08.
 
-## G08 — Remaining harness features (subagents, compaction, programmatic calls complete locally)
+## G08 — Remaining harness features (complete locally 2026-10-13)
 
 **Outcome:** supported harness features are configurable through the API and have
 correct session, event, and ownership semantics.
@@ -847,8 +848,15 @@ correct session, event, and ownership semantics.
   Most current gpt-6-* and gpt-5.6-* catalog entries are `code_mode_only`.
   Evidence: `programmatic::programmatic_tool_calls_reach_the_application_and_respect_the_model`
   (nested result, plain-session isolation, cancellation, both refusals).
-- [ ] Add supported skills/plugin selection and configuration. Persist selections
+- [x] Add supported skills/plugin selection and configuration. Persist selections
   so restart does not silently change the session's enabled behavior.
+  Evidence (2026-10-13): `environments::skills_and_plugins_stay_isolated_between_sessions_across_cold_resume`
+  verifies distinct capability-directory skills, plugin skills, and pinned
+  Skills API versions in two sessions' model requests before and after API/worker
+  restart and executor reconnection. Later defaults do not replace the pins.
+  The fixture plugin carries only a skill, so plugin-provided MCP servers and
+  apps are not exercised. The restart is in-process (API and worker), like
+  the other cold-resume tests.
 - [x] Keep API adaptation in this crate or an appropriate existing crate. Add to
   `codex-core` only when the missing behavior belongs in the harness itself.
   Harness additions (2026-10-12): `codex-config` stores per-server `request_meta`,
@@ -864,7 +872,7 @@ cancellation, compaction followed by cold resume, nested function callbacks, and
 skills/plugins isolated between sessions. Harness logic changes require the
 repository's relevant integration tests in addition to API tests.
 
-Triage (2026-09-28; updated 2026-10-12):
+Triage (2026-09-28; updated 2026-10-13):
 - **Compaction:** the pinned contract exposes no compaction controls or
   outcomes ("Summarizing previous work to manage its context window" is
   automatic). Automatic compaction and cold resume are now verified with a
@@ -874,7 +882,9 @@ Triage (2026-09-28; updated 2026-10-12):
   Update (2026-10-12): capability directories (G09) and pinned Skills API
   versions (G10) now reach self-hosted sessions. Both selections persist:
   Codex keeps the thread's capability roots, and pins live in the database.
-  The open checklist item still lacks a cross-session isolation test.
+  Update (2026-10-13): `environments::skills_and_plugins_stay_isolated_between_sessions_across_cold_resume`
+  verifies both selections stay isolated in model-visible developer catalogs
+  through API/worker restart and executor reconnection; G08 is complete locally.
 - **Programmatic tool calling:** the V8 blocker is resolved. Codex-published
   rusty_v8 artifacts and their manifest match `third_party/v8` checksums.
   The host is built and shipped beside `codex-app-server`; enabled execution
@@ -2133,11 +2143,11 @@ above and in git.
    and a second decision pass the same day.
 5. **Deferred functions and tool search (G06): complete locally 2026-10-12.**
    Built-in web search (G07) still needs real-provider evidence.
-6. **G08 automatic compaction and programmatic tool calling: complete locally
-   2026-10-12.** No public compaction controls exist in the pinned contract;
+6. **G08: complete locally 2026-10-13.** No public compaction controls exist in
+   the pinned contract;
    nested calls, cancellation, model refusals, and compaction followed by cold
-   resume have mock-provider evidence. Skills/plugins cross-session isolation
-   remains open.
+   resume have mock-provider evidence. Capability-directory skills, plugin
+   skills, and pinned Skills API versions stay isolated through cold resume.
 7. **G12 evidence gaps.** SDK scenarios for every implemented resource
    a Windows/cross-OS worker and executor run, and
    provider interoperability (BEH-018).
