@@ -995,6 +995,8 @@ timeout = 900
         .await?;
     let mut saw_exec_command_begin = false;
     let mut exec_command_begin_command = None;
+    let mut output_deltas = Vec::new();
+    let mut saw_exec_command_end = false;
     let mut saw_patch_denial_approval = false;
     if !managed_network_enabled {
         loop {
@@ -1006,6 +1008,21 @@ timeout = 900
                 EventMsg::ExecCommandBegin(event) if event.call_id == CALL_ID => {
                     saw_exec_command_begin = true;
                     exec_command_begin_command = Some(event.command);
+                }
+                EventMsg::ExecCommandOutputDelta(event)
+                    if event.call_id == CALL_ID
+                        && matches!(scenario, PushedExecScenario::Complete) =>
+                {
+                    assert!(saw_exec_command_begin, "output delta must follow begin");
+                    assert!(!saw_exec_command_end, "output delta must precede end");
+                    output_deltas.extend(event.chunk);
+                }
+                EventMsg::ExecCommandEnd(event)
+                    if event.call_id == CALL_ID
+                        && matches!(scenario, PushedExecScenario::Complete) =>
+                {
+                    assert_eq!(output_deltas, COMPLETE_OUTPUT.as_bytes());
+                    saw_exec_command_end = true;
                 }
                 EventMsg::ExecApprovalRequest(approval) if deny_read => {
                     assert_eq!(approval.call_id, CALL_ID);
@@ -1044,6 +1061,10 @@ timeout = 900
                 EventMsg::TurnComplete(_) => break,
                 _ => {}
             }
+        }
+        if matches!(scenario, PushedExecScenario::Complete) {
+            assert!(saw_exec_command_end, "expected command completion");
+            assert_eq!(output_deltas, COMPLETE_OUTPUT.as_bytes());
         }
     }
     if matches!(

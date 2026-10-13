@@ -537,10 +537,11 @@ impl UnifiedExecProcessManager {
             }
         };
         let UnifiedExecAttempt {
-            process,
+            mut process,
             metrics_sidecar,
             permissions,
         } = attempt;
+        let output_receiver = process.take_output_receiver()?;
         let process = Arc::new(process);
         if let Some(completion) = completion.as_ref() {
             let _ = completion.process.set(Arc::clone(&process));
@@ -591,7 +592,7 @@ impl UnifiedExecProcessManager {
         );
         emitter.emit(event_ctx, ToolEventStage::Begin).await;
 
-        start_streaming_output(&process, context);
+        start_streaming_output(&process, context, output_receiver);
         let start = Instant::now();
         // Persist live sessions before the initial yield wait so interrupting the
         // turn cannot drop the last Arc and terminate the background process.
@@ -655,6 +656,12 @@ impl UnifiedExecProcessManager {
             }
         }
         let wall_time = Instant::now().saturating_duration_since(start);
+
+        if !process_started_alive {
+            // Short-lived commands emit their end event here rather than in the
+            // exit watcher, but must also wait for all output deltas first.
+            process.output_drained_notify().notified().await;
+        }
 
         let original_token_count = usize::try_from(approx_tokens_from_byte_count(
             collected_output.total_bytes(),

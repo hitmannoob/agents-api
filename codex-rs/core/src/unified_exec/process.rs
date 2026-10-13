@@ -106,6 +106,7 @@ enum ProcessHandle {
 pub(crate) struct UnifiedExecProcess {
     process_handle: ProcessHandle,
     output_tx: broadcast::Sender<Vec<u8>>,
+    output_rx: Option<broadcast::Receiver<Vec<u8>>>,
     output: OutputHandles,
     output_drained: Arc<Notify>,
     interaction_lock: Arc<Mutex<()>>,
@@ -143,12 +144,14 @@ impl UnifiedExecProcess {
             cancellation_token: CancellationToken::new(),
         };
         let output_drained = Arc::new(Notify::new());
-        let (output_tx, _) = broadcast::channel(64);
+        // Retain deltas before the output task starts and the early-exit wait.
+        let (output_tx, output_rx) = broadcast::channel(64);
         let (state_tx, state_rx) = watch::channel(ProcessState::default());
 
         Self {
             process_handle,
             output_tx,
+            output_rx: Some(output_rx),
             output,
             output_drained,
             interaction_lock: Arc::new(Mutex::new(())),
@@ -191,8 +194,12 @@ impl UnifiedExecProcess {
         &self.output
     }
 
-    pub(super) fn output_receiver(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
-        self.output_tx.subscribe()
+    pub(super) fn take_output_receiver(
+        &mut self,
+    ) -> Result<broadcast::Receiver<Vec<u8>>, UnifiedExecError> {
+        self.output_rx.take().ok_or_else(|| {
+            UnifiedExecError::process_failed("output receiver already taken".to_string())
+        })
     }
 
     pub(super) fn cancellation_token(&self) -> CancellationToken {

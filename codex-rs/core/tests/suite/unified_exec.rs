@@ -1111,6 +1111,83 @@ async fn unified_exec_emits_output_delta_for_exec_command() -> Result<()> {
     Ok(())
 }
 
+#[test_case::test_case("printf 'EARLY\\n'", "EARLY\n"; "early_exit")]
+#[test_case::test_case("printf 'EARLY\\n'; sleep 1; printf 'LATE\\n'", "EARLY\nLATE\n"; "later_output")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unified_exec_emits_initial_output_deltas_in_order(
+    command: &str,
+    expected_output: &str,
+) -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .disable(Feature::ShellSnapshot)
+            .expect("disable shell snapshots for local process coverage");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let call_id = "uexec-initial-delta";
+    let args = json!({
+        "cmd": command,
+        "yield_time_ms": 2_000,
+    });
+    mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "finished"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    submit_unified_exec_turn(&test, "emit initial output", PermissionProfile::Disabled).await?;
+
+    let mut began = false;
+    let mut deltas = Vec::new();
+    let mut end_event = None;
+    let mut turn_completed = false;
+    while !turn_completed || end_event.is_none() {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::ExecCommandBegin(event) if event.call_id == call_id => {
+                assert!(!began, "expected one begin event");
+                began = true;
+            }
+            EventMsg::ExecCommandOutputDelta(event) if event.call_id == call_id => {
+                assert!(began, "output delta must follow begin");
+                assert!(end_event.is_none(), "output delta must precede end");
+                deltas.extend(event.chunk);
+            }
+            EventMsg::ExecCommandEnd(event) if event.call_id == call_id => {
+                assert!(began, "end must follow begin");
+                assert!(end_event.is_none(), "expected one end event");
+                assert_eq!(deltas, expected_output.as_bytes());
+                end_event = Some(event);
+            }
+            EventMsg::TurnComplete(_) => turn_completed = true,
+            _ => {}
+        }
+    }
+
+    let end_event = end_event.expect("expected command completion");
+    assert_eq!(deltas, expected_output.as_bytes());
+    assert_eq!(
+        (end_event.exit_code, end_event.aggregated_output),
+        (0, expected_output.to_string())
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_full_lifecycle_with_background_end_event() -> Result<()> {
     // TODO(anp): Remove after unified-exec fixtures use target-native commands.
