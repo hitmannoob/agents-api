@@ -75,14 +75,17 @@ Modal and locally (2026-10-07). The earlier real-provider suite runs were on
 macOS. OpenAI-API (not OpenRouter) evidence remains open.
 
 Latest verification (2026-11-13, recorded under G12 and the dated section below):
-Linux full crate 93/93 including the three pinned SDK tests; recovery/streaming
-43/43 three times on a separate Modal Sandbox. Core `unified_exec` passed
-184/191; the seven failures require bubblewrap namespaces unavailable under
-gVisor, and all cited EVT-002 tests passed. The eight original real-provider
-scenarios passed via OpenRouter for 55,145 tokens; `saved_agent` and
-`session_update` passed for 16,228 tokens. Counts: 67 operations, 62 verified,
-0 implemented, 0 partial, 5 missing (out of scope); 18 behaviors, 16 verified,
-0 partial, 2 missing (BEH-011 out of scope; BEH-018 open).
+Linux full crate 99/99 with `--run-ignored all` after the public-URL fix, crate
+clippy clean; the earlier crate run passed 93/93 including the three pinned SDK
+tests. Recovery/streaming passed 43/43 three times on a separate Modal Sandbox.
+Core `unified_exec` passed 184/191; the seven failures require bubblewrap
+namespaces unavailable under gVisor, and all cited EVT-002 tests passed.
+The separate executor Sandbox passed all seven public-tunnel interop checks,
+verifying BEH-018 by project decision. The subsequent full real-provider suite
+passed all ten scenarios via OpenRouter for 81,365 tokens. Counts: 67 operations,
+62 verified, 0 implemented, 0 partial, 5 missing (out of scope); 18 behaviors,
+17 verified, 0 partial, 1 missing (BEH-011 out of scope). Only G12's SDK-scenario
+audit remains in scope.
 
 Current boundaries:
 
@@ -140,7 +143,7 @@ fixture design may start earlier.
 | G09 | Implement environment lifecycle (self-hosted complete locally; managed out of scope) | G00, G01, G02 | Self-hosted attachment, managed provisioning, lifecycle recovery |
 | G10 | Implement files and artifacts (complete locally for self-hosted, including the Skills API) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
 | G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
-| G12 | Prove end-to-end parity (open: SDK scenarios for every resource, provider interoperability) | All applicable goals | Contract suite, real providers, failure matrix |
+| G12 | Prove end-to-end parity (open: SDK scenarios for every resource; provider interoperability verified 2026-11-13) | All applicable goals | Contract suite, real providers, failure matrix |
 | G13 | Projects, API keys, and permissions (complete locally 2026-10-12; Admin API out of scope) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
 
 Ship bounded changes within each goal. Do not combine a supervisor rewrite,
@@ -1648,6 +1651,8 @@ including Windows shutdown and orphan containment, are outside the parity target
   Include raw HTTP fixtures where SDK parsing hides a wire-contract discrepancy.
 - [x] Run a controlled real-provider suite with explicitly configured credentials
   and budget. Separate provider-dependent failures from service contract failures.
+- [x] Verify provider interoperability (BEH-018): stock executor in its own Modal
+  Sandbox through the public https tunnel (project decision, 2026-11-13).
 - [x] Exercise concurrent sessions, slow subscribers, process crashes, network
   interruptions, expired credentials, partial persistence, and resource cleanup.
 - [x] Verify upgrade compatibility for saved configuration/history and any retained
@@ -1657,14 +1662,17 @@ including Windows shutdown and orphan containment, are outside the parity target
   quotas, health checks, and graceful deployment. Add distributed worker routing
   only if deployment requirements call for it; it is not proof of public parity.
 
-Evidence (2026-11-13, Linux and real providers): the full crate passed 93/93,
-recovery/streaming passed 43/43 three times, and the real-provider suite passed
-all eight original scenarios plus `saved_agent` and `session_update`. The dated
-[Linux and real-provider evidence](#linux-and-real-provider-evidence-2026-11-13)
+Evidence (2026-11-13, Linux and real providers): the full crate first passed
+93/93, recovery/streaming passed 43/43 three times, and the real-provider suite
+passed all eight original scenarios plus `saved_agent` and `session_update`.
+The dated [Linux and real-provider evidence](#linux-and-real-provider-evidence-2026-11-13)
 section records the platform, core sandbox limitation, tokens, observations,
-and promotions. SDK scenarios for every implemented resource/capability remain
-unchecked; BEH-018 stays open pending a project decision on the Modal executor
-run. Modal cannot enforce `serve.py`'s read-only Codex sandbox under gVisor;
+and promotions. The later [provider interoperability](#provider-interoperability-2026-11-13)
+evidence records the public-URL fix (99/99 and crate clippy clean), separate
+executor Sandbox (7/7), project decision verifying BEH-018, and subsequent full
+real-provider suite (ten scenarios, 81,365 tokens). SDK scenarios for every
+implemented resource/capability remain unchecked. Modal cannot enforce
+`serve.py`'s read-only Codex sandbox under gVisor;
 self-hosted commands run on the unsandboxed executor and are unaffected.
 
 Evidence (2026-10-06, real providers, faults, and operations):
@@ -2184,8 +2192,8 @@ AGT-001 and SES-001 have no remaining in-scope variants and move to verified.
 At this milestone BEH-008 stayed partial for a real-provider web search run
 (closed 2026-11-13). Current inventory after the 2026-11-13 evidence below:
 62 verified, 0 implemented, 0 partial, and 5 missing operations (all missing
-outside the parity target); 16 of 18 behavior rows verified, 0 partial, 2 missing
-(BEH-011 out of scope; BEH-018 open).
+outside the parity target); 17 of 18 behavior rows verified, 0 partial, 1 missing
+(BEH-011 out of scope).
 
 Verification (local macOS, mock provider/MCP, real V8 host): `CARGO_INCREMENTAL=0`
 and the verified `RUSTY_V8_ARCHIVE` / `RUSTY_V8_SRC_BINDING_PATH` were set for all
@@ -2290,12 +2298,13 @@ Codex's rollout `turn_context` recorded turn 1 `model=openai/gpt-5-mini`
 confirmation of the serving model was not checked.
 
 AGT-002, SES-003, BEH-002, BEH-008, and BEH-010 move to verified. BEH-010 has a
-second real-provider self-hosted run, its first on Linux. BEH-018 stays
-missing/open: a Modal Sandbox ran the executor, but whether that counts as
-provider interoperability is an open project decision. The G12 item to expand
-official SDK scenarios to every implemented resource/capability stays unchecked.
-Counts: 67 operations, 62 verified, 0 implemented, 0 partial, 5 missing (all
-out-of-scope environment templates); 18 behaviors, 16 verified, 0 partial,
+second real-provider self-hosted run, its first on Linux. At this milestone
+BEH-018 stayed missing pending a project decision: the executor ran in the
+service Sandbox over loopback. The later decision and separate-Sandbox evidence
+below close that gap. The G12 item to expand official SDK scenarios to every
+implemented resource/capability stays unchecked.
+Counts at this milestone: 67 operations, 62 verified, 0 implemented, 0 partial,
+5 missing (all out-of-scope environment templates); 18 behaviors, 16 verified, 0 partial,
 2 missing (BEH-011 out of scope; BEH-018 open).
 
 Deployment caveat: Modal's gVisor forbids the namespaces Codex's Linux sandbox
@@ -2305,17 +2314,60 @@ sessions are unaffected because their commands run on the executor, which runs
 unsandboxed. [deploy/modal/README.md](deploy/modal/README.md) records how the
 suite ran inside the service Sandbox.
 
+## Provider interoperability (2026-11-13)
+
+Project decision: BEH-018 is satisfied by the stock executor in its own Modal
+Sandbox connecting to the service over the public https tunnel. Modal is one
+of the provider guides reviewed. The earlier same-Sandbox loopback run does
+not supply this evidence.
+
+The prerequisite gap was fixed in `c222662345`: Modal's tunnel sends no
+`x-forwarded-proto`, so `remote_url` and the executor rendezvous URL read
+http/ws. `--public-url` (`CODEX_AGENTS_API_PUBLIC_URL`) sets the origin for
+executor-facing URLs only; the harness rendezvous stays request-derived
+because the worker reaches the registry over loopback. `serve.py` passes the
+tunnel URL. Linux Modal verification: full crate 99/99 with `--run-ignored all`,
+crate clippy clean. Rust tests (inventory prefixes follow the file stems):
+
+- `registry_tests::public_url_overrides_executor_urls_but_not_the_harness_url`
+- `registry_tests::unconfigured_urls_preserve_host_and_forwarded_proto_behavior`
+- `registry_tests::public_url_rejects_non_origins`
+- `environments::self_hosted_public_url_overrides_remote_and_registration_urls`
+- `environments::self_hosted_remote_url_uses_request_headers_without_public_url`
+- `runtime_cli::invalid_public_url_is_rejected_at_startup`
+
+`deploy/modal/executor_interop.py` (`7fc4cd1605`) ran against the patched service
+with `openai/gpt-5-mini` via OpenRouter. All seven checks passed:
+
+- `create`: `remote_url` was https on the tunnel host.
+- `connect`: the separate executor Sandbox connected through the public tunnel
+  in 9.5s.
+- `task`: environment-files copy, one `command_execution` item,
+  `result.txt = 100`.
+- `disconnect`: the executor was killed and the environment reported disconnected.
+- `waiting_input`: `requires_action` with `environment_connection` and a queued turn.
+- `reconnect`: the same queued turn completed; `again.txt = again`.
+- `delete`: the session was deleted; the executor Sandbox was still running.
+
+Then all ten `tests/real_provider.py` scenarios passed against the patched
+service for 81,365 tokens. Commit `eae7869510` made the self-hosted scenario
+pass `--trusted-registry-host` for a non-loopback advertised host; otherwise
+the stock CLI sends the key only to OpenAI or loopback hosts.
+
+BEH-018 moves to verified. Counts: 67 operations, 62 verified, 0 implemented,
+0 partial, 5 missing (out of scope); 18 behaviors, 17 verified, 0 partial,
+1 missing (BEH-011 out of scope). G12's SDK-scenario audit remains unchecked.
+
 ## Immediate next implementation slices
 
 Updated 2026-11-13. G00–G05 slices and the G01/G02 recovery slices that
 previously led this list are complete; their history is in the goal sections
 above and in git.
 
-Only BEH-018 remains non-verified within scope. A Modal Sandbox ran the
-executor, but whether that counts as provider interoperability is an open
-project decision. The 2026-11-13 real-provider runs close AGT-002, SES-003,
-BEH-002, BEH-008, and BEH-010; BEH-017 and EVT-002 now have Linux evidence.
-Lost function waiters and bounded best-effort deltas remain recorded limits.
+All in-scope operation and behavior rows are verified, including BEH-018's
+separate executor Sandbox through the public tunnel. The only remaining
+in-scope item is G12's SDK-scenario audit. Lost function waiters and bounded
+best-effort deltas remain recorded limits.
 
 1. **Projects, API keys, and permissions (G13): complete locally
    2026-10-12,** including project-scoped executor keys. The Admin API is out
@@ -2333,11 +2385,10 @@ Lost function waiters and bounded best-effort deltas remain recorded limits.
    nested calls, cancellation, model refusals, and compaction followed by cold
    resume have mock-provider evidence. Capability-directory skills, plugin
    skills, and pinned Skills API versions stay isolated through cold resume.
-7. **G12 evidence gaps.** Expand SDK scenarios to every implemented
-   resource/capability; that checklist item remains unchecked. Decide whether
-   the Modal executor run satisfies provider interoperability (BEH-018), which
-   stays missing/open. Windows and cross-OS worker/executor runs are out of
-   scope by decision (2026-10-13).
+7. **G12 SDK-scenario audit.** Expand SDK scenarios to every implemented
+   resource/capability; that checklist item remains unchecked. Provider
+   interoperability (BEH-018) is verified (2026-11-13). Windows and cross-OS
+   worker/executor runs are out of scope by decision (2026-10-13).
 
 ## How to maintain this plan
 

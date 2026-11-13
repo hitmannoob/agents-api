@@ -63,7 +63,8 @@ TRC-001, SKL-001..006, and SKV-001..005.
 ENV-002..003 moved to verified after the 2026-10-13 scope decision removed
 their only remaining evidence requirement. AGT-002 and SES-003 moved to verified
 on the 2026-11-13 real-provider evidence below. The 18 behavior rows are
-16 verified, 0 partial, and 2 missing (BEH-011 out of scope; BEH-018 open).
+17 verified, 0 partial, and 1 missing (BEH-011 out of scope); BEH-018 is verified
+by the separate-Sandbox public-tunnel run below.
 A partial operation does not count as completed parity.
 [PARITY.md](PARITY.md#current-status) has a per-area summary.
 
@@ -152,9 +153,42 @@ model configured at turn start (`src/routes.rs`, `turn_models` insert), updated
 only by a Codex reroute; it is not provider-reported. Independently, Codex's
 rollout `turn_context` recorded turn 1 `model=openai/gpt-5-mini` (default effort)
 and turn 2 `model=openai/gpt-5-nano effort=low`. Provider-side confirmation of
-the serving model was not checked. BEH-018 stays missing/open: a Modal Sandbox
-ran the executor, but whether that counts as provider interoperability is an
-open project decision. G12's SDK scenario expansion remains unchecked.
+the serving model was not checked. At this milestone BEH-018 stayed missing:
+the executor ran in the service Sandbox over loopback. The later decision and
+separate-Sandbox run below close that gap. G12's SDK scenario expansion remains
+unchecked.
+
+## Provider interoperability (2026-11-13)
+
+Project decision: BEH-018 is satisfied by the stock executor in its own Modal
+Sandbox connecting to the service through the public https tunnel. Modal is
+one of the provider guides reviewed; the earlier same-Sandbox loopback run
+does not supply this evidence.
+
+Commit `c222662345` fixes the prerequisite URL gap: Modal sends no
+`x-forwarded-proto`, so request-derived executor URLs read http/ws.
+`--public-url` (`CODEX_AGENTS_API_PUBLIC_URL`) sets the origin for `remote_url`
+and the executor rendezvous URL only. The harness rendezvous URL stays
+request-derived because the worker reaches the registry over loopback.
+`serve.py` passes the tunnel URL. On Linux in Modal, the full crate passed
+99/99 with `--run-ignored all`, and crate clippy was clean. The six Rust tests
+are named in BEH-018's JSON `tests` field; its registry tests use the file-stem
+prefix `registry_tests` required by `tests/sdk_inventory.py`.
+
+`deploy/modal/executor_interop.py` (commit `7fc4cd1605`) passed all seven checks
+against the patched service with `openai/gpt-5-mini` via OpenRouter: create
+advertised https on the tunnel host; the separate executor Sandbox connected
+through that tunnel in 9.5s; environment-files copy and one `command_execution`
+item produced `result.txt = 100`; killing the executor reported disconnected;
+offline input required `environment_connection` and queued a turn; reconnect
+completed that same turn with `again.txt = again`; session deletion left the
+executor Sandbox running. BEH-018 moves to verified.
+
+After commit `eae7869510`, all ten `tests/real_provider.py` scenarios passed
+against the patched service for 81,365 tokens. The self-hosted scenario now
+passes `--trusted-registry-host` for a non-loopback advertised host; otherwise
+the stock CLI sends the key only to OpenAI or loopback hosts. The only remaining
+in-scope item is G12's SDK-scenario audit.
 
 ## What is pinned
 
@@ -316,3 +350,9 @@ Amendments under the same `openai==3.17.0` pin:
   to verified. Counts: 67 operations, 62 verified, 0 implemented, 0 partial,
   5 missing (out of scope); 18 behaviors, 16 verified, 0 partial, 2 missing
   (BEH-011 out of scope; BEH-018 open).
+- 2026-11-13: the later project decision and separate Modal executor Sandbox
+  run through the public https tunnel verify BEH-018. The public-URL fix passed
+  the full crate 99/99 and crate clippy; interop passed 7/7 and the subsequent
+  full real-provider suite passed all ten scenarios for 81,365 tokens. Counts:
+  67 operations, 62 verified, 0 implemented, 0 partial, 5 missing (out of scope);
+  18 behaviors, 17 verified, 0 partial, 1 missing (BEH-011 out of scope).

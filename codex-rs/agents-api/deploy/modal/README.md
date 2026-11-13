@@ -34,10 +34,15 @@ and 8 GB:
 - **Lifetime:** the Sandbox stops itself after `--hours` (default 3) and
   bills while it runs.
 
-Known gap: Modal's tunnel does not send `x-forwarded-proto`, so a self-hosted
-session's `remote_url` reads `http://…/registry`. Executors inside the Sandbox
-use loopback and are unaffected. One outside it needs the https form of that
-URL and `--trusted-registry-host`.
+Modal's tunnel sends no `x-forwarded-proto`. `--public-url`
+(`CODEX_AGENTS_API_PUBLIC_URL`, added 2026-11-13 in `c222662345`) sets the public
+http(s) origin for executor-facing URLs: the session's `remote_url` and the
+executor rendezvous URL. `serve.py` passes the https tunnel URL, so executors
+can use the returned URLs directly. The harness rendezvous stays request-derived
+because the worker reaches the registry over loopback. Outside executors still
+need `--trusted-registry-host <tunnel host>`; otherwise the stock CLI sends the
+key only to OpenAI or loopback hosts. The option takes an origin with an optional
+port, without userinfo, a path other than `/`, query, or fragment.
 
 Deployment caveat (2026-11-13): Modal Sandboxes run under gVisor, which forbids
 the namespaces Codex's Linux sandbox (bubblewrap) needs. `serve.py` sets
@@ -80,8 +85,39 @@ configured model at turn start (`src/routes.rs`, `turn_models` insert), updated
 only by a Codex reroute; it is not provider-reported. Independent rollout
 `turn_context` recorded turn 1 `model=openai/gpt-5-mini` (default effort) and
 turn 2 `model=openai/gpt-5-nano effort=low`. Provider-side confirmation of the
-serving model was not checked. BEH-018 stays missing/open pending a project
-decision on whether this Modal executor run counts as provider interoperability.
+serving model was not checked. This earlier same-Sandbox loopback run did not
+supply BEH-018's provider-interoperability evidence; the separate-Sandbox run
+below does.
+
+Public-URL fix verification (2026-11-13, Linux Modal): full crate 99/99 with
+`--run-ignored all`, crate clippy clean. Then the full `tests/real_provider.py`
+suite passed all ten scenarios against the patched service for 81,365 tokens,
+after `eae7869510` made `self_hosted` pass `--trusted-registry-host` for a
+non-loopback advertised host.
+
+## Executor interoperability
+
+`executor_interop.py` runs the stock executor in its own Modal Sandbox and
+connects it to the service through the public https tunnel. Run from this
+directory against a service started by `serve.py`; `modal` and `openai==3.17.0`
+must be installed in the same Python environment:
+
+    python executor_interop.py STATE_DIR [--model M] [--json out.json]
+
+Evidence (2026-11-13, `7fc4cd1605`, patched service,
+`openai/gpt-5-mini` via OpenRouter): all seven checks PASS.
+
+- `create`: `remote_url` is https on the tunnel host.
+- `connect`: separate executor Sandbox connects through the public tunnel (9.5s).
+- `task`: environment-files copy, one `command_execution` item, `result.txt = 100`.
+- `disconnect`: killed executor is reported disconnected.
+- `waiting_input`: `requires_action` with `environment_connection`, queued turn.
+- `reconnect`: the same queued turn completes; `again.txt = again`.
+- `delete`: session deleted; executor Sandbox still running.
+
+Project decision (2026-11-13): this separate-Sandbox public-tunnel run satisfies
+BEH-018. Modal is one of the provider guides reviewed. The earlier same-Sandbox
+loopback run does not supply that evidence.
 
 ## Harness evals
 

@@ -40,9 +40,8 @@ per-operation detail lives in its `remaining` fields.
 **Scorecard:** 67 operations: 62 `verified`, 0 `implemented`, 0 `partial`,
 5 `missing`. The 5 missing (environment templates) are outside the parity
 target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18
-behavior rows, 16 are verified (BEH-001..010, BEH-012..017), 0 are partial,
-and 2 are missing (BEH-011 is out of scope; BEH-018, provider interoperability,
-is open).
+behavior rows, 17 are verified (BEH-001..010, BEH-012..018), 0 are partial,
+and 1 is missing (BEH-011, out of scope).
 
 Two promotion passes on 2026-10-12 moved rows whose only gaps were out of
 scope, intended behavior, or project scope, which G13 closed: API keys belong
@@ -80,9 +79,27 @@ records the exact tests.
 scenarios passed on `openai/gpt-5-mini` via OpenRouter for 55,145 tokens;
 `saved_agent` and `session_update` (commit `e6cc90c2b2`) passed for 16,228 tokens.
 AGT-002, SES-003, BEH-002, BEH-008, and BEH-010 move to verified. BEH-010 has a
-second real-provider run, its first on Linux. Only BEH-018 remains non-verified
-within scope: whether the Modal executor run counts as provider interoperability
-is an open project decision. SDK scenarios for every resource remain open.
+second real-provider run, its first on Linux. This earlier same-Sandbox loopback
+run did not supply BEH-018's provider-interoperability evidence.
+
+Provider interoperability (2026-11-13): by project decision, the stock executor
+in its own Modal Sandbox connecting through the service's public https tunnel
+satisfies BEH-018. Modal is one of the provider guides reviewed. Commit
+`c222662345` adds `--public-url` (`CODEX_AGENTS_API_PUBLIC_URL`), fixing http/ws
+executor URLs when Modal sends no `x-forwarded-proto`; `serve.py` passes the
+tunnel origin. Only executor-facing URLs use it; the harness rendezvous stays
+request-derived for the worker's loopback registry connection. The Linux Modal
+crate run passed 99/99 with `--run-ignored all`; crate clippy was clean.
+
+`deploy/modal/executor_interop.py` (commit `7fc4cd1605`) passed all seven checks
+on `openai/gpt-5-mini` via OpenRouter: https create URL, separate-Sandbox tunnel
+connection (9.5s), environment-files copy and command result, disconnect,
+queued offline input, same-turn reconnect, and deletion leaving executor compute
+running. BEH-018 is verified. After `eae7869510` added
+`--trusted-registry-host` for a non-loopback advertised host, the full ten-scenario
+`tests/real_provider.py` suite passed against the patched service for 81,365
+tokens. [GOALS.md](GOALS.md#provider-interoperability-2026-11-13) records the
+results; SDK scenarios for every resource remain open.
 
 One web-search session recorded five completed search actions and an answer
 citing python.org; three actions had empty queries. `src/records.rs`
@@ -112,7 +129,7 @@ See [Modal deployment](deploy/modal/README.md).
 | Functions | (in EVT/BEH-007) | verified | Tagged functions, result/error flow, content parts, duplicate and race handling, deferred functions found through tool search (offered up front on models without it) | None |
 | MCP and built-ins | (BEH-008) | verified | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence); real-provider web search passed via OpenRouter (2026-11-13) | None within the parity target. Three of five completed search actions had empty queries; uninvestigated Codex/provider observation |
 | Harness features | (BEH-009, G08) | BEH-009 verified; G08 complete locally (2026-10-13) | Multi-agent delegation within Codex V2 limits; automatic compaction preserves full public history through cold resume; sandboxed V8 nested function calls, cancellation, fail-closed host and model-mode refusals; capability-directory skills, plugin skills, and pinned Skills API versions isolated through API/worker restart | None within the parity target; no public compaction controls/items in the pinned contract |
-| Environments | ENV-001..003 | 3 verified | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss | None for ENV-001..003 and BEH-010 within the parity target; second real-provider self_hosted run passed, first on Linux (2026-11-13). Whether the Modal executor run counts for BEH-018 remains open. Self-hosted environments never expire |
+| Environments | ENV-001..003 | 3 verified | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss; `--public-url` advertises executor URLs through the public tunnel | None within the parity target. BEH-018 verified by the separate Modal executor Sandbox run (7/7, 2026-11-13); full real-provider suite also passed all ten scenarios. Self-hosted environments never expire |
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
 | Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |
 | Files | FIL-001..005 | 5 verified | Streaming multipart upload (50 MiB) with SHA-256, six purposes, `expires_after`, integrity-checked download, project-scoped | None; upload parts, batch processing, and range requests are **out of scope** (decision 2026-10-12) |
@@ -125,13 +142,12 @@ See [Modal deployment](deploy/modal/README.md).
 
 ### Path to `verified`
 
-Updated: 2026-11-13. Capability, saved-agent, session-update, and a second
-self-hosted run are recorded above; BEH-017 and EVT-002 also have Linux runs.
+Updated: 2026-11-13. All in-scope operation and behavior rows are verified,
+including provider interoperability through the public tunnel. Only the
+SDK-scenario audit remains in scope.
 
 1. **SDK evidence (G12):** expand official SDK scenarios to every implemented
    resource/capability; the corresponding checklist item remains unchecked.
-2. **Provider interoperability (BEH-018):** decide whether the Modal Sandbox
-   executor run satisfies this row; it stays missing/open pending that decision.
 
 ## Implementation sequence
 
