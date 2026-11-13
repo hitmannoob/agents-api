@@ -103,6 +103,24 @@ running. BEH-018 is verified. After `eae7869510` added
 tokens. [GOALS.md](GOALS.md#provider-interoperability-2026-11-13) records the
 results.
 
+MCP, subagents, and compaction (2026-11-13): commit `3b5b242c31` added the
+three `tests/real_provider.py` scenarios and `serve.py --auto-compact-tokens`.
+The suite ran inside the service Sandbox on Modal, started by `serve.py` at
+image commit `7fc4cd1605`, with `openai/gpt-5-mini` via OpenRouter. `mcp` PASS:
+a stdio MCP server ran on the self-hosted executor; the real model's `mcp_call`
+returned a value it could not guess. `subagents` PASS with `multi_agent` enabled:
+subagent resource, `create_subagent_call`, subagent turns/items, `agent_message`
+items, and correct delegated answer `391`. The two scenarios used 39,184 tokens
+together. `compaction` PASS on a separate service with
+`model_auto_compact_token_limit=12000` (70,022 tokens): a turn's `input_tokens`
+dropped after compaction, `/items` kept every user message in order, and the
+model recalled the turn-1 code word afterwards. The first attempt compacted
+without shrinking input because USER filler was kept verbatim; the scenario
+now grows context via assistant output. [GOALS.md](GOALS.md#mcp-subagents-and-compaction-2026-11-13)
+records the retention limit and usage finding. This adds real-provider evidence
+for BEH-008, subagents/BEH-009, and G08 compaction; statuses and counts are
+unchanged.
+
 SDK coverage acceptance (2026-11-13): the reviewer ran the full crate with the
 coverage changes applied to HEAD `4873a812c4` on Linux in Modal (gVisor x86_64,
 Rust 1.95), using `cargo nextest --retries 0 --run-ignored all`: 99/99 passed.
@@ -143,10 +161,10 @@ See [Modal deployment](deploy/modal/README.md).
 | Input events | EVT-001 | verified | Validated ordered batches, text up to 1 MiB, data-URL and remote https images (fetched under the egress rules), string and content-part function results (10,000 bytes), session-scoped `Idempotency-Key` replay | None. Batching and idempotency semantics are the contract by decision (2026-10-12) |
 | Streaming | EVT-002 | verified | Lifecycle, item, text/reasoning, content-part, error, subagent, environment, and command-output events; initial stdout and fast-exit output arrive before item.done with matching IDs/output_index and saved output (macOS 2026-10-13 and Linux 2026-11-13 mock evidence) | None within the parity target. Live-only; best-effort limits: 10,000 deltas per call, and oldest deltas dropped on lag beyond 64 chunks before the watcher starts; aggregated output unaffected |
 | Items and turns | ITM-001, TRN-001..002 | 3 verified | Message, reasoning, function, MCP, web search, command, and subagent create/send/interrupt items (with the subagent's model), and `agent_message` items between agents; `queued` turns while input waits for an executor; turn usage, error codes, and pagination | None. Engine limit: wait/close/resume subagent items |
-| Subagents | SUB-001..006 | 6 verified | Resources, paginated items and turns per subagent, cancellation, restart continuity | None. `instructions` is always null and `closed` never occurs: Codex V2 reports neither, accepted as engine limits (2026-10-12) |
+| Subagents | SUB-001..006 | 6 verified | Resources, paginated items and turns per subagent, cancellation, restart continuity; real-provider delegation passed via OpenRouter (2026-11-13), including call/message items and answer `391` | None. `instructions` is always null and `closed` never occurs: Codex V2 reports neither, accepted as engine limits (2026-10-12) |
 | Functions | (in EVT/BEH-007) | verified | Tagged functions, result/error flow, content parts, duplicate and race handling, deferred functions found through tool search (offered up front on models without it) | None |
-| MCP and built-ins | (BEH-008) | verified | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence); real-provider web search passed via OpenRouter (2026-11-13) | None within the parity target. Follow-up (2026-11-13): upstream action details through OpenRouter are lossy (12/23 empty searches; no open_page/find_in_page); page-open flattening is unconfirmed, direct-OpenAI comparison not done |
-| Harness features | (BEH-009, G08) | BEH-009 verified; G08 complete locally (2026-10-13) | Multi-agent delegation within Codex V2 limits; automatic compaction preserves full public history through cold resume; sandboxed V8 nested function calls, cancellation, fail-closed host and model-mode refusals; capability-directory skills, plugin skills, and pinned Skills API versions isolated through API/worker restart | None within the parity target; no public compaction controls/items in the pinned contract |
+| MCP and built-ins | (BEH-008) | verified | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence); real-provider stdio MCP on the self-hosted executor and web search passed via OpenRouter (2026-11-13) | None within the parity target. Follow-up (2026-11-13): upstream action details through OpenRouter are lossy (12/23 empty searches; no open_page/find_in_page); page-open flattening is unconfirmed, direct-OpenAI comparison not done |
+| Harness features | (BEH-009, G08) | BEH-009 verified; G08 complete locally (2026-10-13) | Multi-agent delegation within Codex V2 limits; automatic compaction preserves full public history through cold resume; delegation and compaction also have real-provider evidence via OpenRouter (2026-11-13), including reduced turn input, ordered user history, and early code-word recall; sandboxed V8 nested function calls, cancellation, fail-closed host and model-mode refusals; capability-directory skills, plugin skills, and pinned Skills API versions isolated through API/worker restart | None within the parity target; no public compaction controls/items in the pinned contract |
 | Environments | ENV-001..003 | 3 verified | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss; `--public-url` advertises executor URLs through the public tunnel | None within the parity target. BEH-018 verified by the separate Modal executor Sandbox run (7/7, 2026-11-13); full real-provider suite also passed all ten scenarios. Self-hosted environments never expire |
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
 | Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |

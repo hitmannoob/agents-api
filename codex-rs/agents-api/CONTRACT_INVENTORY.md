@@ -199,6 +199,32 @@ the stock CLI sends the key only to OpenAI or loopback hosts. At this milestone,
 only G12's SDK-scenario audit was still pending; the subsequent audit below
 closes it.
 
+## MCP, subagents, and compaction (2026-11-13)
+
+Commit `3b5b242c31` added `mcp`, `subagents`, and `compaction` to
+`tests/real_provider.py`, and `serve.py --auto-compact-tokens`. The suite ran
+inside the service Sandbox on Modal, started by `serve.py` at image commit
+`7fc4cd1605`, against `openai/gpt-5-mini` via OpenRouter:
+
+- `mcp` PASS (BEH-008): a stdio MCP server ran on the self-hosted executor;
+  the real model's `mcp_call` returned a value it could not guess.
+- `subagents` PASS (SUB-002, SUB-003, SUB-005, ITM-001, BEH-009): with
+  `multi_agent` enabled, the run checked the subagent resource,
+  `create_subagent_call`, subagent turns/items, `agent_message` items, and the
+  correct delegated answer `391`. MCP and subagents used 39,184 tokens together.
+- `compaction` PASS (G08, AGT-001, SES-001): a separate service used
+  `model_auto_compact_token_limit=12000`. A turn's `input_tokens` dropped after
+  compaction, `/items` kept every user message in order, and the model recalled
+  the turn-1 code word afterwards. The run used 70,022 tokens.
+
+The first compaction attempt used filler in USER messages and a 20000 limit.
+Codex did compact (rollout `compacted` record in turn 4), but input never shrank:
+recent user messages are kept verbatim through compaction up to
+`COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000` (`core/src/compact.rs:63`), and a
+compacting turn's usage sums the compaction and follow-up requests. The scenario
+therefore grows context via assistant output. These runs add real-provider
+evidence to the earlier mock evidence; statuses and counts are unchanged.
+
 ## SDK coverage audit (2026-11-13)
 
 The reviewer ran the full crate with the coverage changes applied to HEAD

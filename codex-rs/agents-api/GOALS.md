@@ -87,7 +87,12 @@ passed all ten scenarios via OpenRouter for 81,365 tokens. Counts: 67 operations
 17 verified, 0 partial, 1 missing (BEH-011 out of scope). The subsequent reviewer
 run with the SDK coverage changes applied to HEAD `4873a812c4` passed 99/99,
 including all 49 lifecycle and 12 environment operation coverage assertions.
-G12 is complete; no in-scope parity work remains.
+G12 is complete; no in-scope parity work remains. The new `mcp` and `subagents`
+scenarios also passed for 39,184 tokens together; `compaction` passed on a
+separate service for 70,022 tokens. These runs used `openai/gpt-5-mini` via
+OpenRouter inside the Modal service Sandbox at image commit `7fc4cd1605`;
+[the dated evidence below](#mcp-subagents-and-compaction-2026-11-13) records the
+suite commit, compaction setting, and first-attempt finding.
 
 Current boundaries:
 
@@ -115,9 +120,10 @@ Current boundaries:
   `self_hosted` environments.
 - Tool search, programmatic calling, inline MCP authorization, request metadata,
   and automatic compaction execute locally (2026-10-12; evidence in G06–G08).
-  Web search passed a real-provider run (2026-11-13); skills/plugins stay isolated
-  through cold resume (2026-10-13). The pinned contract has no compaction
-  controls/items.
+  Stdio MCP on the self-hosted executor, subagent delegation, automatic
+  compaction, and web search passed real-provider runs via OpenRouter
+  (2026-11-13); skills/plugins stay isolated through cold resume (2026-10-13).
+  The pinned contract has no compaction controls/items.
   `environment_variable` credentials and OAuth refresh are out of scope.
 - Modal Sandboxes use gVisor, which forbids the namespaces Codex's Linux sandbox
   (bubblewrap) needs. `serve.py` configures `sandbox_mode = "read-only"`, which
@@ -909,6 +915,12 @@ Remaining:
   OpenRouter action details are lossy: no `open_page` or `find_in_page` arrived;
   page-open flattening is likely but unconfirmed, and a direct-OpenAI comparison
   was not done (details in the dated G12 evidence below). BEH-008 stays verified.
+- Real-provider MCP evidence (2026-11-13): `tests/real_provider.py` scenario `mcp` PASS
+  with a stdio server on the self-hosted executor; the real model's `mcp_call`
+  returned a value it could not guess. The Modal service image was
+  `7fc4cd1605`, the scenario came from `3b5b242c31`, and the suite ran inside
+  the service Sandbox against `openai/gpt-5-mini` via OpenRouter. MCP and
+  subagents used 39,184 tokens together; see the dated evidence below.
 - Programmatic tool calling belongs to G08.
 
 ## G08 — Remaining harness features (complete locally 2026-10-13)
@@ -923,6 +935,11 @@ correct session, event, and ownership semantics.
   compaction items. Codex compacts automatically; model context survives cold
   resume while public history stays complete. `contextCompaction` items are
   not public. Evidence: `compaction::automatic_compaction_survives_cold_resume`.
+  Real-provider evidence (2026-11-13): `tests/real_provider.py` scenario `compaction` PASS
+  via OpenRouter (70,022 tokens) with `model_auto_compact_token_limit=12000`:
+  reduced turn input, every user message retained in order, and recall of the
+  turn-1 code word. The dated evidence below records the Modal setup and
+  first-attempt finding; cold-resume evidence remains the earlier mock run.
 - [x] Programmatic tool calling (2026-10-12): enabled maps to
   `features.code_mode`, a fail-closed host, and cell interruption on cancel.
   Execution uses the sandboxed V8 `codex-code-mode-host` process with no fs/net;
@@ -964,6 +981,14 @@ Acceptance: one contract fixture per capability plus combined scenarios: child
 cancellation, compaction followed by cold resume, nested function callbacks, and
 skills/plugins isolated between sessions. Harness logic changes require the
 repository's relevant integration tests in addition to API tests.
+
+Real-provider subagent evidence (2026-11-13): `tests/real_provider.py` scenario
+`subagents` PASS with `multi_agent` enabled: subagent resource, `create_subagent_call`,
+subagent turns/items, `agent_message` items, and correct delegated answer `391`.
+The Modal service image was `7fc4cd1605`, the scenario came from `3b5b242c31`,
+and the suite ran inside the service Sandbox against `openai/gpt-5-mini` via
+OpenRouter. MCP and subagents used 39,184 tokens together. This adds to the
+mock-provider lifecycle evidence below; statuses and counts are unchanged.
 
 Triage (2026-09-28; updated 2026-10-13):
 - **Compaction:** the pinned contract exposes no compaction controls or
@@ -2410,6 +2435,37 @@ BEH-018 moves to verified. Counts: 67 operations, 62 verified, 0 implemented,
 1 missing (BEH-011 out of scope). G12's SDK-scenario audit was still pending at
 this milestone; the subsequent reviewer run recorded under G12 closes it.
 
+## MCP, subagents, and compaction (2026-11-13)
+
+Commit `3b5b242c31` added `mcp`, `subagents`, and `compaction` to
+`tests/real_provider.py`, and `serve.py --auto-compact-tokens` to set
+`model_auto_compact_token_limit`. The service ran on Modal via `serve.py` at
+image commit `7fc4cd1605`; the suite ran inside the service Sandbox against
+`openai/gpt-5-mini` via OpenRouter:
+
+- `mcp` PASS (BEH-008): a stdio MCP server ran on the self-hosted executor.
+  The real model's `mcp_call` returned a value it could not guess.
+- `subagents` PASS (SUB-002, SUB-003, SUB-005, ITM-001, BEH-009):
+  `multi_agent` was enabled; the run checked the subagent resource,
+  `create_subagent_call`, subagent turns/items, `agent_message` items, and
+  correct delegated answer `391`. MCP and subagents used 39,184 tokens together.
+- `compaction` PASS (G08, AGT-001, SES-001): a separate service had
+  `model_auto_compact_token_limit=12000`. A turn's `input_tokens` dropped after
+  compaction, `/items` kept every user message in order, and the model recalled
+  the turn-1 code word afterwards. The run used 70,022 tokens.
+
+The first compaction attempt used filler in USER messages and a 20000 limit.
+Codex did compact: the rollout recorded `compacted` in turn 4. Input never
+shrank because Codex keeps recent user messages verbatim through compaction
+up to `COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000` (`core/src/compact.rs:63`),
+and a compacting turn's usage sums the compaction and follow-up requests.
+The scenario therefore grows context via assistant output.
+
+These runs add real-provider evidence for MCP, subagents, and compaction to
+the earlier mock evidence. Statuses and counts are unchanged: 62 verified,
+0 implemented, 0 partial, 5 missing operations (out of scope); 17 verified,
+0 implemented, 0 partial, 1 missing behavior (BEH-011 out of scope).
+
 ## Immediate next implementation slices
 
 Updated 2026-11-13. G00–G05 slices and the G01/G02 recovery slices that
@@ -2431,12 +2487,15 @@ best-effort deltas remain recorded limits.
    event types, beta header, pagination evidence, cursor expiry, Files scope),
    and a second decision pass the same day.
 5. **Deferred functions and tool search (G06): complete locally 2026-10-12.**
-   Built-in web search (G07) passed real-provider acceptance 2026-11-13.
+   Built-in web search and executor stdio MCP (G07) passed real-provider
+   acceptance 2026-11-13.
 6. **G08: complete locally 2026-10-13.** No public compaction controls exist in
-   the pinned contract;
-   nested calls, cancellation, model refusals, and compaction followed by cold
-   resume have mock-provider evidence. Capability-directory skills, plugin
-   skills, and pinned Skills API versions stay isolated through cold resume.
+   the pinned contract. Subagent delegation and automatic compaction also have
+   real-provider evidence (2026-11-13): correct delegated answer `391`, reduced
+   turn input, ordered public user history, and turn-1 code-word recall.
+   Nested calls, cancellation, model refusals, and compaction followed by cold
+   resume retain their mock-provider evidence. Capability-directory skills,
+   plugin skills, and pinned Skills API versions stay isolated through cold resume.
 7. **G12 SDK-scenario audit: complete 2026-11-13.** The reviewer Linux run passed
    99/99, including the static assignment check and runtime coverage of all 61
    assigned SDK operations. Provider interoperability (BEH-018) is also verified.
