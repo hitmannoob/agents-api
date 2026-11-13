@@ -91,6 +91,38 @@ async fn turns(client: &reqwest::Client, url: &str, count: usize) -> anyhow::Res
 }
 
 #[tokio::test]
+async fn invalid_public_url_is_rejected_at_startup() -> anyhow::Result<()> {
+    for from_env in [false, true] {
+        let data = tempfile::tempdir()?;
+        let mut command = Command::new(cargo_bin("codex-agents-api")?);
+        command
+            .args(["--listen", "127.0.0.1:0", "--data-directory"])
+            .arg(data.path())
+            .arg("--app-server-bin")
+            .arg(cargo_bin("codex-app-server")?)
+            .env("CODEX_AGENTS_API_TOKEN", TOKEN)
+            .env("CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG", "1")
+            .kill_on_drop(true);
+        if from_env {
+            command.env(
+                "CODEX_AGENTS_API_PUBLIC_URL",
+                "https://public.example/registry",
+            );
+        } else {
+            command
+                .env_remove("CODEX_AGENTS_API_PUBLIC_URL")
+                .args(["--public-url", "https://public.example/registry"]);
+        }
+        let output = tokio::time::timeout(DEADLINE, command.output()).await??;
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(stderr.contains("public URL must be "), "{stderr}");
+        assert!(!stderr.contains("agents-api listening on "), "{stderr}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn cli_manages_worker_and_resumes_saved_session_after_restart() -> anyhow::Result<()> {
     let data = tempfile::tempdir()?;
     let home = data.path().join("codex-home");

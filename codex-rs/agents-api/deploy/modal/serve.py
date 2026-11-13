@@ -123,8 +123,17 @@ cat > /data/forward.py <<'PY'
 python3 /data/forward.py &
 cat > /data/codex-home/config.toml <<'TOML'
 {config}TOML
+deadline=$((SECONDS + 120))
+while [ ! -s /data/public-url ]; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "public URL was not supplied within 120s" >&2
+    exit 1
+  fi
+  sleep 1
+done
 /opt/agents-api/bin/codex-agents-api --listen 127.0.0.1:4501 --data-directory /data \
   --codex-home /data/codex-home --app-server-bin /opt/agents-api/bin/codex-app-server \
+  --public-url "$(cat /data/public-url)" \
   2>&1 | tee /data/logs/agents-api.log
 """
 
@@ -202,6 +211,16 @@ def start(state, hours):
         timeout=int(hours * 3600),
     )
     url = sandbox.tunnels()[8080].url.rstrip("/")
+    process = sandbox.exec(
+        "bash",
+        "-c",
+        'mkdir -p /data && printf "%s" "$1" > /data/public-url.tmp '
+        '&& mv /data/public-url.tmp /data/public-url',
+        "bash",
+        url,
+    )
+    if process.wait() != 0:
+        sys.exit("failed to write the Sandbox public URL")
     for name, value in (("sandbox-id", sandbox.object_id), ("url", url)):
         with open(os.path.join(state, name), "w", encoding="utf-8") as handle:
             handle.write(value)

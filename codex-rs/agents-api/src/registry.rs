@@ -313,9 +313,46 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
             == 0
 }
 
-/// The URL of `path` on the host the caller reached, with `schemes` as the
-/// (secure, plain) pair chosen by `x-forwarded-proto`.
-fn url_for(headers: &HeaderMap, schemes: (&str, &str), path: &str) -> String {
+pub(crate) fn parse_public_url(value: &str) -> anyhow::Result<reqwest::Url> {
+    const MESSAGE: &str = "public URL must be an absolute http or https URL with a host and optional port, without a path other than /, query, fragment, or userinfo";
+    let url = reqwest::Url::parse(value).map_err(|_| anyhow::anyhow!(MESSAGE))?;
+    // Inspect the supplied authority as well: URL parsing normalizes empty
+    // userinfo and dot segments, which must not hide disallowed input.
+    let authority = value
+        .split_once("://")
+        .map(|(_, rest)| rest.strip_suffix('/').unwrap_or(rest));
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.has_host()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && authority.is_some_and(|authority| !authority.contains(['/', '\\', '?', '#', '@'])),
+        MESSAGE
+    );
+    Ok(url)
+}
+
+/// The URL of `path` on the configured public origin, or the host the caller
+/// reached. `schemes` is the (secure, plain) pair; without a public origin,
+/// `x-forwarded-proto` selects it. Only executor-facing URLs pass a public
+/// origin; the worker's harness URL always follows the request headers.
+fn url_for(
+    public_url: Option<&reqwest::Url>,
+    headers: &HeaderMap,
+    schemes: (&str, &str),
+    path: &str,
+) -> String {
+    if let Some(public_url) = public_url {
+        let scheme = if public_url.scheme() == "https" {
+            schemes.0
+        } else {
+            schemes.1
+        };
+        return format!("{scheme}://{}{path}", public_url.authority());
+    }
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|host| host.to_str().ok())
@@ -328,13 +365,18 @@ fn url_for(headers: &HeaderMap, schemes: (&str, &str), path: &str) -> String {
     format!("{scheme}://{host}{path}")
 }
 
-fn websocket_url(headers: &HeaderMap, path: &str) -> String {
-    url_for(headers, ("wss", "ws"), path)
+fn websocket_url(public_url: Option<&reqwest::Url>, headers: &HeaderMap, path: &str) -> String {
+    url_for(public_url, headers, ("wss", "ws"), path)
 }
 
 /// The registry URL executors pass to `codex exec-server --remote`.
-pub(crate) fn remote_url(headers: &HeaderMap) -> String {
-    url_for(headers, ("https", "http"), "/registry")
+pub(crate) fn remote_url(state: &State, headers: &HeaderMap) -> String {
+    url_for(
+        crate::lock(&state.public_url).as_ref(),
+        headers,
+        ("https", "http"),
+        "/registry",
+    )
 }
 
 async fn register(
@@ -356,6 +398,7 @@ async fn register(
     let registration_id = format!("reg_{}", Uuid::new_v4().simple());
     let executor_token = format!("exe_{}", Uuid::new_v4().simple());
     let url = websocket_url(
+        crate::lock(&state.public_url).as_ref(),
         &headers,
         &format!(
             "/registry/rendezvous/{environment_id}/executor?registration={registration_id}&token={executor_token}"
@@ -437,7 +480,10 @@ async fn connect(
             "no executor is connected for this environment",
         );
     };
+    // The worker reaches the registry over loopback. Keep its rendezvous on
+    // that request's origin rather than sending it through the public tunnel.
     let url = websocket_url(
+        None,
         &headers,
         &format!("/registry/rendezvous/{environment_id}/harness?authorization={token}"),
     );
@@ -484,3 +530,7 @@ async fn validate(
         .unwrap_or(false);
     Json(EnvironmentRegistryHarnessKeyValidationResponse { valid }).into_response()
 }
+
+#[cfg(test)]
+#[path = "registry_tests.rs"]
+mod tests;

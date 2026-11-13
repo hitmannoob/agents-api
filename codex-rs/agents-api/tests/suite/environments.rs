@@ -117,6 +117,133 @@ fn lifecycle(events: &[Value]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn self_hosted_public_url_overrides_remote_and_registration_urls() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let data = tempfile::tempdir()?;
+    let workspace = tempfile::tempdir()?;
+    let provider = create_mock_responses_server_repeating_assistant("unused").await;
+    MockResponsesConfig::new(&provider.uri()).write(home.path())?;
+    let api = AgentsApi::new(
+        backend(home.path()).await?,
+        AbsolutePathBuf::from_absolute_path(data.path())?,
+        TOKEN.into(),
+    )
+    .await?;
+    let (base, server) = capabilities::serve(&api).await?;
+    let origin = base.trim_end_matches("/v1");
+    api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+    for (public_url, forwarded, remote_url, websocket_origin) in [
+        (
+            "https://public.example",
+            None,
+            "https://public.example/registry",
+            "wss://public.example",
+        ),
+        (
+            "https://public.example:8443/",
+            Some("http"),
+            "https://public.example:8443/registry",
+            "wss://public.example:8443",
+        ),
+        (
+            "http://public.example:8080/",
+            Some("https"),
+            "http://public.example:8080/registry",
+            "ws://public.example:8080",
+        ),
+    ] {
+        api.configure_public_url(public_url.into())?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::HOST, "internal.example:4501".parse()?);
+        if let Some(forwarded) = forwarded {
+            headers.insert("x-forwarded-proto", forwarded.parse()?);
+        }
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
+        let session = request(
+            &client,
+            reqwest::Method::POST,
+            &format!("{base}/agents/sessions"),
+            json!({"agent":{"model":"mock-model"},
+                "environment":{"type":"self_hosted","workspace_directory":workspace.path()}}),
+        )
+        .await?;
+        assert_eq!(session["environment"]["remote_url"], json!(remote_url));
+        let id = session["environment"]["id"]
+            .as_str()
+            .context("environment id")?;
+        let registration: Value = client
+            .post(format!("{origin}/registry/cloud/environment/{id}/register"))
+            .bearer_auth(ENVIRONMENT_KEY)
+            .json(&json!({"security_profile":"noise_hybrid_ik_v1",
+                "executor_public_key":{"suite":"x","x25519_public_key":"x","mlkem768_public_key":"x"}}))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(
+            registration["url"]
+                .as_str()
+                .context("rendezvous URL")?
+                .starts_with(&format!(
+                    "{websocket_origin}/registry/rendezvous/{id}/executor?registration="
+                )),
+            "{registration}"
+        );
+    }
+    api.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn self_hosted_remote_url_uses_request_headers_without_public_url() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let data = tempfile::tempdir()?;
+    let workspace = tempfile::tempdir()?;
+    let provider = create_mock_responses_server_repeating_assistant("unused").await;
+    MockResponsesConfig::new(&provider.uri()).write(home.path())?;
+    let api = AgentsApi::new(
+        backend(home.path()).await?,
+        AbsolutePathBuf::from_absolute_path(data.path())?,
+        TOKEN.into(),
+    )
+    .await?;
+    let (base, server) = capabilities::serve(&api).await?;
+    api.configure_environments(
+        ENVIRONMENT_KEY.into(),
+        format!("{}/registry", base.trim_end_matches("/v1")),
+    )?;
+    for (forwarded, expected) in [
+        (None, "http://internal.example:4501/registry"),
+        (Some("https"), "https://internal.example:4501/registry"),
+    ] {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::HOST, "internal.example:4501".parse()?);
+        if let Some(forwarded) = forwarded {
+            headers.insert("x-forwarded-proto", forwarded.parse()?);
+        }
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
+        let session = request(
+            &client,
+            reqwest::Method::POST,
+            &format!("{base}/agents/sessions"),
+            json!({"agent":{"model":"mock-model"},
+                "environment":{"type":"self_hosted","workspace_directory":workspace.path()}}),
+        )
+        .await?;
+        assert_eq!(session["environment"]["remote_url"], json!(expected));
+    }
+    api.shutdown().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn self_hosted_command_output_deltas_arrive_in_order_before_item_done() -> anyhow::Result<()>
 {
     tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {

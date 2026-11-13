@@ -95,6 +95,8 @@ struct State {
     webhook_wake: tokio::sync::Notify,
     /// The environment registry and rendezvous state for self-hosted environments.
     registry: registry::Registry,
+    /// The public origin advertised to executors instead of request headers.
+    public_url: Mutex<Option<reqwest::Url>>,
     /// Input waiting for a self-hosted executor to connect.
     waits: environments::Waits,
     /// Public IDs of turns that were queued before Codex started them.
@@ -256,6 +258,7 @@ impl AgentsApi {
             secrets: secrets::Secrets::default(),
             webhook_wake: tokio::sync::Notify::new(),
             registry: registry::Registry::default(),
+            public_url: Mutex::default(),
             waits: environments::Waits::default(),
             started_turns: Mutex::default(),
             pending_cancels: Mutex::default(),
@@ -374,6 +377,14 @@ impl AgentsApi {
         if removed > 0 {
             tracing::info!(removed, "removed secrets left by interrupted deletions");
         }
+        Ok(())
+    }
+
+    /// Advertise this http(s) origin in executor-facing registry and rendezvous
+    /// URLs instead of using the request's Host and x-forwarded-proto headers.
+    /// The worker's harness rendezvous URL always follows its request headers.
+    pub fn configure_public_url(&self, public_url: String) -> anyhow::Result<()> {
+        *lock(&self.state.public_url) = Some(registry::parse_public_url(&public_url)?);
         Ok(())
     }
 

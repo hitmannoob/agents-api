@@ -170,9 +170,17 @@ how projects and keys are managed.
   `CODEX_AGENTS_API_ENVIRONMENT_KEY`. They are hidden from `--help` output
   and never forwarded to the worker.
 - **Network exposure:** the service listens on `127.0.0.1:4501` by default.
-  To serve other hosts, put it behind a TLS-terminating proxy that sets
-  `x-forwarded-proto: https`; `remote_url` and the registry's websocket URLs
-  follow it. Executors must reach `/registry/`. Service-origin MCP and
+  To serve other hosts, put it behind a TLS-terminating proxy. Set
+  `--public-url https://public.example` (or `CODEX_AGENTS_API_PUBLIC_URL`) to
+  advertise that origin in `remote_url` and the executor rendezvous URL,
+  ignoring `Host` and `x-forwarded-proto`. The URL must be absolute http or
+  https with a host and optional port, an empty or `/` path, and no query,
+  fragment, or userinfo. HTTPS selects https/wss; HTTP selects http/ws.
+  Without this option, URLs use the request's `Host` and select https/wss only
+  for `x-forwarded-proto: https`, otherwise http/ws.
+  The worker's harness rendezvous URL always follows its request's `Host`
+  and `x-forwarded-proto`, keeping its loopback access.
+  Executors must reach `/registry/`. Service-origin MCP and
   webhook connections go only to public addresses unless the operator allows
   a host. Executor-origin traffic uses the caller's network.
 - **Health:** `GET /healthz` needs no token. It answers 200
@@ -489,8 +497,8 @@ only the registry endpoints under `/registry/`.
   found there. Plugins installed in the worker's own Codex home stay off, as
   do remote plugins. The response's
   `environment` carries its `id` and `remote_url`, this service's
-  `/registry` on the host and scheme the request used (`x-forwarded-proto`
-  selects https).
+  `/registry` on the configured `--public-url` origin, or otherwise the host
+  and scheme the request used (`x-forwarded-proto: https` selects https).
 - **Connecting:** on the caller's compute, run
   `CODEX_API_KEY=<environment key> codex exec-server --remote <remote_url> --environment-id <id>`,
   where the environment key is the project's connect-only key (or the
@@ -498,8 +506,9 @@ only the registry endpoints under `/registry/`.
   The stock CLI sends that key only to OpenAI hosts or loopback; add
   `--trusted-registry-host <host>` for this service's https host. The executor
   registers a Noise key and dials out to a rendezvous websocket. The worker
-  reaches it through the same relay over loopback, and traffic is encrypted end
-  to end: the relay sees only stream IDs.
+  queries the registry and reaches the relay over loopback; its rendezvous
+  URL follows the registry request headers.
+  Traffic is encrypted end to end: the relay sees only stream IDs.
 - **Events:** `agent.session.environment.pending` at creation, then `connected`
   and `disconnected` as the executor's socket opens and closes, and `failed`
   when waiting input times out.

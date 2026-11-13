@@ -20,6 +20,9 @@ struct Args {
     command: Option<Command>,
     #[arg(long, default_value = "127.0.0.1:4501")]
     listen: SocketAddr,
+    /// Public http(s) origin advertised to self-hosted executors.
+    #[arg(long, env = "CODEX_AGENTS_API_PUBLIC_URL")]
+    public_url: Option<String>,
     /// Connect to a caller-owned worker instead of starting a managed worker.
     #[arg(long, conflicts_with_all = ["app_server_bin", "codex_home"])]
     app_server_socket: Option<PathBuf>,
@@ -278,6 +281,9 @@ async fn main() -> anyhow::Result<()> {
         };
         exporters::elapsed(exporters::WORKER_STARTUP_DURATION, starting.elapsed(), &[("reason", "start")]);
         let api = AgentsApi::new(AppServerClient::Remote(client), directory, token).await?;
+        if let Some(public_url) = args.public_url {
+            api.configure_public_url(public_url)?;
+        }
         api.allow_mcp_hosts(args.allow_mcp_hosts);
         api.allow_webhook_hosts(args.allow_webhook_hosts);
         api.allow_image_hosts(args.allow_image_hosts);

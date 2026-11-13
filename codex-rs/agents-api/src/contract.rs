@@ -264,7 +264,7 @@ async fn create(
             cwd,
             capability_directories,
         } => {
-            let remote_url = crate::registry::remote_url(&headers);
+            let remote_url = crate::registry::remote_url(&state, &headers);
             crate::environments::create(
                 &state,
                 &session.id,
