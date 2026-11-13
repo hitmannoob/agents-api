@@ -6,7 +6,10 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::resources::ToolResult;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::State as Extract;
@@ -360,10 +363,12 @@ async fn settle(
 
 pub(crate) async fn create(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Result<StatusCode, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     let key = headers
         .get("idempotency-key")
         .map(|key| {

@@ -7,6 +7,7 @@ use crate::State;
 use crate::contract::invalid;
 use crate::contract::now;
 use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::webhook_delivery::PREVIOUS_SECRET_SECS;
 use crate::webhook_delivery::secret_name;
 use anyhow::Context;
@@ -204,8 +205,10 @@ async fn create(
 
 async fn retrieve(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Webhook).await?;
     endpoint(&state, &id).await?.map(Json).ok_or_else(not_found)
 }
 
@@ -213,9 +216,11 @@ async fn retrieve(
 /// `updated_at`, as the SDK documents.
 async fn update(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Webhook).await?;
     let fields = fields(&body, &["name", "url", "event_types"])?;
     let mut endpoint = endpoint(&state, &id).await?.ok_or_else(not_found)?;
     let before = endpoint.clone();
@@ -292,8 +297,10 @@ async fn list(
 
 async fn delete(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Webhook).await?;
     if endpoint(&state, &id).await?.is_none() {
         return Err(not_found());
     }
@@ -319,9 +326,11 @@ async fn delete(
 /// when asked, so receivers can switch over without rejecting deliveries.
 async fn rotate_secret(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Webhook).await?;
     let fields = fields(&body, &["keep_old_secret_active_for_24_hours"])?;
     let keep = match fields.get("keep_old_secret_active_for_24_hours") {
         None | Some(Value::Null) => false,
@@ -365,9 +374,11 @@ async fn rotate_secret(
 /// Test deliveries are not retried.
 async fn test(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Webhook).await?;
     let fields = fields(&body, &["event_type"])?;
     let event_type = known_event_type(fields.get("event_type").unwrap_or(&Value::Null))?;
     let endpoint = endpoint(&state, &id).await?.ok_or_else(not_found)?;

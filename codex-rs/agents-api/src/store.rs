@@ -79,6 +79,8 @@ impl Store {
         Ok(agent)
     }
 
+    /// Unscoped lookup for tests. Request handlers use `project_agent`.
+    #[cfg(test)]
     pub async fn agent(&self, id: &str) -> anyhow::Result<Option<Agent>> {
         let data: Option<String> = sqlx::query_scalar("SELECT data FROM agents WHERE id = ?")
             .bind(id)
@@ -207,6 +209,8 @@ impl Store {
         Ok(session)
     }
 
+    /// Trusted internal lookup for worker events and execution. Request
+    /// handlers must check the decoded session ID against their Principal.
     pub async fn session(&self, id: &str) -> anyhow::Result<Option<Session>> {
         let row: Option<(String, Option<String>)> =
             sqlx::query_as("SELECT data, thread_id FROM sessions WHERE id = ?")

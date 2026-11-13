@@ -480,3 +480,330 @@ async fn every_operation_requires_its_permissions() -> anyhow::Result<()> {
     })
     .await?
 }
+
+/// Encode one ASCII character without changing the ID Axum hands the handler.
+fn encoded_id(id: &str, middle: bool) -> String {
+    assert!(id.is_ascii() && id.len() > 2);
+    let index = if middle { id.len() / 2 } else { 0 };
+    format!(
+        "{}%{:02x}{}",
+        &id[..index],
+        id.as_bytes()[index],
+        &id[index + 1..]
+    )
+}
+
+#[tokio::test]
+async fn percent_encoded_ids_cannot_cross_project_boundaries() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
+        let inventory: Value = serde_json::from_str(&std::fs::read_to_string(find_resource!("CONTRACT_INVENTORY.json")?)?)?;
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let provider = create_mock_responses_server_repeating_assistant("owned response").await;
+        MockResponsesConfig::new(&provider.uri()).write(home.path())?;
+        let directory = AbsolutePathBuf::from_absolute_path(data.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, directory.clone(), TOKEN.into()).await?;
+        api.configure_vault("project-isolation-test-passphrase-0123456789".into()).await?;
+        api.allow_webhook_hosts(["127.0.0.1".to_owned()]);
+        let (base, _server) = capabilities::serve(&api).await?;
+        api.configure_environments("project-isolation-environment-key".into(), format!("{}/registry", base.trim_end_matches("/v1")))?;
+        let admin = Admin::open(directory).await?;
+        let other = admin.create_project("Other").await?;
+        let all: Vec<String> = codex_agents_api::projects::PERMISSIONS.iter().map(|&p| p.to_owned()).collect();
+        let outsider = admin.create_key(&other.id, "", &all).await?.value;
+        let client = reqwest::Client::new();
+
+        let agent = request(&client, reqwest::Method::POST, &format!("{base}/agents"), json!({"model":"mock-model","name":"owned","instructions":"private instructions"})).await?;
+        let agent_id = agent["id"].as_str().context("agent id")?;
+        let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), json!({"agent_id":agent_id,"environment":{"type":"none"},"input":"private input"})).await?;
+        let session_id = session["id"].as_str().context("session id")?;
+        let session_url = format!("{base}/agents/sessions/{session_id}");
+        idle(&client, &session_url, /*expected_turns*/ 1).await?;
+        let hosted = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), json!({"agent_id":agent_id,"environment":{"type":"self_hosted","workspace_directory":workspace.path()}})).await?;
+        let environment_id = hosted["environment"]["id"].as_str().context("environment id")?;
+        let vault = request(&client, reqwest::Method::POST, &format!("{base}/vaults"), json!({"name":"owned"})).await?;
+        let vault_id = vault["id"].as_str().context("vault id")?;
+        let credential = request(&client, reqwest::Method::POST, &format!("{base}/vaults/{vault_id}/credentials"), json!({"name":"owned","auth":{"type":"static_bearer","token":"owned-secret","mcp_server_url":"https://example.com/mcp"}})).await?;
+        let credential_id = credential["id"].as_str().context("credential id")?;
+        let file = files::upload(&client, &base, &[("purpose", "user_data")], "owned.txt", b"private file bytes").await?.error_for_status()?.json::<Value>().await?;
+        let file_id = file["id"].as_str().context("file id")?;
+        let skill = skills::create(&client, &base, TOKEN, "owned").await?;
+        let skill_id = skill["id"].as_str().context("skill id")?;
+        let hook = request(&client, reqwest::Method::POST, &format!("{base}/webhook_endpoints"), json!({"name":"owned","url":"http://127.0.0.1:9/hook","event_types":["batch.completed"]})).await?;
+        let hook_id = hook["id"].as_str().context("webhook id")?;
+        let prototype = request(&client, reqwest::Method::POST, &format!("{base}/sessions"), json!({"agentId":agent_id,"environment":{"type":"none"}})).await?;
+        let prototype_id = prototype["id"].as_str().context("prototype id")?;
+
+        // Compare every owned root and its saved children/content after both
+        // mutation sweeps. No executor is needed: foreign environment file
+        // requests must fail before checking connectivity or touching compute.
+        let paths = vec![
+            format!("/agents/{agent_id}"), format!("/agents/sessions/{session_id}"),
+            format!("/agents/sessions/{session_id}/items"), format!("/agents/sessions/{session_id}/turns"),
+            format!("/vaults/{vault_id}"), format!("/vaults/{vault_id}/credentials/{credential_id}"),
+            format!("/files/{file_id}"), format!("/files/{file_id}/content"),
+            format!("/skills/{skill_id}"), format!("/skills/{skill_id}/content"),
+            format!("/skills/{skill_id}/versions/1"), format!("/skills/{skill_id}/versions/1/content"),
+            format!("/webhook_endpoints/{hook_id}"), format!("/agents/environments/{environment_id}"),
+            format!("/sessions/{prototype_id}"),
+        ];
+        let mut before = Vec::new();
+        for path in &paths {
+            before.push(client.get(format!("{base}{path}")).bearer_auth(TOKEN).send().await?.error_for_status()?.bytes().await?);
+        }
+        for middle in [false, true] {
+            let encoded_agent = encoded_id(agent_id, middle);
+            let encoded_session = encoded_id(session_id, middle);
+            let encoded_vault = encoded_id(vault_id, middle);
+            let encoded_file = encoded_id(file_id, middle);
+            let encoded_skill = encoded_id(skill_id, middle);
+            let encoded_hook = encoded_id(hook_id, middle);
+            let encoded_environment = encoded_id(environment_id, middle);
+            let swept = sweep(&client, &base, &outsider, &inventory, &[
+                ("{session_id}", &encoded_session, "session not found"),
+                ("{agent_id}", &encoded_agent, "agent not found"),
+                ("{vault_id}", &encoded_vault, "vault not found"),
+                ("{file_id}", &encoded_file, "file not found"),
+                ("{skill_id}", &encoded_skill, "skill not found"),
+                ("{webhook_endpoint_id}", &encoded_hook, "webhook endpoint not found"),
+                ("{environment_id}", &encoded_environment, "environment not found"),
+            ]).await?;
+            assert!(swept >= 40, "only {swept} operations covered");
+            // Actual child IDs and valid attack bodies cover paths whose
+            // placeholder children/body would otherwise fail deserialization.
+            for (method, path, body, message, public) in [
+                (reqwest::Method::GET, format!("/vaults/{encoded_vault}/credentials/{}", encoded_id(credential_id, middle)), Value::Null, "vault not found", true),
+                (reqwest::Method::POST, format!("/vaults/{encoded_vault}/credentials/{credential_id}"), json!({"auth":{"type":"static_bearer","token":"changed"}}), "vault not found", true),
+                (reqwest::Method::DELETE, format!("/vaults/{encoded_vault}/credentials/{credential_id}"), Value::Null, "vault not found", true),
+                (reqwest::Method::POST, format!("/agents/{encoded_agent}"), json!({"instructions":"changed"}), "agent not found", true),
+                (reqwest::Method::POST, format!("/agents/sessions/{encoded_session}"), json!({"metadata":{"intruder":"here"}}), "session not found", true),
+                (reqwest::Method::POST, format!("/agents/sessions/{encoded_session}/events"), json!({"events":[{"type":"message","role":"user","content":"intruder"}]}), "session not found", true),
+                (reqwest::Method::POST, format!("/webhook_endpoints/{encoded_hook}"), json!({"name":"changed","url":"http://127.0.0.1:9/stolen"}), "webhook endpoint not found", true),
+                (reqwest::Method::POST, format!("/agents/environments/{encoded_environment}/files"), json!({"type":"inline","path":workspace.path().join("intruder.txt"),"data":"aGFjaw=="}), "environment not found", true),
+                (reqwest::Method::GET, format!("/skills/{encoded_skill}/versions/%31/content"), Value::Null, "skill not found", true),
+                (reqwest::Method::GET, format!("/prototype/agents/{encoded_agent}"), Value::Null, "agent not found", false),
+                (reqwest::Method::GET, format!("/sessions/{}", encoded_id(prototype_id, middle)), Value::Null, "session not found", false),
+                (reqwest::Method::GET, format!("/sessions/{}/events", encoded_id(prototype_id, middle)), Value::Null, "session not found", false),
+                (reqwest::Method::GET, format!("/sessions/{}/turns", encoded_id(prototype_id, middle)), Value::Null, "session not found", false),
+                (reqwest::Method::POST, format!("/sessions/{}/input", encoded_id(prototype_id, middle)), json!({"input":"intruder"}), "session not found", false),
+                (reqwest::Method::POST, format!("/sessions/{}/turns/t/cancel", encoded_id(prototype_id, middle)), json!({}), "session not found", false),
+                (reqwest::Method::POST, format!("/sessions/{}/turns/t/tool-results", encoded_id(prototype_id, middle)), json!({"callId":"c","success":true,"output":"intruder"}), "session not found", false),
+            ] {
+                let response = client.request(method.clone(), format!("{base}{path}")).bearer_auth(&outsider).json(&body).send().await?;
+                assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{method} {path}");
+                let actual: Value = response.json().await?;
+                let expected = if public { json!({"error":{"message":message,"type":"invalid_request_error","param":null,"code":null}}) } else { json!({"error":message}) };
+                assert_eq!(actual, expected, "{method} {path}");
+            }
+            // The same encoded IDs still resolve for their owner.
+            let own = client.get(format!("{base}/files/{encoded_file}/content")).bearer_auth(TOKEN).send().await?.error_for_status()?.bytes().await?;
+            assert_eq!(own.as_ref(), b"private file bytes");
+            let own = request(&client, reqwest::Method::GET, &format!("{base}/agents/sessions/{encoded_session}"), Value::Null).await?;
+            assert_eq!(own["id"], json!(session_id));
+        }
+        for (path, expected) in paths.iter().zip(before) {
+            let actual = client.get(format!("{base}{path}")).bearer_auth(TOKEN).send().await?.error_for_status()?.bytes().await?;
+            assert_eq!(actual, expected, "owner's resource changed: {path}");
+        }
+        assert!(!workspace.path().join("intruder.txt").exists());
+
+        // Bad escapes, residual encoding, separators, UTF-8 failures, and
+        // alternate slash/case spellings must never reach an owned resource.
+        for path in [
+            format!("/files/{file_id}%"), format!("/files/{file_id}%6"), format!("/files/{file_id}%GG"),
+            format!("/files/{file_id}%2fcontent"), format!("/files/{file_id}%5ccontent"),
+            format!("/files/%2566{}", &file_id[1..]), format!("/files/%ff{file_id}"),
+            format!("/files/{file_id}/"), format!("/files//{file_id}"), format!("/Files/{file_id}"),
+        ] {
+            let response = client.get(format!("{base}{path}")).bearer_auth(&outsider).send().await?;
+            assert!(matches!(response.status().as_u16(), 400 | 404), "{path}: {}", response.status());
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
+#[tokio::test]
+async fn prototype_sessions_reject_foreign_environments_at_create_and_turn_start()
+-> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 60), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let provider = create_mock_responses_server_repeating_assistant("unused").await;
+        MockResponsesConfig::new(&provider.uri()).write(home.path())?;
+        let directory = AbsolutePathBuf::from_absolute_path(data.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, directory.clone(), TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        api.configure_environments("prototype-ownership-environment-key".into(), format!("{}/registry", base.trim_end_matches("/v1")))?;
+        let admin = Admin::open(directory.clone()).await?;
+        let other = admin.create_project("Other").await?;
+        let all: Vec<String> = codex_agents_api::projects::PERMISSIONS.iter().map(|&p| p.to_owned()).collect();
+        let outsider = admin.create_key(&other.id, "", &all).await?.value;
+        let client = reqwest::Client::new();
+        let hosted_body = json!({"agent":{"model":"mock-model"},"environment":{"type":"self_hosted","workspace_directory":workspace.path()}});
+        let owner = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), hosted_body.clone()).await?;
+        let environment_id = owner["environment"]["id"].as_str().context("environment id")?;
+        let send = |path: String, body: Value| client.post(format!("{base}{path}")).bearer_auth(&outsider).json(&body).send();
+        let agent: Value = send("/agents".into(), json!({"model":"mock-model"})).await?.error_for_status()?.json().await?;
+        let agent_id = agent["id"].as_str().context("agent id")?;
+        let pool = codex_state::SqliteConfig::from_sqlite_home(directory)
+            .open_read_write_pool(data.path().join("agents-api.sqlite").as_path()).await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE project_id = ?").bind(&other.id).fetch_one(&pool).await?;
+        for id in [environment_id, "env_missing"] {
+            let response = send("/sessions".into(), json!({"agentId":agent_id,"environment":{"type":"selfHosted","id":id,"cwd":workspace.path()}})).await?;
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+            assert_eq!(response.json::<Value>().await?, json!({"error":"environment not found"}));
+        }
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE project_id = ?").bind(&other.id).fetch_one(&pool).await?;
+        assert_eq!(after, count, "rejected creations must not persist sessions");
+        // A legitimate binding to this project's own environment remains valid.
+        let own: Value = send("/agents/sessions".into(), hosted_body).await?.error_for_status()?.json().await?;
+        let own_environment = own["environment"]["id"].as_str().context("own environment")?;
+        let valid = send("/sessions".into(), json!({"agentId":agent_id,"environment":{"type":"selfHosted","id":own_environment,"cwd":workspace.path()}})).await?;
+        assert_eq!(valid.status(), reqwest::StatusCode::CREATED);
+        // Simulate an already-stored binding from before the fix. The caller
+        // owns the session but its environment belongs to the other project.
+        let stored: Value = send("/sessions".into(), json!({"agentId":agent_id,"environment":{"type":"none"}})).await?.error_for_status()?.json().await?;
+        let id = stored["id"].as_str().context("stored session id")?;
+        let foreign = json!({"type":"selfHosted","id":environment_id,"cwd":workspace.path()});
+        sqlx::query("UPDATE sessions SET data = json_set(data, '$.environment', json(?)) WHERE id = ? AND project_id = ?")
+            .bind(foreign.to_string()).bind(id).bind(&other.id).execute(&pool).await?;
+        let before: (String, Option<String>) = sqlx::query_as("SELECT data, thread_id FROM sessions WHERE id = ?").bind(id).fetch_one(&pool).await?;
+        let response = send(format!("/sessions/{id}/input"), json!({"input":"run a command"})).await?;
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(response.json::<Value>().await?, json!({"error":"environment not found"}));
+        let after: (String, Option<String>) = sqlx::query_as("SELECT data, thread_id FROM sessions WHERE id = ?").bind(id).fetch_one(&pool).await?;
+        assert_eq!(after, before);
+        assert!(after.1.is_none(), "rejection must precede worker thread creation");
+        assert_eq!(request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?["status"], json!("pending"));
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
+#[tokio::test]
+async fn prototype_local_environments_require_the_operator_token() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 60), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let provider = create_mock_responses_server_repeating_assistant("unused").await;
+        MockResponsesConfig::new(&provider.uri()).write(home.path())?;
+        let directory = AbsolutePathBuf::from_absolute_path(data.path())?;
+        let api =
+            AgentsApi::new(backend(home.path()).await?, directory.clone(), TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let admin = Admin::open(directory.clone()).await?;
+        let other = admin.create_project("Other").await?;
+        let all: Vec<String> = codex_agents_api::projects::PERMISSIONS
+            .iter()
+            .map(|&p| p.to_owned())
+            .collect();
+        let outsider = admin.create_key(&other.id, "", &all).await?.value;
+        let default_key = admin
+            .create_key(
+                codex_agents_api::projects::DEFAULT_PROJECT,
+                "non-operator",
+                &all,
+            )
+            .await?
+            .value;
+        let client = reqwest::Client::new();
+        let post = |secret: &str, path: &str, body: Value| {
+            client
+                .post(format!("{base}{path}"))
+                .bearer_auth(secret)
+                .json(&body)
+                .send()
+        };
+        let operator_agent = request(
+            &client,
+            reqwest::Method::POST,
+            &format!("{base}/agents"),
+            json!({"model":"mock-model"}),
+        )
+        .await?;
+        let other_agent: Value = post(&outsider, "/agents", json!({"model":"mock-model"}))
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let local = json!({"type":"local","cwd":home.path()});
+        let pool = codex_state::SqliteConfig::from_sqlite_home(directory)
+            .open_read_write_pool(data.path().join("agents-api.sqlite").as_path())
+            .await?;
+        for (secret, agent) in [(&outsider, &other_agent), (&default_key, &operator_agent)] {
+            let response = post(
+                secret,
+                "/sessions",
+                json!({"agentId":agent["id"],"environment":local}),
+            )
+            .await?;
+            assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+            assert_eq!(
+                response.json::<Value>().await?,
+                json!({"error":"local environments require the operator token"})
+            );
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(count, 0, "rejected local sessions must not be persisted");
+        let accepted = post(
+            TOKEN,
+            "/sessions",
+            json!({"agentId":operator_agent["id"],"environment":local}),
+        )
+        .await?;
+        assert_eq!(accepted.status(), reqwest::StatusCode::CREATED);
+        let accepted: Value = accepted.json().await?;
+        let local_id = accepted["id"].as_str().context("local session id")?;
+        // A default-project key is not an operator, even for existing sessions.
+        let response = post(
+            &default_key,
+            &format!("/sessions/{local_id}/input"),
+            json!({"input":"read host files"}),
+        )
+        .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.json::<Value>().await?,
+            json!({"error":"local environments require the operator token"})
+        );
+        // Previously stored local bindings in another project are also refused.
+        let stored: Value = post(
+            &outsider,
+            "/sessions",
+            json!({"agentId":other_agent["id"],"environment":{"type":"none"}}),
+        )
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+        let id = stored["id"].as_str().context("stored session id")?;
+        sqlx::query(
+            "UPDATE sessions SET data = json_set(data, '$.environment', json(?)) WHERE id = ?",
+        )
+        .bind(local.to_string())
+        .bind(id)
+        .execute(&pool)
+        .await?;
+        let response = post(
+            &outsider,
+            &format!("/sessions/{id}/input"),
+            json!({"input":"read host files"}),
+        )
+        .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.json::<Value>().await?,
+            json!({"error":"local environments require the operator token"})
+        );
+        let threads: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE thread_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(threads, 0);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}

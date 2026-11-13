@@ -2,6 +2,7 @@
 use crate::ApiError;
 use crate::State;
 use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::resources::Agent;
 use crate::resources::AgentConfig;
 use crate::resources::Environment;
@@ -317,15 +318,19 @@ async fn create(
 
 async fn read(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     Ok(Json(crate::records::session(&state, &id).await?))
 }
 
 async fn stream(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     let receiver = state.public_events.subscribe();
     crate::records::session(&state, &id).await?;
     if !state.connected() {

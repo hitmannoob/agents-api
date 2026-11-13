@@ -66,11 +66,12 @@ fn not_found() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "file not found".into())
 }
 
-async fn row(state: &State, id: &str) -> Result<Row, ApiError> {
+async fn row(state: &State, project_id: &str, id: &str) -> Result<Row, ApiError> {
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM files WHERE id = ? AND {LIVE}"
+        "SELECT {COLUMNS} FROM files WHERE id = ? AND project_id = ? AND {LIVE}"
     )))
     .bind(id)
+    .bind(project_id)
     .bind(crate::contract::now() as i64)
     .fetch_optional(&state.store.0)
     .await
@@ -79,11 +80,12 @@ async fn row(state: &State, id: &str) -> Result<Row, ApiError> {
 }
 
 /// A live file's stored digest, if it has one (uploads before digests did not).
-async fn digest(state: &State, id: &str) -> Result<Option<String>, ApiError> {
+async fn digest(state: &State, project_id: &str, id: &str) -> Result<Option<String>, ApiError> {
     let digest: Option<Option<String>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT sha256 FROM files WHERE id = ? AND {LIVE}"
+        "SELECT sha256 FROM files WHERE id = ? AND project_id = ? AND {LIVE}"
     )))
     .bind(id)
+    .bind(project_id)
     .bind(crate::contract::now() as i64)
     .fetch_optional(&state.store.0)
     .await
@@ -112,7 +114,7 @@ pub(crate) async fn read(state: &State, project_id: &str, id: &str) -> Result<Ve
     if !owned {
         return Err(not_found());
     }
-    let expected = digest(state, id).await?;
+    let expected = digest(state, project_id, id).await?;
     let contents = tokio::fs::read(state.files.0.join(id))
         .await
         .map_err(|_| not_found())?;
@@ -261,16 +263,18 @@ async fn create(
 
 async fn retrieve(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(public(row(&state, &id).await?)))
+    Ok(Json(public(row(&state, &principal.project_id, &id).await?)))
 }
 
 async fn content(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let expected = digest(&state, &id).await?;
+    let expected = digest(&state, &principal.project_id, &id).await?;
     let path = state.files.0.join(&id);
     if let Some(expected) = expected {
         verify(&path, &expected).await?;
@@ -291,12 +295,14 @@ async fn content(
 
 async fn delete(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let deleted = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DELETE FROM files WHERE id = ? AND {LIVE}"
+        "DELETE FROM files WHERE id = ? AND project_id = ? AND {LIVE}"
     )))
     .bind(&id)
+    .bind(&principal.project_id)
     .bind(crate::contract::now() as i64)
     .execute(&state.store.0)
     .await

@@ -138,3 +138,29 @@ async fn keys_belong_to_projects_and_can_be_revoked() -> anyhow::Result<()> {
     assert!(admin.create_project("  ").await.is_err());
     Ok(())
 }
+
+#[test]
+fn resource_paths_reject_ambiguous_encodings() {
+    let params = |id: &str| std::collections::HashMap::from([("id".to_owned(), id.to_owned())]);
+    for (raw, decoded) in [
+        ("/v1/files/%66ile-abc", "file-abc"),
+        ("/v1/files/fi%6Ce-abc", "file-abc"),
+        ("/v1/files/fi%6ce-abc", "file-abc"),
+        ("/v1/files/FILE-abc", "FILE-abc"),
+    ] {
+        assert!(unambiguous_path(raw, &params(decoded)), "{raw}");
+    }
+    for (raw, decoded) in [
+        ("/v1/files/file%", "file%"),
+        ("/v1/files/file%6", "file%6"),
+        ("/v1/files/file%GG", "file%GG"),
+        ("/v1/files/file%2Fabc", "file/abc"),
+        ("/v1/files/file%5cabc", "file\\abc"),
+        ("/v1/files/%2566ile-abc", "%66ile-abc"),
+        ("/v1/files/file%00abc", "file\0abc"),
+        ("/v1/files/%2e%2e", ".."),
+        ("/v1/files/", ""),
+    ] {
+        assert!(!unambiguous_path(raw, &params(decoded)), "{raw}");
+    }
+}

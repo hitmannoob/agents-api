@@ -8,6 +8,9 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
+use crate::projects::Resource;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::Query;
@@ -29,9 +32,17 @@ pub(crate) struct ListParams {
 
 pub(crate) async fn list(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(session_id): Path<String>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(
+        &state,
+        &principal.project_id,
+        &session_id,
+        Resource::PublicSession,
+    )
+    .await?;
     crate::records::session(&state, &session_id).await?;
     if !(1..=100).contains(&params.limit.unwrap_or(/*default*/ 20))
         || !matches!(params.order.as_deref(), None | Some("asc" | "desc"))
@@ -52,8 +63,16 @@ pub(crate) async fn list(
 /// does.
 pub(crate) async fn missing(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((session_id, _artifact_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(
+        &state,
+        &principal.project_id,
+        &session_id,
+        Resource::PublicSession,
+    )
+    .await?;
     crate::records::session(&state, &session_id).await?;
     Err(ApiError(StatusCode::NOT_FOUND, "artifact not found".into()))
 }

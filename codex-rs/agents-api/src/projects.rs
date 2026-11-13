@@ -50,6 +50,7 @@ pub const PERMISSIONS: [&str; 12] = [
 pub(crate) struct Principal {
     pub project_id: String,
     permissions: Vec<String>,
+    pub(crate) is_operator: bool,
 }
 
 impl Principal {
@@ -75,6 +76,7 @@ pub(crate) async fn resolve(state: &State, secret: &str) -> anyhow::Result<Optio
     if presented == digest(&state.token) {
         return Ok(Some(Principal {
             project_id: DEFAULT_PROJECT.to_owned(),
+            is_operator: true,
             permissions: PERMISSIONS
                 .iter()
                 .map(|&permission| permission.to_owned())
@@ -90,79 +92,131 @@ pub(crate) async fn resolve(state: &State, secret: &str) -> anyhow::Result<Optio
     row.map(|(project_id, permissions)| {
         Ok(Principal {
             project_id,
+            is_operator: false,
             permissions: serde_json::from_str(&permissions)?,
         })
     })
     .transpose()
 }
 
-/// The not-found message for a request whose root resource exists but belongs
-/// to another project, so it reads exactly like a missing ID. Children of a
-/// session (turns, items, subagents, artifacts, events, and traces) are
-/// covered by their session, a vault's credentials by their vault, and an
-/// environment by the session it belongs to. A root that does not exist passes through, so
-/// its handler keeps its own validation order and errors.
-pub(crate) async fn foreign(
-    state: &State,
-    principal: &Principal,
-    path: &str,
-) -> anyhow::Result<Option<&'static str>> {
-    let Some(rest) = path.strip_prefix("/v1/") else {
-        return Ok(None);
-    };
-    let segments: Vec<&str> = rest.split('/').collect();
-    let (query, id, message) = match segments.as_slice() {
-        ["agents", "sessions", id, ..] => (
-            "SELECT project_id FROM public_sessions WHERE id = ?",
-            *id,
-            "session not found",
-        ),
-        ["agents", "environments", id, ..] => {
-            let owner = environment_project(state, id).await?;
-            return Ok(owner
-                .is_some_and(|owner| owner != principal.project_id)
-                .then_some("environment not found"));
+/// Root resources whose ownership also authorizes their nested resources.
+#[derive(Clone, Copy)]
+pub(crate) enum Resource {
+    Agent,
+    Session,
+    PublicSession,
+    Environment,
+    Vault,
+    Webhook,
+    File,
+    Skill,
+}
+
+impl Resource {
+    fn query(self) -> &'static str {
+        match self {
+            Self::Agent => "SELECT project_id FROM agents WHERE id = ?",
+            Self::Session => "SELECT project_id FROM sessions WHERE id = ?",
+            Self::PublicSession => "SELECT project_id FROM public_sessions WHERE id = ?",
+            Self::Environment => {
+                "SELECT p.project_id FROM environments e JOIN public_sessions p ON p.id = e.session_id WHERE e.id = ?"
+            }
+            Self::Vault => "SELECT project_id FROM vaults WHERE id = ?",
+            Self::Webhook => "SELECT project_id FROM webhook_endpoints WHERE id = ?",
+            Self::File => "SELECT project_id FROM files WHERE id = ?",
+            Self::Skill => "SELECT project_id FROM skills WHERE id = ?",
         }
-        ["agents", "sessions" | "environments", ..] => return Ok(None),
-        ["agents", id, ..] | ["prototype", "agents", id, ..] => (
-            "SELECT project_id FROM agents WHERE id = ?",
-            *id,
-            "agent not found",
-        ),
-        ["vaults", id, ..] => (
-            "SELECT project_id FROM vaults WHERE id = ?",
-            *id,
-            "vault not found",
-        ),
-        ["webhook_endpoints", id, ..] => (
-            "SELECT project_id FROM webhook_endpoints WHERE id = ?",
-            *id,
-            "webhook endpoint not found",
-        ),
-        ["files", id, ..] => (
-            "SELECT project_id FROM files WHERE id = ?",
-            *id,
-            "file not found",
-        ),
-        ["skills", id, ..] => (
-            "SELECT project_id FROM skills WHERE id = ?",
-            *id,
-            "skill not found",
-        ),
-        ["sessions", id, ..] => (
-            "SELECT project_id FROM sessions WHERE id = ?",
-            *id,
-            "session not found",
-        ),
-        _ => return Ok(None),
-    };
-    let owner: Option<String> = sqlx::query_scalar(query)
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::Agent => "agent not found",
+            Self::Session | Self::PublicSession => "session not found",
+            Self::Environment => "environment not found",
+            Self::Vault => "vault not found",
+            Self::Webhook => "webhook endpoint not found",
+            Self::File => "file not found",
+            Self::Skill => "skill not found",
+        }
+    }
+}
+
+/// Check the decoded ID inside a handler, independently of route middleware.
+/// Missing and foreign roots have the same status and message. Ownership is
+/// immutable, so a successful check also scopes subsequent child operations.
+pub(crate) async fn require(
+    state: &State,
+    project_id: &str,
+    id: &str,
+    resource: Resource,
+) -> Result<(), crate::ApiError> {
+    let owner: Option<String> = sqlx::query_scalar(resource.query())
         .bind(id)
         .fetch_optional(&state.store.0)
-        .await?;
-    Ok(owner
-        .is_some_and(|owner| owner != principal.project_id)
-        .then_some(message))
+        .await
+        .map_err(anyhow::Error::from)?;
+    if owner.as_deref() != Some(project_id) {
+        return Err(crate::ApiError(
+            axum::http::StatusCode::NOT_FOUND,
+            resource.message().into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Resource selection uses only Axum's matched template, never the raw URI.
+/// IDs come from Axum's Path extractor, shared with the actual handlers.
+pub(crate) fn root(path: &str) -> Option<(Resource, &'static str)> {
+    match path
+        .strip_prefix("/v1/")?
+        .split('/')
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["agents", "sessions", "{id}", ..] => Some((Resource::PublicSession, "id")),
+        ["agents", "environments", "{id}", ..] => Some((Resource::Environment, "id")),
+        ["agents", "{id}", ..] | ["prototype", "agents", "{id}", ..] => {
+            Some((Resource::Agent, "id"))
+        }
+        ["sessions", "{id}", ..] => Some((Resource::Session, "id")),
+        ["vaults", "{vault_id}", ..] => Some((Resource::Vault, "vault_id")),
+        ["webhook_endpoints", "{id}", ..] => Some((Resource::Webhook, "id")),
+        ["files", "{id}", ..] => Some((Resource::File, "id")),
+        ["skills", "{id}", ..] => Some((Resource::Skill, "id")),
+        _ => None,
+    }
+}
+
+/// Reject malformed escapes even though percent-encoding's decoder leaves
+/// them literal. Decode exactly once via Axum; do not reinterpret decoded
+/// separators, residual escapes, dot segments, or control characters as IDs.
+pub(crate) fn unambiguous_path(
+    raw: &str,
+    params: &std::collections::HashMap<String, String>,
+) -> bool {
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len()
+                || !bytes[i + 1].is_ascii_hexdigit()
+                || !bytes[i + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    params.values().all(|id| {
+        !id.is_empty()
+            && id != "."
+            && id != ".."
+            && !id
+                .chars()
+                .any(|c| matches!(c, '/' | '\\' | '%') || c.is_control())
+    })
 }
 
 /// The project that owns an environment, through its session.

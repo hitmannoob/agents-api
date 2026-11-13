@@ -783,7 +783,14 @@ turn status keeps the call unresolved for you to reconcile before issuing more
 work, and it is never claimed as delivered on incomplete evidence.
 
 `{ "type": "local", "cwd": "/absolute/workspace" }` selects the app-server's
-local executor with read-only sandboxing. `none` disables execution-environment
+local executor with read-only sandboxing. This prototype environment requires
+the operator token (`CODEX_AGENTS_API_TOKEN`); project API keys, including keys
+for the default project, receive 403. Read-only sandboxing permits service-host
+reads, so local execution is reserved for the operator. A prototype
+`{ "type": "selfHosted", "id": "…", "cwd": "/absolute/workspace" }` may name only
+an environment owned by the session's project; ownership is checked at creation
+and again before execution. Missing or foreign environments return 404.
+`none` disables execution-environment
 access. Other interactive requests (approvals, user questions, MCP elicitation)
 are explicitly rejected, not left waiting.
 Empty sessions are saved immediately; the first input creates and persists a

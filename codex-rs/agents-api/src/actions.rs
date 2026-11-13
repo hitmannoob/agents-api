@@ -1,8 +1,11 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::resources::RequiredAction;
 use crate::resources::ToolResult;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::State as Extract;
@@ -132,9 +135,17 @@ pub(crate) fn validate_output(output: &Value) -> Result<(), ApiError> {
 /// Prototype route: any JSON output, within the prototype size limit.
 pub(crate) async fn submit(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((session_id, turn_id)): Path<(String, String)>,
     Json(result): Json<ToolResult>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(
+        &state,
+        &principal.project_id,
+        &session_id,
+        Resource::Session,
+    )
+    .await?;
     validate_output(&result.output)?;
     Ok(Json(
         resolve_call(&state, session_id, turn_id, result).await?,

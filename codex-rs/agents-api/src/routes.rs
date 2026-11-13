@@ -1,6 +1,7 @@
 use crate::ApiError;
 use crate::State;
 use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::resources::Agent;
 use crate::resources::AgentConfig;
 use crate::resources::Environment;
@@ -12,6 +13,8 @@ use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::FromRequestParts;
+use axum::extract::MatchedPath;
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::Request;
@@ -68,6 +71,10 @@ pub(crate) fn router(state: Arc<State>) -> Router {
         .merge(crate::registry::router())
         .merge(crate::files::router())
         .merge(crate::skills::router())
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            isolate_project,
+        ))
         // Route layers see the matched route template, which labels metrics.
         .route_layer(middleware::from_fn(crate::telemetry::route))
         .layer(DefaultBodyLimit::max(/*limit*/ 16 * 1024))
@@ -122,19 +129,18 @@ async fn authorize(
             StatusCode::UNAUTHORIZED,
             "bearer token required".into(),
         )),
-        Some(principal) => match principal.missing(crate::projects::required(
-            request.method(),
-            request.uri().path(),
-        )) {
-            Some(permission) => Some(ApiError(
-                StatusCode::FORBIDDEN,
-                format!("this API key lacks the {permission} permission"),
-            )),
-            // Another project's resource reads as missing.
-            None => crate::projects::foreign(&state, principal, request.uri().path())
-                .await?
-                .map(|message| ApiError(StatusCode::NOT_FOUND, message.into())),
-        },
+        // Project isolation runs after routing, in `isolate_project`.
+        Some(principal) => principal
+            .missing(crate::projects::required(
+                request.method(),
+                request.uri().path(),
+            ))
+            .map(|permission| {
+                ApiError(
+                    StatusCode::FORBIDDEN,
+                    format!("this API key lacks the {permission} permission"),
+                )
+            }),
     };
     if let Some(error) = rejection {
         return if compatible {
@@ -165,6 +171,50 @@ async fn authorize(
         return Ok(ApiError(status, message).public_response());
     }
     Ok(response)
+}
+
+/// Authorization after routing uses the router's template and its decoded
+/// parameters, exactly as Path<String>/Path<(...)> do in the handlers. Axum
+/// matches case, slash count, and trailing slashes without normalization.
+async fn isolate_project(
+    Extract(state): Extract<Arc<State>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let template = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let Some((resource, key)) = crate::projects::root(&template) else {
+        // Fail closed: a parameterized API route without an ownership rule
+        // would otherwise skip isolation entirely.
+        if template.starts_with("/v1/") && template.contains('{') {
+            return Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("no project ownership rule for {template}"),
+            ));
+        }
+        return Ok(next.run(request).await);
+    };
+    let (mut parts, body) = request.into_parts();
+    let Path(params) =
+        Path::<std::collections::HashMap<String, String>>::from_request_parts(&mut parts, &state)
+            .await
+            .map_err(|_| crate::contract::invalid("invalid resource path"))?;
+    if !crate::projects::unambiguous_path(parts.uri.path(), &params) {
+        return Err(crate::contract::invalid("invalid resource path"));
+    }
+    let principal = parts
+        .extensions
+        .get::<Principal>()
+        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "bearer token required".into()))?;
+    let id = params
+        .get(key)
+        .ok_or_else(|| crate::contract::invalid("invalid resource path"))?;
+    crate::projects::require(&state, &principal.project_id, id, resource).await?;
+    Ok(next.run(Request::from_parts(parts, body)).await)
 }
 
 async fn create_agent(
@@ -243,11 +293,13 @@ async fn create_prototype_agent(
 
 async fn read_prototype_agent(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Agent>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Agent).await?;
     state
         .store
-        .agent(&id)
+        .project_agent(&principal.project_id, &id)
         .await?
         .map(Json)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))
@@ -255,11 +307,13 @@ async fn read_prototype_agent(
 
 async fn read_agent(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Agent).await?;
     let agent = state
         .store
-        .agent(&id)
+        .project_agent(&principal.project_id, &id)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))?;
     Ok(Json(public_agent(&agent)))
@@ -342,12 +396,14 @@ async fn list_agents(
 
 async fn update_agent(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Json(mut patch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Agent).await?;
     let previous = state
         .store
-        .agent(&id)
+        .project_agent(&principal.project_id, &id)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))?;
     let (name, metadata) =
@@ -380,8 +436,10 @@ async fn update_agent(
 
 async fn delete_agent(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Agent).await?;
     if !state.store.delete_agent(&id).await? {
         return Err(ApiError(StatusCode::NOT_FOUND, "agent not found".into()));
     }
@@ -399,6 +457,23 @@ async fn create_session(
     Extension(principal): Extension<Principal>,
     Json(params): Json<SessionCreateParams>,
 ) -> Result<(StatusCode, Json<Session>), ApiError> {
+    if let Environment::SelfHosted { id, .. } = &params.environment
+        && crate::projects::environment_project(&state, id)
+            .await?
+            .as_deref()
+            != Some(principal.project_id.as_str())
+    {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "environment not found".into(),
+        ));
+    }
+    if matches!(params.environment, Environment::Local { .. }) && !principal.is_operator {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "local environments require the operator token".into(),
+        ));
+    }
     let agent = state
         .store
         .project_agent(&principal.project_id, &params.agent_id)
@@ -417,8 +492,10 @@ async fn create_session(
 
 async fn read_session(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Session>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Session).await?;
     state
         .store
         .session(&id)
@@ -429,9 +506,22 @@ async fn read_session(
 
 async fn input(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Json(params): Json<InputParams>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Session).await?;
+    let session = state
+        .store
+        .session(&id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "session not found".into()))?;
+    if matches!(session.environment, Environment::Local { .. }) && !principal.is_operator {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "local environments require the operator token".into(),
+        ));
+    }
     if params.input.trim().is_empty() || params.input.len() > 8192 {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -457,7 +547,33 @@ pub(crate) async fn start_turn(
     // Serialize this session's bootstrap and submission, not the model/tool
     // execution that follows; other sessions are admitted concurrently.
     let _admission = state.input_gates.lock(id).await;
-    let Json(session) = read_session(Extract(Arc::clone(state)), Path(id.to_owned())).await?;
+    let project_id: String = sqlx::query_scalar("SELECT project_id FROM sessions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.store.0)
+        .await
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "session not found".into()))?;
+    let session = state
+        .store
+        .session(id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "session not found".into()))?;
+    // Stored bindings may predate creation-time validation. Check before any
+    // worker configuration, credential loading, or executor attachment.
+    if let Environment::SelfHosted {
+        id: environment_id, ..
+    } = &session.environment
+    {
+        crate::projects::require(state, &project_id, environment_id, Resource::Environment).await?;
+    }
+    if matches!(&session.environment, Environment::Local { .. })
+        && project_id != crate::projects::DEFAULT_PROJECT
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "local environments require the operator token".into(),
+        ));
+    }
     crate::configuration::validate_execution(&session.agent.config, &session.environment)?;
     let tokens = crate::credentials::load(state, id).await?;
     let mcp_secrets = crate::stdio_env::load(state, crate::stdio_env::session_name(id)).await?;
@@ -477,7 +593,7 @@ pub(crate) async fn start_turn(
         ..
     } = &session.environment
     {
-        crate::environments::attach(state, environment_id).await?;
+        crate::environments::attach(state, &project_id, environment_id).await?;
         crate::session_skills::install(state, id, environment_id).await?;
         skills_root = crate::session_skills::root(state, id, cwd).await?;
     }
@@ -662,10 +778,13 @@ pub(crate) async fn start_turn(
 
 async fn turns(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Query(page): Query<PageParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let Json(session) = read_session(Extract(Arc::clone(&state)), Path(id)).await?;
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Session).await?;
+    let Json(session) =
+        read_session(Extract(Arc::clone(&state)), Extension(principal), Path(id)).await?;
     let Some(thread_id) = session.thread_id else {
         return Ok(Json(
             json!({"data": [], "nextCursor": null, "backwardsCursor": null}),
@@ -676,9 +795,12 @@ async fn turns(
 
 pub(crate) async fn cancel(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((id, turn_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let Json(session) = read_session(Extract(Arc::clone(&state)), Path(id)).await?;
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Session).await?;
+    let Json(session) =
+        read_session(Extract(Arc::clone(&state)), Extension(principal), Path(id)).await?;
     let thread_id = session
         .thread_id
         .ok_or_else(|| ApiError(StatusCode::CONFLICT, "session has no turn".into()))?;
@@ -694,10 +816,17 @@ pub(crate) async fn cancel(
 
 async fn events(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Session).await?;
     let receiver = state.events.subscribe();
-    let _ = read_session(Extract(Arc::clone(&state)), Path(id.clone())).await?;
+    let _ = read_session(
+        Extract(Arc::clone(&state)),
+        Extension(principal),
+        Path(id.clone()),
+    )
+    .await?;
     if !state.connected() {
         return Err(crate::disconnected_error());
     }

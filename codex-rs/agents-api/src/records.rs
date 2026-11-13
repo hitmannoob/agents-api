@@ -1,8 +1,11 @@
 //! Durable public records are committed before their live notifications are sent.
 use crate::ApiError;
 use crate::State;
+use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::resources::RequiredAction;
 use crate::resources::ToolResult;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::Query;
@@ -700,22 +703,28 @@ pub(crate) async fn list(
 
 pub(crate) async fn items(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     list(&state, &id, "item", page, /*subagent*/ None).await
 }
 pub(crate) async fn turns(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     list(&state, &id, "turn", page, /*subagent*/ None).await
 }
 pub(crate) async fn turn(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((id, turn_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     turn_record(&state, &id, /*subagent*/ None, &turn_id).await
 }
 

@@ -8,6 +8,7 @@ use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
 use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::resources::AgentConfig;
 use axum::Extension;
 use axum::Json;
@@ -344,9 +345,11 @@ fn parse_auth(
 
 pub(crate) async fn create_credential(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(vault_id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &vault_id, Resource::Vault).await?;
     let fields = body
         .as_object()
         .ok_or_else(|| invalid("credential must be an object"))?;
@@ -391,6 +394,7 @@ pub(crate) async fn list_credentials(
     Path(vault_id): Path<String>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &vault_id, Resource::Vault).await?;
     if crate::vaults::vault(&state, &vault_id).await?.is_none() {
         return Err(crate::vaults::not_found("vault"));
     }
@@ -399,8 +403,10 @@ pub(crate) async fn list_credentials(
 
 pub(crate) async fn retrieve_credential(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((vault_id, credential_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &vault_id, Resource::Vault).await?;
     credential(&state, &vault_id, &credential_id)
         .await?
         .map(Json)
@@ -411,9 +417,11 @@ pub(crate) async fn retrieve_credential(
 /// already snapshotted the old secret keep it until they are recreated.
 pub(crate) async fn rotate_credential(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((vault_id, credential_id)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &vault_id, Resource::Vault).await?;
     let fields = body
         .as_object()
         .ok_or_else(|| invalid("credential update must be an object"))?;
@@ -481,8 +489,10 @@ pub(crate) async fn rotate_credential(
 
 pub(crate) async fn delete_credential(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((vault_id, credential_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &vault_id, Resource::Vault).await?;
     let deleted = sqlx::query("DELETE FROM vault_credentials WHERE id = ? AND vault_id = ?")
         .bind(&credential_id)
         .bind(&vault_id)

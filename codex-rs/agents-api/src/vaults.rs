@@ -4,6 +4,7 @@ use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
 use crate::projects::Principal;
+use crate::projects::Resource;
 use axum::Extension;
 use axum::Json;
 use axum::Router;
@@ -213,8 +214,10 @@ async fn list_vaults(
 
 async fn retrieve_vault(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(vault_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &vault_id, Resource::Vault).await?;
     vault(&state, &vault_id)
         .await?
         .map(Json)
@@ -225,8 +228,10 @@ async fn retrieve_vault(
 /// a credential keep using it, as the guide documents.
 async fn delete_vault(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(vault_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &vault_id, Resource::Vault).await?;
     let mut tx = state.store.0.begin().await.map_err(anyhow::Error::from)?;
     let credentials: Vec<String> =
         sqlx::query_scalar("DELETE FROM vault_credentials WHERE vault_id = ? RETURNING id")

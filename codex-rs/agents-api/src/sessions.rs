@@ -4,6 +4,7 @@ use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
 use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::resources::Agent;
 use crate::resources::AgentConfig;
 use axum::Extension;
@@ -88,9 +89,11 @@ pub(crate) async fn list(
 /// starts.
 pub(crate) async fn update(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     let fields = body
         .as_object_mut()
         .ok_or_else(|| invalid("session update must be an object"))?;
@@ -177,8 +180,10 @@ fn next_turn_settings(config: AgentConfig, patch: Value) -> Result<AgentConfig, 
 /// afterwards from a durable queue; the caller's compute is never touched.
 pub(crate) async fn delete(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     let running = || {
         ApiError(
             StatusCode::CONFLICT,

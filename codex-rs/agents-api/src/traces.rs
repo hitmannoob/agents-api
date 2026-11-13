@@ -12,6 +12,9 @@ use crate::otlp::attribute;
 use crate::otlp::hex;
 use crate::otlp::span;
 use crate::otlp::span_id;
+use crate::projects::Principal;
+use crate::projects::Resource;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::Query;
@@ -104,9 +107,11 @@ struct Generation {
 
 pub(crate) async fn list(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     let mut after = None;
     let mut limit = 20;
     let mut ascending = false;

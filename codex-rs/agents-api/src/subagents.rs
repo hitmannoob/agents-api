@@ -5,7 +5,10 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::records::Page;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::Query;
@@ -225,9 +228,11 @@ pub(crate) struct ListParams {
 
 pub(crate) async fn list(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     crate::records::session(&state, &id).await?;
     let limit = params.limit.unwrap_or(/*default*/ 20);
     let ascending = match params.order.as_deref().unwrap_or("desc") {
@@ -277,42 +282,52 @@ pub(crate) async fn list(
 
 pub(crate) async fn retrieve(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((id, subagent_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     Ok(Json(subagent(&state, &id, &subagent_id).await?))
 }
 
 pub(crate) async fn items(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((id, subagent_id)): Path<(String, String)>,
     Query(page): Query<Page>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     subagent(&state, &id, &subagent_id).await?;
     crate::records::list(&state, &id, "item", page, Some(&subagent_id)).await
 }
 
 pub(crate) async fn turns(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((id, subagent_id)): Path<(String, String)>,
     Query(page): Query<Page>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     subagent(&state, &id, &subagent_id).await?;
     crate::records::list(&state, &id, "turn", page, Some(&subagent_id)).await
 }
 
 pub(crate) async fn turn(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((id, subagent_id, turn_id)): Path<(String, String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     subagent(&state, &id, &subagent_id).await?;
     crate::records::turn_record(&state, &id, Some(&subagent_id), &turn_id).await
 }
 
 pub(crate) async fn turn_items(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path((id, subagent_id, turn_id)): Path<(String, String, String)>,
     Query(mut page): Query<Page>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     // The turn must belong to this subagent before its items are listed.
     let _ = crate::records::turn_record(&state, &id, Some(&subagent_id), &turn_id).await?;
     page.turn_id = Some(turn_id);

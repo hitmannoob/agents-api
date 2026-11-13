@@ -10,8 +10,11 @@
 use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
+use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::registry::ExecutorState;
 use crate::resources::Environment;
+use axum::Extension;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::State as Extract;
@@ -144,8 +147,10 @@ pub(crate) async fn create(
 /// skills are the Skills API versions pinned to its session.
 pub(crate) async fn retrieve(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(&state, &principal.project_id, &id, Resource::Environment).await?;
     let row: Option<(String, bool, bool)> =
         sqlx::query_as("SELECT session_id, connected_once, failed FROM environments WHERE id = ?")
             .bind(&id)
@@ -243,7 +248,14 @@ pub(crate) async fn recover(state: &Arc<State>) -> anyhow::Result<()> {
 
 /// Add a session's environment to the current worker connection, once per
 /// connection.
-pub(crate) async fn attach(state: &State, environment_id: &str) -> Result<(), ApiError> {
+pub(crate) async fn attach(
+    state: &State,
+    project_id: &str,
+    environment_id: &str,
+) -> Result<(), ApiError> {
+    // Check before even the already-attached fast path; never delegate the
+    // service's harness authority to a foreign or missing environment.
+    crate::projects::require(state, project_id, environment_id, Resource::Environment).await?;
     let attached = state.attached_environments()?;
     if crate::lock(&attached).contains(environment_id) {
         return Ok(());

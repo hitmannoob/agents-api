@@ -9,6 +9,7 @@ use crate::ApiError;
 use crate::State;
 use crate::contract::invalid;
 use crate::projects::Principal;
+use crate::projects::Resource;
 use crate::registry::ExecutorState;
 use axum::Extension;
 use axum::Json;
@@ -146,6 +147,13 @@ pub(crate) async fn create(
     Path(environment_id): Path<String>,
     Json(params): Json<Create>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(
+        &state,
+        &principal.project_id,
+        &environment_id,
+        Resource::Environment,
+    )
+    .await?;
     let (path, contents) = match params {
         Create::Inline { path, data } => {
             let contents = base64::engine::general_purpose::STANDARD
@@ -206,9 +214,17 @@ pub(crate) struct ListParams {
 
 pub(crate) async fn list(
     Extract(state): Extract<Arc<State>>,
+    Extension(principal): Extension<Principal>,
     Path(environment_id): Path<String>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::projects::require(
+        &state,
+        &principal.project_id,
+        &environment_id,
+        Resource::Environment,
+    )
+    .await?;
     let limit = params.limit.unwrap_or(20);
     if !(1..=100).contains(&limit) {
         return Err(invalid("limit must be between 1 and 100"));

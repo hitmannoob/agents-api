@@ -60,8 +60,8 @@ async fn every_inventoried_operation_answers_with_the_public_error_shape() -> an
         // the public shape; successes never do. The `OpenAI-Beta` header
         // changes nothing, so each operation answers the same without it.
         let created_from_empty_body = ["VLT-001"];
-        // POSTs that validate the body before looking up the resource.
-        let validated_first = ["EVT-001", "ENV-002", "CRD-001", "CRD-003", "WHK-007"];
+        // By-ID operations now check the matched parent before body validation,
+        // giving missing and foreign parents the same 404 response.
         let expected: Vec<Value> = inventory["operations"].as_array().context("operations")?.iter()
             .filter(|operation| operation["status"] != "missing")
             .flat_map(|operation| {
@@ -71,7 +71,6 @@ async fn every_inventoried_operation_answers_with_the_public_error_shape() -> an
                     ("GET", false) => 200,
                     ("POST", false) if created_from_empty_body.contains(&id) => 200,
                     ("POST", false) => 400,
-                    ("POST", true) if validated_first.contains(&id) => 400,
                     _ => 404,
                 };
                 let answers = [json!({"id":id,"authorized":false,"status":401,"public":true}),
