@@ -13,6 +13,7 @@ script. Configuration comes from the environment:
   AGENTS_API_BASE_URL         default http://127.0.0.1:4501/v1
   AGENTS_API_TOKEN(_FILE)     the service's bearer token
   AGENTS_API_MODEL            default openai/gpt-5-mini
+  AGENTS_API_ALT_MODEL        default openai/gpt-5-nano, for session updates
   AGENTS_API_BUDGET_TOKENS    tokens the run may spend, default 150000; no
                               scenario starts once the sessions' recorded
                               usage reaches it
@@ -148,6 +149,109 @@ def check_plain(run):
     )
     if "pong" not in run.assistant_text(session.id).lower():
         raise Model(f"answered {run.assistant_text(session.id)!r}")
+
+
+def check_saved_agent(run):
+    agents = run.client.beta.agents
+    agent = agents.create(
+        model=run.model,
+        instructions="Always answer with exactly the word: saved",
+        reasoning={"effort": "low"},
+    )
+    try:
+        retrieved = agents.retrieve(agent.id)
+        expect(
+            retrieved.model_dump() == agent.model_dump(),
+            "retrieved agent differs from the saved agent",
+        )
+        session = run.sessions.create(
+            agent_id=agent.id,
+            environment={"type": "none"},
+            input="Say hello.",
+        )
+        run.created.append(session.id)
+        session, turns = run.settle(session.id)
+        expect(turns[0].status == "completed", f"turn {turns[0].status}: {turns[0].error}")
+        usage = turns[0].usage
+        expect(
+            usage and usage.input_tokens > 0 and usage.output_tokens > 0,
+            f"turn usage {usage}",
+        )
+        expect(session.agent.model == agent.model, session.agent.model)
+        expect(
+            session.agent.instructions == agent.instructions, session.agent.instructions
+        )
+        if "saved" not in run.assistant_text(session.id).lower():
+            raise Model(f"answered {run.assistant_text(session.id)!r}")
+    finally:
+        agents.delete(agent.id)
+
+
+def check_session_update(run):
+    alt_model = setting("AGENTS_API_ALT_MODEL", "openai/gpt-5-nano")
+    session = run.create(input="Say hello.")
+    session, turns = run.settle(session.id)
+    expect(turns[0].status == "completed", f"turn {turns[0].status}: {turns[0].error}")
+    first_turn_id = turns[0].id
+    updated = run.sessions.update(
+        session.id, agent={"model": alt_model, "reasoning": {"effort": "low"}}
+    )
+    expect(updated.agent.model == alt_model, updated.agent.model)
+    expect(updated.agent.reasoning.effort == "low", updated.agent.reasoning)
+    expect(
+        run.sessions.retrieve(session.id).model_dump() == updated.model_dump(),
+        "retrieved session differs from the updated session",
+    )
+    run.sessions.events.create(
+        session.id,
+        events=[
+            {
+                "type": "agent.session.input.message",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Say goodbye."}],
+                    }
+                ],
+            }
+        ],
+    )
+    session, turns = run.settle(session.id, turns=2)
+    expect(len(turns) == 2, f"{len(turns)} turns")
+    expect(first_turn_id in {turn.id for turn in turns}, "the first turn disappeared")
+    for turn in turns:
+        expect(turn.status == "completed", f"turn {turn.status}: {turn.error}")
+    response = run.client.get(
+        f"/agents/sessions/{session.id}/traces",
+        cast_to=object,
+        options={"headers": {"OpenAI-Beta": "agents=v1"}},
+    )
+    traces = response["data"]
+    expect(len(traces) == 2, f"{len(traces)} traces")
+    # Each trace names its root turn; the default trace/turn order is newest first.
+    expect(
+        {trace["turn_id"] for trace in traces} == {turn.id for turn in turns},
+        "traces do not match the finished turns",
+    )
+    for trace in traces:
+        turn_id = trace["turn_id"]
+        model = run.model if turn_id == first_turn_id else alt_model
+        resources = trace["otlp"]["resourceSpans"]
+        spans = [
+            span
+            for resource in resources
+            for group in resource["scopeSpans"]
+            for span in group["spans"]
+            if span["name"] == "chat"
+        ]
+        expect(spans, f"no generation spans for turn {turn_id}")
+        for span in spans:
+            attributes = {attr["key"]: attr["value"] for attr in span["attributes"]}
+            reported = attributes.get("gen_ai.response.model", {}).get("stringValue", "")
+            expect(
+                reported.rsplit("/", 1)[-1].startswith(model.rsplit("/", 1)[-1]),
+                f"turn {turn_id} response model {reported!r}, expected {model!r}",
+            )
 
 
 def check_stream(run):
@@ -412,6 +516,8 @@ def check_self_hosted(run):
 
 CHECKS = {
     "plain": check_plain,
+    "saved_agent": check_saved_agent,
+    "session_update": check_session_update,
     "stream": check_stream,
     "function": check_function,
     "structured": check_structured,
