@@ -899,10 +899,14 @@ Remaining:
   search support still leaves the model silently without it, which stays a
   known limit. Evidence: `web_search::web_search_tools_reach_the_model_and_record_their_calls`
   (mock provider). Real-provider evidence (2026-11-13): `tests/real_provider.py`
-  `web_search` passed via OpenRouter, promoting BEH-008. One session recorded
-  five completed `web_search_call` items with search actions and an answer
-  citing python.org; three actions had empty queries, faithfully mapped from
-  Codex and not investigated (details in the dated G12 evidence below).
+  `web_search` passed via OpenRouter, promoting BEH-008. The initial session
+  recorded five completed `web_search_call` items and an answer citing
+  python.org; three actions had empty queries. Follow-up (2026-11-13): all
+  seven sessions completed with answers; 12 of 23 items (52%) were `search`
+  actions with query `""`, faithfully preserved from upstream by Codex and the service.
+  OpenRouter action details are lossy: no `open_page` or `find_in_page` arrived;
+  page-open flattening is likely but unconfirmed, and a direct-OpenAI comparison
+  was not done (details in the dated G12 evidence below). BEH-008 stays verified.
 - Programmatic tool calling belongs to G08.
 
 ## G08 — Remaining harness features (complete locally 2026-10-13)
@@ -2283,12 +2287,34 @@ Real-provider evidence: `deploy/modal/serve.py` started the service, and
 against `openai/gpt-5-mini` via OpenRouter for 55,145 tokens. The new scenarios
 `saved_agent` and `session_update` (commit `e6cc90c2b2`) passed for 16,228 tokens.
 
-Web-search observation: one session recorded five completed `web_search_call`
-items with search actions, including query "site:python.org latest Python
-release", and an answer citing python.org. Three actions had an empty query.
-The service maps Codex's action faithfully (`src/records.rs`,
-`web_search_action`), so the blank comes from Codex or the provider. It was not
-investigated.
+Initial web-search observation (2026-11-13): one session recorded five completed
+`web_search_call` items with search actions, including query "site:python.org
+latest Python release", and an answer citing python.org; three actions had an
+empty query. The source of the blanks was not investigated at that milestone.
+
+Web-search follow-up (2026-11-13): service `7fc4cd1605` on Modal via `serve.py`,
+`openai/gpt-5-mini` through OpenRouter, seven sessions with prompts needing
+several searches. All seven turns completed with answers; 12 of 23
+`web_search_call` items (52%) had action type `search` and query `""`.
+Each public item matched Codex's rollout `response_item` `web_search_call`
+one-to-one, with the same action and query (`src/records.rs`,
+`web_search_action`). Codex stores the provider's item as received; protocol
+`WebSearchAction` fields are `Option` with `skip_serializing_if`, so absent
+optional fields are omitted and a rollout query of `""` came from the provider.
+The blanks originate upstream (OpenRouter's Responses translation or the
+search backend), not in Codex or the service.
+
+No item arrived as `open_page` or `find_in_page`, although Codex and the service
+support both. Empty entries usually followed a real search and coincided with
+page opens, including a prompt to open and quote the asyncio docs and a BBC
+prompt where the model reported a robots.txt block. Likely, but unconfirmed:
+page opens are flattened into empty searches upstream. One two-city session
+also recorded the same query twice despite an answer covering both cities,
+so upstream action labels are not fully reliable. Through OpenRouter,
+`web_search_call` action details are lossy; clients relying on `open_page` or
+`find_in_page` actions will not see them on this provider. Confirming the cause
+needs the same prompts with a direct OpenAI key; that comparison was not done.
+BEH-008 stays verified; counts are unchanged.
 
 Session-update evidence: trace `gen_ai.response.model` is the service's record
 of the model configured at turn start (`src/routes.rs`, `turn_models` insert),

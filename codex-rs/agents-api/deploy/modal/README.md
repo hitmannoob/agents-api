@@ -74,11 +74,17 @@ Real-provider run: the service was started with `deploy/modal/serve.py`.
   `structured`, `web_search`, `cancel`, `traces`, `self_hosted`): 55,145 tokens.
 - `saved_agent` and `session_update` (commit `e6cc90c2b2`) passed: 16,228 tokens.
 
-One web-search session recorded five completed `web_search_call` items with
-search actions, including "site:python.org latest Python release", and an
-answer citing python.org. Three actions had empty queries; the service maps
-Codex's action faithfully (`src/records.rs`, `web_search_action`), so the blank
-comes from Codex or the provider. It was not investigated.
+Initial web-search observation (2026-11-13): one session recorded five completed
+`web_search_call` search actions, including "site:python.org latest Python
+release", and an answer citing python.org; three actions had empty queries.
+Follow-up (2026-11-13, `7fc4cd1605`, Modal via `serve.py`, `openai/gpt-5-mini`
+via OpenRouter): all seven sessions completed with answers; 12 of 23 items (52%)
+were `search` actions with query `""`, matching Codex rollout items one-to-one.
+Codex omits absent optional fields, so the blanks came from upstream; no
+`open_page` or `find_in_page` arrived, making OpenRouter action details lossy.
+Page-open flattening is likely but unconfirmed; a direct-OpenAI comparison was
+not done. [GOALS.md](../../GOALS.md#linux-and-real-provider-evidence-2026-11-13)
+records the fuller evidence.
 
 The session-update trace's `gen_ai.response.model` records the service's
 configured model at turn start (`src/routes.rs`, `turn_models` insert), updated

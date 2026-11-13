@@ -386,7 +386,10 @@ callable, without the context saving. OpenAI documents tool search for
 `allowed_domains`, and `location` become the thread's `web_search` and
 `tools.web_search` settings, and each search is recorded as a
 `web_search_call` item with its `search`, `open_page`, or `find_in_page`
-action. The search itself is done by the model provider, so it depends on the
+action. Through OpenRouter, action details are lossy (2026-11-13): upstream
+items included empty `search` queries and no `open_page`/`find_in_page` actions,
+faithfully preserved by Codex and the service.
+The search itself is done by the model provider, so it depends on the
 provider: OpenAI and Responses-compatible providers receive the hosted tool,
 but a provider without web search support leaves the model without it, and one
 without live web access gets cached results instead, without an error.

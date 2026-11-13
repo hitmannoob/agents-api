@@ -101,10 +101,17 @@ running. BEH-018 is verified. After `eae7869510` added
 tokens. [GOALS.md](GOALS.md#provider-interoperability-2026-11-13) records the
 results; SDK scenarios for every resource remain open.
 
-One web-search session recorded five completed search actions and an answer
-citing python.org; three actions had empty queries. `src/records.rs`
-`web_search_action` maps Codex's action faithfully, so the blank comes from
-Codex or the provider; it was not investigated. For `session_update`, trace
+Initial web-search observation (2026-11-13): one session recorded five completed
+search actions and an answer citing python.org; three actions had empty queries.
+Follow-up (2026-11-13, `7fc4cd1605`, Modal via `serve.py`, `openai/gpt-5-mini`
+via OpenRouter): all seven sessions completed with answers; 12 of 23 items (52%)
+were `search` actions with query `""`, matching Codex rollout items one-to-one.
+Codex omits absent optional fields, so the blanks came from upstream; no
+`open_page` or `find_in_page` arrived, making OpenRouter action details lossy.
+Page-open flattening is likely but unconfirmed; the direct-OpenAI comparison
+was not done (fuller evidence in G12's dated GOALS section).
+
+For `session_update`, trace
 `gen_ai.response.model` is the service record of the model configured at turn
 start (`src/routes.rs`, `turn_models` insert), updated only by a Codex reroute,
 not provider-reported. Independent rollout `turn_context` recorded turn 1
@@ -127,7 +134,7 @@ See [Modal deployment](deploy/modal/README.md).
 | Items and turns | ITM-001, TRN-001..002 | 3 verified | Message, reasoning, function, MCP, web search, command, and subagent create/send/interrupt items (with the subagent's model), and `agent_message` items between agents; `queued` turns while input waits for an executor; turn usage, error codes, and pagination | None. Engine limit: wait/close/resume subagent items |
 | Subagents | SUB-001..006 | 6 verified | Resources, paginated items and turns per subagent, cancellation, restart continuity | None. `instructions` is always null and `closed` never occurs: Codex V2 reports neither, accepted as engine limits (2026-10-12) |
 | Functions | (in EVT/BEH-007) | verified | Tagged functions, result/error flow, content parts, duplicate and race handling, deferred functions found through tool search (offered up front on models without it) | None |
-| MCP and built-ins | (BEH-008) | verified | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence); real-provider web search passed via OpenRouter (2026-11-13) | None within the parity target. Three of five completed search actions had empty queries; uninvestigated Codex/provider observation |
+| MCP and built-ins | (BEH-008) | verified | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence); real-provider web search passed via OpenRouter (2026-11-13) | None within the parity target. Follow-up (2026-11-13): upstream action details through OpenRouter are lossy (12/23 empty searches; no open_page/find_in_page); page-open flattening is unconfirmed, direct-OpenAI comparison not done |
 | Harness features | (BEH-009, G08) | BEH-009 verified; G08 complete locally (2026-10-13) | Multi-agent delegation within Codex V2 limits; automatic compaction preserves full public history through cold resume; sandboxed V8 nested function calls, cancellation, fail-closed host and model-mode refusals; capability-directory skills, plugin skills, and pinned Skills API versions isolated through API/worker restart | None within the parity target; no public compaction controls/items in the pinned contract |
 | Environments | ENV-001..003 | 3 verified | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss; `--public-url` advertises executor URLs through the public tunnel | None within the parity target. BEH-018 verified by the separate Modal executor Sandbox run (7/7, 2026-11-13); full real-provider suite also passed all ten scenarios. Self-hosted environments never expire |
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
