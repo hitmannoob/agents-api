@@ -19,6 +19,15 @@ script. Configuration comes from the environment:
                               usage reaches it
   AGENTS_API_EXECUTOR         a `codex` binary, for the self-hosted scenarios
   AGENTS_API_ENVIRONMENT_KEY(_FILE)  the service's environment key
+  AGENTS_API_COMPACT_TOKENS    opt in to compaction; the worker's configured
+                              model_auto_compact_token_limit (unset: skip);
+                              recommend about 12000, a few thousand tokens
+                              above Codex's base prompt
+
+Compaction grows context through long assistant replies and looks for a drop
+in per-turn input_tokens within ten turns, then checks recall and full history.
+A compacting turn includes both the compaction and follow-up requests in its
+usage; the next turn can show the drop.
 
 Usage: python real_provider.py [--json report.json] [--only name,name]
 Requires the pinned SDK (openai==3.17.0). Exits non-zero only on FAIL.
@@ -49,6 +58,46 @@ ORDER_TOOL = {
         "additionalProperties": False,
     },
 }
+STDIO_MCP = """import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    response = {"jsonrpc": "2.0", "id": request["id"]}
+    method = request.get("method")
+    params = request.get("params", {})
+    if method == "initialize":
+        response["result"] = {
+            "protocolVersion": params["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "codes", "version": "1"},
+        }
+    elif method == "tools/list":
+        response["result"] = {"tools": [{
+            "name": "lookup_code",
+            "description": "Look up the secret code for a name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        }]}
+    elif method == "tools/call":
+        name = params.get("arguments", {}).get("name")
+        if params.get("name") != "lookup_code" or not isinstance(name, str):
+            response["error"] = {"code": -32602, "message": "Invalid tool or name"}
+        else:
+            response["result"] = {"content": [{
+                "type": "text",
+                "text": {"alpha": "zebra-4271"}.get(name, "Unknown name"),
+            }]}
+    else:
+        response["error"] = {"code": -32601, "message": "Method not found"}
+    print(json.dumps(response), flush=True)
+"""
 
 
 class Fail(Exception):
@@ -92,9 +141,9 @@ class Run:
         self.created.append(session.id)
         return session
 
-    def settle(self, session_id, turns=1):
+    def settle(self, session_id, turns=1, timeout=TURN_TIMEOUT):
         """Wait until the session has `turns` finished turns and is not running."""
-        deadline = time.monotonic() + TURN_TIMEOUT
+        deadline = time.monotonic() + timeout
         while True:
             session = self.sessions.retrieve(session_id)
             finished = [
@@ -376,6 +425,116 @@ def check_web_search(run):
     expect(items.index(searches[0]) < answers[-1], "the answer preceded the search")
 
 
+def check_subagents(run):
+    session = run.create(
+        agent={"multi_agent": {"enabled": True}},
+        input="Delegate to exactly one subagent this task: compute 17 * 23 and "
+        "reply with only the number. Wait for its result, then reply with it.",
+    )
+    session, turns = run.settle(session.id, timeout=2 * TURN_TIMEOUT)
+    for turn in turns:
+        expect(turn.status == "completed", f"turn {turn.status}: {turn.error}")
+    subagents = list(run.sessions.subagents.list(session.id))
+    if not subagents:
+        raise Model("spawned no subagent")
+    items = list(run.sessions.items.list(session.id, order="asc"))
+    expect(
+        any(item.type == "create_subagent_call" for item in items),
+        "no create_subagent_call in the root history",
+    )
+    for subagent in subagents:
+        deadline = time.monotonic() + 2 * TURN_TIMEOUT
+        while True:
+            turns = list(
+                run.sessions.subagents.turns.list(subagent.id, session_id=session.id)
+            )
+            for turn in turns:
+                expect(
+                    turn.status not in ("failed", "cancelled"),
+                    f"subagent turn {turn.status}: {turn.error}",
+                )
+            if any(turn.status == "completed" for turn in turns):
+                break
+            expect(time.monotonic() < deadline, "the subagent never completed a turn")
+            time.sleep(1)
+        history = list(
+            run.sessions.subagents.items.list(
+                subagent.id, session_id=session.id, order="asc"
+            )
+        )
+        expect(history, f"no items for subagent {subagent.id}")
+        items.extend(history)
+    expect(
+        any(item.type == "agent_message" for item in items),
+        "no agent_message between agents",
+    )
+    if "391" not in run.assistant_text(session.id):
+        raise Model(f"answered {run.assistant_text(session.id)!r}")
+
+
+def check_compaction(run):
+    limit = setting("AGENTS_API_COMPACT_TOKENS")
+    if not limit:
+        raise Skip("AGENTS_API_COMPACT_TOKENS is not set")
+    limit = int(limit)
+    expect(limit > 0, "AGENTS_API_COMPACT_TOKENS must be positive")
+    budget = int(setting("AGENTS_API_BUDGET_TOKENS", "150000"))
+    # Compaction keeps up to 20,000 user-message tokens verbatim, so filler must
+    # be assistant output that it can summarize away.
+    messages = [
+        "The code word is marigold-58; remember it. Reply with a one-line "
+        "acknowledgement."
+    ]
+    session = run.create(input=messages[0])
+    previous = None
+    for count in range(1, 11):
+        session, turns = run.settle(session.id, turns=count)
+        expect(len(turns) == count, f"{len(turns)} turns, expected {count}")
+        for turn in turns:
+            expect(turn.status == "completed", f"turn {turn.status}: {turn.error}")
+        # Turn lists are newest first.
+        usage = turns[0].usage
+        expect(usage and usage.input_tokens > 0, f"turn usage {usage}")
+        if previous is not None and usage.input_tokens < previous:
+            break
+        previous = usage.input_tokens
+        if count == 10:
+            raise Skip("compaction did not trigger within 10 turns")
+        spent = run.spent()
+        if spent >= budget:
+            raise Skip(f"budget spent ({spent} of {budget} tokens)")
+        message = (
+            f"Topic {count}: write 600-800 words of original prose about a day "
+            "in a different imaginary village. Include its people, surroundings, "
+            "and customs; use fresh details rather than summarizing earlier replies."
+        )
+        run.sessions.events.create(
+            session.id,
+            events=[{"type": "agent.session.input.message", "input": message}],
+        )
+        messages.append(message)
+    spent = run.spent()
+    if spent >= budget:
+        raise Skip(f"budget spent ({spent} of {budget} tokens)")
+    message = "What is the code word? Reply with only the code word."
+    run.sessions.events.create(
+        session.id,
+        events=[{"type": "agent.session.input.message", "input": message}],
+    )
+    messages.append(message)
+    session, turns = run.settle(session.id, turns=len(messages))
+    for turn in turns:
+        expect(turn.status == "completed", f"turn {turn.status}: {turn.error}")
+    users = [
+        "".join(part.text for part in item.content)
+        for item in run.sessions.items.list(session.id, order="asc")
+        if item.type == "message" and item.role == "user"
+    ]
+    expect(users == messages, "user history changed after compaction")
+    if "marigold-58" not in run.assistant_text(session.id):
+        raise Model(f"answered {run.assistant_text(session.id)!r}")
+
+
 def check_cancel(run):
     session = run.create(input="Write a 3000-word essay on the history of mathematics.")
     deadline = time.monotonic() + 60
@@ -413,7 +572,7 @@ def check_traces(run):
     expect({"invoke_agent", "chat"} <= names, names)
 
 
-def self_hosted(run, workspace):
+def self_hosted(run, workspace, **params):
     executor, key = (
         setting("AGENTS_API_EXECUTOR"),
         setting("AGENTS_API_ENVIRONMENT_KEY"),
@@ -421,7 +580,8 @@ def self_hosted(run, workspace):
     if not executor or not key:
         return None
     session = run.create(
-        environment={"type": "self_hosted", "workspace_directory": workspace}
+        environment={"type": "self_hosted", "workspace_directory": workspace},
+        **params,
     )
     environment = session.environment
     command = [
@@ -460,6 +620,73 @@ def self_hosted(run, workspace):
         expect(time.monotonic() < deadline, "the executor never connected")
         time.sleep(0.5)
     return session, process
+
+
+def check_mcp(run):
+    workspace = os.path.realpath(tempfile.mkdtemp(prefix="agents-api-real-mcp-"))
+    with open(os.path.join(workspace, "server.py"), "w", encoding="utf-8") as handle:
+        handle.write(STDIO_MCP)
+    started = self_hosted(
+        run,
+        workspace,
+        agent={
+            "tools": [
+                {
+                    "type": "mcp",
+                    "server_label": "codes",
+                    "allowed_tools": ["lookup_code"],
+                    "required": True,
+                    "transport": {
+                        "type": "stdio",
+                        "command": "python3",
+                        "args": ["server.py"],
+                        "cwd": workspace,
+                    },
+                }
+            ]
+        },
+    )
+    if started is None:
+        raise Skip("AGENTS_API_EXECUTOR and AGENTS_API_ENVIRONMENT_KEY are not set")
+    session, process = started
+    try:
+        run.sessions.events.create(
+            session.id,
+            events=[
+                {
+                    "type": "agent.session.input.message",
+                    "input": "Use the codes server's lookup_code tool to get the "
+                    "code for alpha, then reply with only that code.",
+                }
+            ],
+        )
+        session, turns = run.settle(session.id)
+        expect(turns[0].status == "completed", f"turn {turns[0].status}: {turns[0].error}")
+        calls = [
+            item
+            for item in run.sessions.items.list(session.id)
+            if item.type == "mcp_call"
+            and item.server_label == "codes"
+            and item.name == "lookup_code"
+        ]
+        if not calls:
+            raise Model("answered without calling lookup_code on codes")
+        for call in calls:
+            expect(call.status == "completed", f"MCP call {call.status}: {call.error}")
+            expect(isinstance(call.output, list), f"MCP output {call.output}")
+        expect(
+            any(
+                part.get("type") == "text" and "zebra-4271" in part.get("text", "")
+                for call in calls
+                for part in call.output
+            ),
+            "MCP output does not contain the code",
+        )
+        if "zebra-4271" not in run.assistant_text(session.id):
+            raise Model(f"answer ignored the result: {run.assistant_text(session.id)!r}")
+    finally:
+        process.terminate()
+        process.wait()
 
 
 def check_self_hosted(run):
@@ -538,6 +765,9 @@ CHECKS = {
     "function": check_function,
     "structured": check_structured,
     "web_search": check_web_search,
+    "mcp": check_mcp,
+    "subagents": check_subagents,
+    "compaction": check_compaction,
     "cancel": check_cancel,
     "traces": check_traces,
     "self_hosted": check_self_hosted,

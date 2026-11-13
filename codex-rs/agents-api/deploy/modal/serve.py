@@ -12,6 +12,9 @@ Usage:
                              sandbox-id to STATE_DIR
   serve.py logs STATE_DIR    show the service log
   serve.py stop STATE_DIR    terminate the Sandbox
+
+The start option --auto-compact-tokens N sets the worker's automatic
+compaction threshold (model_auto_compact_token_limit).
 """
 
 import argparse
@@ -181,7 +184,14 @@ def image(source):
     )
 
 
-def start(state, hours):
+def start(state, hours, auto_compact_tokens=None):
+    config = CONFIG
+    if auto_compact_tokens is not None:
+        config = config.replace(
+            "\n[features]",
+            f"model_auto_compact_token_limit = {auto_compact_tokens}\n\n[features]",
+            1,
+        )
     values = {
         name: secrets.token_hex(24)
         for name in ("token", "vault-passphrase", "environment-key")
@@ -192,7 +202,7 @@ def start(state, hours):
     sandbox = modal.Sandbox.create(
         "bash",
         "-lc",
-        SCRIPT.format(config=CONFIG, forward=FORWARD),
+        SCRIPT.format(config=config, forward=FORWARD),
         app=modal.App.lookup(APP, create_if_missing=True),
         image=image(archive(state)),
         secrets=[
@@ -264,6 +274,9 @@ def main():
     parser.add_argument(
         "--hours", type=float, default=3, help="Sandbox lifetime (default 3)"
     )
+    parser.add_argument(
+        "--auto-compact-tokens", type=int, help="worker automatic compaction token limit"
+    )
     args = parser.parse_args()
     os.makedirs(args.state, exist_ok=True)
     if args.command == "build":
@@ -273,7 +286,7 @@ def main():
             )
         print("image built")
     elif args.command == "start":
-        start(args.state, args.hours)
+        start(args.state, args.hours, args.auto_compact_tokens)
     elif args.command == "logs":
         process = sandbox_for(args.state).exec(
             "tail", "-n", "60", "/data/logs/agents-api.log"
