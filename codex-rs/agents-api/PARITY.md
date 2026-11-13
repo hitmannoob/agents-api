@@ -34,14 +34,15 @@ in [GOALS.md](GOALS.md).
 
 ## Current status
 
-Updated: 2026-10-13. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
+Updated: 2026-11-13. Counts come from [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json);
 per-operation detail lives in its `remaining` fields.
 
-**Scorecard:** 67 operations: 60 `verified`, 0 `implemented`, 2 `partial`,
+**Scorecard:** 67 operations: 62 `verified`, 0 `implemented`, 0 `partial`,
 5 `missing`. The 5 missing (environment templates) are outside the parity
-target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18 behavior rows, 13 are verified (BEH-001, BEH-003..007, BEH-009,
-BEH-012..017), 3 are partial, and 2 are missing (BEH-011 is out of scope;
-BEH-018, provider interoperability, is open).
+target by decision (2026-10-06), so **no in-scope operation is missing**. Of 18
+behavior rows, 16 are verified (BEH-001..010, BEH-012..017), 0 are partial,
+and 2 are missing (BEH-011 is out of scope; BEH-018, provider interoperability,
+is open).
 
 Two promotion passes on 2026-10-12 moved rows whose only gaps were out of
 scope, intended behavior, or project scope, which G13 closed: API keys belong
@@ -57,44 +58,80 @@ The 2026-10-13 scope decision moves ENV-002..003 to verified on their recorded
 evidence. The same day's recovery/streaming slices verify BEH-017 and EVT-002:
 the spawn-to-record window is closed, and initial/fast-exit command output
 streams before `item.done` (test names in the inventory). Lost function waiters
-remain unresolved/unavailable by decision. Recovery evidence is macOS-only;
-Linux was not run. Only AGT-002, SES-003, BEH-002, BEH-008, BEH-010, and BEH-018
-remain non-verified within scope; each needs real-provider evidence. Existing
-provider evidence comes from OpenRouter runs. See
-[Path to `verified`](#path-to-verified).
+remain unresolved/unavailable by decision. That milestone recorded macOS
+recovery evidence; Linux evidence follows below.
+
+Evidence (2026-11-13, Linux and real providers): Modal Sandbox, Linux x86_64
+under gVisor (kernel `4.19.0-gvisor`), 16 CPUs, Rust 1.95, built from HEAD
+`4bbd24459c`; `cargo nextest --retries 0`. The full crate passed 93/93 with
+`--run-ignored all`, including three pinned SDK tests. On a separate Sandbox,
+the recovery/streaming slice passed 43/43 three times (runtime 16/16, lib 24/24,
+and the self-hosted command-output test), adding Linux evidence for BEH-017
+and EVT-002. The core `unified_exec` slice passed 184/191; all cited EVT-002
+core tests passed. Seven untouched tests need bubblewrap namespaces that
+gVisor cannot host (`unshare -n`/bwrap: "Operation not permitted";
+"bwrap: loopback: Failed RTM_NEWADDR"): an environment limitation, not a
+regression. [GOALS.md](GOALS.md#linux-and-real-provider-evidence-2026-11-13)
+records the exact tests.
+
+`tests/real_provider.py` ran inside the service Sandbox started with
+`deploy/modal/serve.py`, using `/opt/agents-api/bin/codex` as the stock
+`codex exec-server` executor, so `self_hosted` ran on Linux. All eight original
+scenarios passed on `openai/gpt-5-mini` via OpenRouter for 55,145 tokens;
+`saved_agent` and `session_update` (commit `e6cc90c2b2`) passed for 16,228 tokens.
+AGT-002, SES-003, BEH-002, BEH-008, and BEH-010 move to verified. BEH-010 has a
+second real-provider run, its first on Linux. Only BEH-018 remains non-verified
+within scope: whether the Modal executor run counts as provider interoperability
+is an open project decision. SDK scenarios for every resource remain open.
+
+One web-search session recorded five completed search actions and an answer
+citing python.org; three actions had empty queries. `src/records.rs`
+`web_search_action` maps Codex's action faithfully, so the blank comes from
+Codex or the provider; it was not investigated. For `session_update`, trace
+`gen_ai.response.model` is the service record of the model configured at turn
+start (`src/routes.rs`, `turn_models` insert), updated only by a Codex reroute,
+not provider-reported. Independent rollout `turn_context` recorded turn 1
+`model=openai/gpt-5-mini` (default effort) and turn 2
+`model=openai/gpt-5-nano effort=low`; provider-side confirmation was not checked.
+See [Path to `verified`](#path-to-verified).
+
+Deployment limit (2026-11-13): Modal's gVisor forbids the namespaces Codex's
+Linux sandbox needs. `serve.py` configures `sandbox_mode = "read-only"`, which
+cannot be enforced there: commands run under Codex's sandbox fail. Self-hosted
+sessions are unaffected because commands run on the unsandboxed executor.
+See [Modal deployment](deploy/modal/README.md).
 
 | Area | Ops | Status | Works today | Remaining gap |
 | --- | --- | --- | --- | --- |
-| Saved agents | AGT-001..005 | 4 verified (AGT-001, AGT-003..005), 1 partial | Full CRUD, creation-order pagination, every pinned configuration family with omit/null/replace semantics, snapshots after deletion and cold resume, programmatic calling with catalog-mode refusals, project-scoped | Real-provider acceptance (AGT-002). Instructions and input take up to 1 MiB and agents 128 tools |
-| Sessions | SES-001..005 | 4 verified (SES-001..002, SES-004..005), 1 partial | CRUD, initial input/streaming, `none` and `self_hosted`, `vault_ids`, next-turn model/effort/tier, durable deletion, programmatic calls and automatic compaction through cold resume, project-scoped | Provider-specific model compatibility (SES-003). Every SDK create, read, and update field is handled (audited 2026-10-12) |
+| Saved agents | AGT-001..005 | 5 verified | Full CRUD, creation-order pagination, every pinned configuration family with omit/null/replace semantics, snapshots after deletion and cold resume, programmatic calling with catalog-mode refusals, project-scoped | None within the parity target; saved_agent passed via OpenRouter (2026-11-13). Instructions and input take up to 1 MiB and agents 128 tools |
+| Sessions | SES-001..005 | 5 verified | CRUD, initial input/streaming, `none` and `self_hosted`, `vault_ids`, next-turn model/effort/tier, durable deletion, programmatic calls and automatic compaction through cold resume, project-scoped | None within the parity target; session_update passed via OpenRouter (2026-11-13), with the model/effort change independently recorded in rollout turn_context; serving model not confirmed provider-side. Every SDK create, read, and update field is handled (audited 2026-10-12) |
 | Input events | EVT-001 | verified | Validated ordered batches, text up to 1 MiB, data-URL and remote https images (fetched under the egress rules), string and content-part function results (10,000 bytes), session-scoped `Idempotency-Key` replay | None. Batching and idempotency semantics are the contract by decision (2026-10-12) |
-| Streaming | EVT-002 | verified | Lifecycle, item, text/reasoning, content-part, error, subagent, environment, and command-output events; initial stdout and fast-exit output arrive before item.done with matching IDs/output_index and saved output (local mock evidence, 2026-10-13) | None within the parity target. Live-only; best-effort limits: 10,000 deltas per call, and oldest deltas dropped on lag beyond 64 chunks before the watcher starts; aggregated output unaffected |
+| Streaming | EVT-002 | verified | Lifecycle, item, text/reasoning, content-part, error, subagent, environment, and command-output events; initial stdout and fast-exit output arrive before item.done with matching IDs/output_index and saved output (macOS 2026-10-13 and Linux 2026-11-13 mock evidence) | None within the parity target. Live-only; best-effort limits: 10,000 deltas per call, and oldest deltas dropped on lag beyond 64 chunks before the watcher starts; aggregated output unaffected |
 | Items and turns | ITM-001, TRN-001..002 | 3 verified | Message, reasoning, function, MCP, web search, command, and subagent create/send/interrupt items (with the subagent's model), and `agent_message` items between agents; `queued` turns while input waits for an executor; turn usage, error codes, and pagination | None. Engine limit: wait/close/resume subagent items |
 | Subagents | SUB-001..006 | 6 verified | Resources, paginated items and turns per subagent, cancellation, restart continuity | None. `instructions` is always null and `closed` never occurs: Codex V2 reports neither, accepted as engine limits (2026-10-12) |
 | Functions | (in EVT/BEH-007) | verified | Tagged functions, result/error flow, content parts, duplicate and race handling, deferred functions found through tool search (offered up front on models without it) | None |
-| MCP and built-ins | (BEH-008) | partial | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence) | A real-provider web search run |
+| MCP and built-ins | (BEH-008) | verified | HTTP MCP with vault/inline authorization snapshots (write-only and encrypted), non-secret headers round trip (Authorization headers refused; use transport.authorization), request metadata in tools/call `_meta`, tool selection; built-in web search with every setting; programmatic calls (local mock evidence); real-provider web search passed via OpenRouter (2026-11-13) | None within the parity target. Three of five completed search actions had empty queries; uninvestigated Codex/provider observation |
 | Harness features | (BEH-009, G08) | BEH-009 verified; G08 complete locally (2026-10-13) | Multi-agent delegation within Codex V2 limits; automatic compaction preserves full public history through cold resume; sandboxed V8 nested function calls, cancellation, fail-closed host and model-mode refusals; capability-directory skills, plugin skills, and pinned Skills API versions isolated through API/worker restart | None within the parity target; no public compaction controls/items in the pinned contract |
-| Environments | ENV-001..003 | 3 verified | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss | None for ENV-001..003 within the parity target. BEH-010 still needs real-provider evidence beyond one run. Self-hosted environments never expire |
+| Environments | ENV-001..003 | 3 verified | Self-hosted executor attachment through the rendezvous relay, `pending`/`connected`/`disconnected`/`failed` status kept across restarts, writing and listing environment files, executor loss handled apart from worker loss | None for ENV-001..003 and BEH-010 within the parity target; second real-provider self_hosted run passed, first on Linux (2026-11-13). Whether the Modal executor run counts for BEH-018 remains open. Self-hosted environments never expire |
 | Environment templates | TPL-001..005 | 5 missing | `openai_hosted` returns 400 | **Out of scope** (decision 2026-10-06) |
 | Artifacts | ART-001..004 | 4 verified | Routes validate their inputs and return 404 or an empty page | None; publication exists only for OpenAI-hosted environments, which are out of scope |
 | Files | FIL-001..005 | 5 verified | Streaming multipart upload (50 MiB) with SHA-256, six purposes, `expires_after`, integrity-checked download, project-scoped | None; upload parts, batch processing, and range requests are **out of scope** (decision 2026-10-12) |
 | Skills | SKL-001..006, SKV-001..005 | 11 verified | ZIP and directory uploads validated against the guide's limits and the Agent Skills frontmatter rules, numbered versions with default/latest pointers, integrity-checked archive download, project-scoped; `self_hosted` sessions install pinned `skill_reference` versions (local extension) | None within the parity target |
 | Vaults and credentials | VLT-001..004, CRD-001..005 | 9 verified | Encrypted CRUD, rotation without ID changes, snapshots held by running sessions, HTTP MCP authentication, project-scoped | None. `environment_variable` credentials need hosted environments (out of scope); OAuth refresh and external key management are **out of scope** (decision 2026-10-12) |
 | Webhooks | WHK-001..008 | 8 verified | Endpoint CRUD, every event type the SDK lists (only `agent.session.*` are produced), signed and retried deliveries that survive restarts, secret rotation with a 24h overlap, test delivery of any type; endpoints and deliveries project-scoped | None. Events carry environment data and the actual required action; delivery order is not guaranteed, as in the guide |
-| Traces | TRC-001 | verified | OTLP JSON export, including `execute_tool` spans and each response's model | None. With no reference schema, this format is the contract (decision 2026-10-12); subagent instructions are a Codex limit |
+| Traces | TRC-001 | verified | OTLP JSON export, including `execute_tool` spans and the service's configured turn model, updated on a Codex reroute; not provider-reported | None. With no reference schema, this format is the contract (decision 2026-10-12); subagent instructions are a Codex limit |
 | Projects and keys | (BEH-001, BEH-003, G13) | BEH-001 and BEH-003 verified | Project API keys with permissions (CLI-managed), 401/403/404 swept over every operation, every resource project-scoped; the `OpenAI-Beta` header is accepted and ignored everywhere (decision 2026-10-12) | None. Admin API out of scope by decision (2026-10-12); executors use project keys holding `api.environments.connect` |
-| Service operation | (BEH-017) | verified | Managed supervision, fencing, reconciliation, data-directory lock, migrations, and per-project indexes; Linux/macOS spawn-to-record recovery via synced pre-spawn intent, inherited lock, and exact command/start-time checks (macOS runtime 16/16, lib 24/24; Linux not run) | None within the parity target. Lost function waiters stay unresolved/unavailable by decision (2026-10-13); failed inspection or intent lock held past 10 seconds fails startup safely. Legacy records supported; external workers untouched; executor loss is BEH-010 |
+| Service operation | (BEH-017) | verified | Managed supervision, fencing, reconciliation, data-directory lock, migrations, and per-project indexes; Linux/macOS spawn-to-record recovery via synced pre-spawn intent, inherited lock, and exact command/start-time checks (macOS runtime 16/16, lib 24/24; Linux recovery/streaming 43/43 three times, 2026-11-13) | None within the parity target. Lost function waiters stay unresolved/unavailable by decision (2026-10-13); failed inspection or intent lock held past 10 seconds fails startup safely. Legacy records supported; external workers untouched; executor loss is BEH-010 |
 
 ### Path to `verified`
 
-Ordered by the number of rows each item unblocks:
+Updated: 2026-11-13. Capability, saved-agent, session-update, and a second
+self-hosted run are recorded above; BEH-017 and EVT-002 also have Linux runs.
 
-1. **Capability evidence:** a real-provider web search run (BEH-008).
-   Tool search, automatic compaction, programmatic calling, and skills/plugins
-   cross-session isolation through cold resume have local mock-provider evidence
-   (2026-10-12/13); named tests live in the inventory.
-2. **SDK and provider evidence (G12):** SDK scenarios for every implemented
-   resource and provider interoperability (BEH-018).
+1. **SDK evidence (G12):** expand official SDK scenarios to every implemented
+   resource/capability; the corresponding checklist item remains unchecked.
+2. **Provider interoperability (BEH-018):** decide whether the Modal Sandbox
+   executor run satisfies this row; it stays missing/open pending that decision.
 
 ## Implementation sequence
 
@@ -159,9 +196,10 @@ changes codex-core, provider policy, process ownership, or environment provision
 Reference: [session creation](https://developers.openai.com/api/reference/resources/beta/subresources/agents/subresources/sessions/methods/create).
 The local SDK test does not establish real-provider execution or full API parity.
 
-Verification for this slice: all five `codex-agents-api` tests passed with
-`--run-ignored all`, including strict `openai==3.17.0` SDK validation. The SDK
-exercise covers saved agents, session snapshots, function success/error, client
+Verification for this earlier session slice: all five `codex-agents-api` tests
+passed with `--run-ignored all`, including strict `openai==3.17.0` SDK validation.
+The SDK exercise covers saved agents, session snapshots, function success/error, client
 reconnect, item pagination, steering/cancellation, and follow-up after restarting
 the API and in-process harness. The provider was mocked; remote-socket and
-real-provider acceptance remain unverified.
+real-provider acceptance were not verified at that milestone; later evidence is
+recorded under Current status above.

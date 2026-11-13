@@ -1,6 +1,6 @@
 # Remaining Agents API parity work
 
-Updated: 2026-10-13.
+Updated: 2026-11-13.
 
 ## Objective and scope
 
@@ -66,13 +66,23 @@ These capabilities already exist; extend them rather than rebuilding them:
   its related records in one transaction and broadcasts events only after commit,
   so a mid-handler failure cannot leave contradictory records or premature events.
 
-Latest verification (2026-10-06, recorded under G12): the inventory sweep ties
+Earlier verification (2026-10-06, recorded under G12): the inventory sweep ties
 every partial row to existing tests, and `tests/real_provider.py` passed against
 `openai/gpt-5-mini` through OpenRouter. A 15-model OpenRouter sweep passed every
 check that does not involve subagents. The Modal deployment and
 `deploy/modal/harness_evals.py` passed 8/8 coding tasks on `gpt-5-mini`, both on
-Modal and locally (2026-10-07). All runs were on macOS.
-OpenAI-API (not OpenRouter) evidence remains open.
+Modal and locally (2026-10-07). The earlier real-provider suite runs were on
+macOS. OpenAI-API (not OpenRouter) evidence remains open.
+
+Latest verification (2026-11-13, recorded under G12 and the dated section below):
+Linux full crate 93/93 including the three pinned SDK tests; recovery/streaming
+43/43 three times on a separate Modal Sandbox. Core `unified_exec` passed
+184/191; the seven failures require bubblewrap namespaces unavailable under
+gVisor, and all cited EVT-002 tests passed. The eight original real-provider
+scenarios passed via OpenRouter for 55,145 tokens; `saved_agent` and
+`session_update` passed for 16,228 tokens. Counts: 67 operations, 62 verified,
+0 implemented, 0 partial, 5 missing (out of scope); 18 behaviors, 16 verified,
+0 partial, 2 missing (BEH-011 out of scope; BEH-018 open).
 
 Current boundaries:
 
@@ -100,10 +110,15 @@ Current boundaries:
   `self_hosted` environments.
 - Tool search, programmatic calling, inline MCP authorization, request metadata,
   and automatic compaction execute locally (2026-10-12; evidence in G06–G08).
-  Web search still needs a real-provider run; skills/plugins stay isolated
+  Web search passed a real-provider run (2026-11-13); skills/plugins stay isolated
   through cold resume (2026-10-13). The pinned contract has no compaction
   controls/items.
   `environment_variable` credentials and OAuth refresh are out of scope.
+- Modal Sandboxes use gVisor, which forbids the namespaces Codex's Linux sandbox
+  (bubblewrap) needs. `serve.py` configures `sandbox_mode = "read-only"`, which
+  cannot be enforced there: commands run under Codex's sandbox fail. Self-hosted
+  commands run on the unsandboxed executor and are unaffected (2026-11-13;
+  [deployment details](deploy/modal/README.md)).
 
 ## Execution order and tracking
 
@@ -120,7 +135,7 @@ fixture design may start earlier.
 | G04 | Complete sessions and input semantics (complete locally) | G00, G01, G02 | List, update/delete, input variants, idempotency |
 | G05 | Complete events, items, turns, and usage (complete locally) | G00, G02 | Text deltas, item families, transitions, usage |
 | G06 | Complete function-tool behavior (complete locally except deferred functions/tool search) | G00, G04, G05 | Content/limits, deferred tools, failure cases |
-| G07 | Complete MCP and built-in controls (HTTP MCP complete locally; built-in capabilities open) | G00, G03, G05 | MCP, built-in capabilities, isolation |
+| G07 | Complete MCP and built-in controls (HTTP MCP complete locally; web search verified 2026-11-13) | G00, G03, G05 | MCP, built-in capabilities, isolation |
 | G08 | Expose remaining harness capabilities (complete locally 2026-10-13) | G00, G03, G05, G07 | Delegation, compaction, programmatic calls, skills/plugins |
 | G09 | Implement environment lifecycle (self-hosted complete locally; managed out of scope) | G00, G01, G02 | Self-hosted attachment, managed provisioning, lifecycle recovery |
 | G10 | Implement files and artifacts (complete locally for self-hosted, including the Skills API) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
@@ -303,8 +318,15 @@ untouched, and other platforms are unchanged. Evidence in tests/runtime.rs:
 `worker_spawned_before_record_is_reclaimed_after_owner_crash`,
 `pid_reused_record_does_not_signal_foreign_process`, and
 `stale_spawn_intent_does_not_signal_another_worker`. Recorded macOS runs:
-runtime 16/16 and lib 24/24 passed; Linux was not run. BEH-017 is verified within
-the parity target.
+runtime 16/16 and lib 24/24 passed. BEH-017 is verified within the parity target.
+
+Slice evidence (2026-11-13, Linux recovery/streaming): a separate Modal Sandbox
+repeated the slice three times, 43/43 each: runtime binary 16/16 (including all
+three runtime tests named above), lib 24/24, and
+`environments::self_hosted_command_output_deltas_arrive_in_order_before_item_done`.
+The full crate also passed 93/93 including three pinned SDK tests. Platform,
+commands, and core sandbox limitations are recorded in the dated G12 evidence
+below.
 
 Function-waiter decision (2026-10-13): app-server's
 `OutgoingMessageSender::request_id_to_callback` (src/outgoing_message.rs) holds
@@ -429,8 +451,9 @@ so cancelled text in history cannot stall the post-restart request.
 The session feature `features.explicit_default_service_tier` defaults off in
 Codex and is enabled only by this facade's configuration overrides. The core
 integration test for ordinary Codex requests still verifies omitted default.
-Real-provider acceptance remains G12; project ownership
-remains G11 and extended capability execution remains G06–G08.
+Real-provider acceptance was left to G12 at this milestone; the 2026-11-13
+`saved_agent` scenario now supplies it (AGT-002). Project ownership and extended
+capability execution have later evidence under G13 and G06–G08.
 
 Review staging (the combined working diff exceeds 800 lines): land saved-agent
 CRUD/storage/ordering and its migration first; then configuration normalization
@@ -587,7 +610,10 @@ G04 acceptance, all on macOS with a mock provider:
 - Deletion during active work: covered.
 - Restart around input acceptance: covered by a simulated crash state.
 
-Real-provider acceptance remains G12.
+Real-provider acceptance was left to G12 at this milestone; `session_update`
+passed on 2026-11-13 (SES-003, BEH-002), with independent rollout evidence for
+the next-turn model/effort change. Provider-side confirmation of the serving
+model was not checked (details below).
 
 ## G05 — Events, items, turns, and usage (complete locally 2026-09-28)
 
@@ -675,6 +701,13 @@ wait, and drains output before End for fast exits (local and remote commands).
 Best-effort limits remain: 10,000 deltas per call; more than 64 chunks before the
 watcher starts drops the oldest from deltas on lag. Aggregated output is
 unaffected by these delta limits; streams remain live-only.
+
+Slice evidence (2026-11-13, Linux command-output streaming): the recovery/streaming
+slice passed 43/43 three times on a separate Sandbox, including the public SSE
+test above. Core `unified_exec` passed 184/191; all cited EVT-002 tests passed,
+including `early_exit` and `later_output` for both initial-output tests. Seven
+untouched tests require Codex's Linux sandbox namespaces unavailable under
+gVisor; the exact failures are recorded in the dated G12 evidence below.
 
 Not covered:
 - Cancellation leaving a partially streamed item: the mock provider cannot
@@ -862,7 +895,11 @@ Remaining:
   `self_hosted`, where Codex would upgrade it to live. A provider without web
   search support still leaves the model silently without it, which stays a
   known limit. Evidence: `web_search::web_search_tools_reach_the_model_and_record_their_calls`
-  (mock provider); a real-provider run is still required.
+  (mock provider). Real-provider evidence (2026-11-13): `tests/real_provider.py`
+  `web_search` passed via OpenRouter, promoting BEH-008. One session recorded
+  five completed `web_search_call` items with search actions and an answer
+  citing python.org; three actions had empty queries, faithfully mapped from
+  Codex and not investigated (details in the dated G12 evidence below).
 - Programmatic tool calling belongs to G08.
 
 ## G08 — Remaining harness features (complete locally 2026-10-13)
@@ -1620,6 +1657,16 @@ including Windows shutdown and orphan containment, are outside the parity target
   quotas, health checks, and graceful deployment. Add distributed worker routing
   only if deployment requirements call for it; it is not proof of public parity.
 
+Evidence (2026-11-13, Linux and real providers): the full crate passed 93/93,
+recovery/streaming passed 43/43 three times, and the real-provider suite passed
+all eight original scenarios plus `saved_agent` and `session_update`. The dated
+[Linux and real-provider evidence](#linux-and-real-provider-evidence-2026-11-13)
+section records the platform, core sandbox limitation, tokens, observations,
+and promotions. SDK scenarios for every implemented resource/capability remain
+unchecked; BEH-018 stays open pending a project decision on the Modal executor
+run. Modal cannot enforce `serve.py`'s read-only Codex sandbox under gVisor;
+self-hosted commands run on the unsandboxed executor and are unaffected.
+
 Evidence (2026-10-06, real providers, faults, and operations):
 - **Real-provider suite:** `tests/real_provider.py` runs against a live
   service.
@@ -2134,10 +2181,11 @@ of 18 behavior rows verified.
 Programmatic calls, automatic compaction, inline MCP authorization, and request
 metadata are implemented; local behavioral evidence is named in G07/G08 above.
 AGT-001 and SES-001 have no remaining in-scope variants and move to verified.
-BEH-008 stays partial only for a real-provider web search run. Current inventory
-after the 2026-10-13 scope and recovery/streaming slices:
-60 verified, 0 implemented, 2 partial, and 5 missing operations (all missing
-outside the parity target); 13 of 18 behavior rows verified.
+At this milestone BEH-008 stayed partial for a real-provider web search run
+(closed 2026-11-13). Current inventory after the 2026-11-13 evidence below:
+62 verified, 0 implemented, 0 partial, and 5 missing operations (all missing
+outside the parity target); 16 of 18 behavior rows verified, 0 partial, 2 missing
+(BEH-011 out of scope; BEH-018 open).
 
 Verification (local macOS, mock provider/MCP, real V8 host): `CARGO_INCREMENTAL=0`
 and the verified `RUSTY_V8_ARCHIVE` / `RUSTY_V8_SRC_BINDING_PATH` were set for all
@@ -2179,23 +2227,95 @@ Windows and cross-OS worker/executor runs, including Windows orphan containment,
 are outside the parity target by project decision (scope reduction). ENV-002 and
 ENV-003 move from implemented to verified: those runs were their only remaining
 evidence requirement, and their recorded evidence is unchanged. The recovery
-and streaming slices above also verify BEH-017 and EVT-002. Current counts:
-67 operations, 60 verified, 0 implemented, 2 partial, and 5 missing (all out of
-scope); 18 behavior rows, 13 verified, 3 partial, and 2 missing (BEH-011 out of
-scope; BEH-018 open). Earlier dated counts record their respective milestones.
+and streaming slices above also verify BEH-017 and EVT-002. Counts at this
+milestone: 67 operations, 60 verified, 0 implemented, 2 partial, and 5 missing
+(all out of scope); 18 behavior rows, 13 verified, 3 partial, and 2 missing
+(BEH-011 out of scope; BEH-018 open). Earlier dated counts record their
+respective milestones; the 2026-11-13 evidence below supersedes this scorecard.
+
+## Linux and real-provider evidence (2026-11-13)
+
+Platform: Modal Sandbox, Linux x86_64 under gVisor (kernel `4.19.0-gvisor`),
+16 CPUs, Rust 1.95, built from HEAD `4bbd24459c`. Tests ran with
+`cargo nextest --retries 0`:
+
+- Full `codex-agents-api` crate with `--run-ignored all`: 93/93 passed,
+  including the three pinned SDK tests.
+- Recovery/streaming slice, three repetitions on a separate Sandbox: 43/43
+  each. Runtime binary 16/16 includes
+  `runtime::worker_spawned_before_record_is_reclaimed_after_owner_crash`,
+  `runtime::pid_reused_record_does_not_signal_foreign_process`, and
+  `runtime::stale_spawn_intent_does_not_signal_another_worker`; lib 24/24;
+  `environments::self_hosted_command_output_deltas_arrive_in_order_before_item_done`.
+  This adds Linux evidence for BEH-017 and EVT-002 to the earlier macOS runs.
+- `codex-core` `-E 'test(/unified_exec/)'`: 184/191. All cited EVT-002 core
+  tests passed: `unified_exec_emits_initial_output_deltas_in_order` and
+  `exec_server_output_preserves_bytes_before_watcher`, both `early_exit` and
+  `later_output`, plus `streaming_output_drains_lagged_receiver`.
+
+The seven core failures all require Codex's Linux sandbox (bubblewrap), which
+gVisor cannot host: `unshare -n` and bwrap namespace creation fail with
+"Operation not permitted"; Codex reports "bwrap: loopback: Failed RTM_NEWADDR".
+None was touched by this branch. This is an environment limitation, not a
+regression:
+
+- `unified_exec_runs_under_sandbox`
+- `unified_exec_enforces_glob_deny_read_policy`
+- `unified_exec_network_denial_emits_failed_background_end_event`
+- `unified_exec_short_lived_network_denial_emits_failed_end_event`
+- `unified_exec_stdin_approval::stdin_reviews_escalated_terminal_with_denied_reads_before_delivering_input`
+- `unified_exec_stdin_approval::stdin_reviews_retained_grants_after_turn_permissions_expire`
+- `unified_exec_stdin_approval::strict_stdin_review_reaches_guardian_with_sandbox_prompts_disabled`
+
+Real-provider evidence: `deploy/modal/serve.py` started the service, and
+`tests/real_provider.py` ran inside its Sandbox with
+`/opt/agents-api/bin/codex` as the stock `codex exec-server` executor, so
+`self_hosted` ran on Linux. All eight original scenarios (`plain`, `stream`,
+`function`, `structured`, `web_search`, `cancel`, `traces`, `self_hosted`) passed
+against `openai/gpt-5-mini` via OpenRouter for 55,145 tokens. The new scenarios
+`saved_agent` and `session_update` (commit `e6cc90c2b2`) passed for 16,228 tokens.
+
+Web-search observation: one session recorded five completed `web_search_call`
+items with search actions, including query "site:python.org latest Python
+release", and an answer citing python.org. Three actions had an empty query.
+The service maps Codex's action faithfully (`src/records.rs`,
+`web_search_action`), so the blank comes from Codex or the provider. It was not
+investigated.
+
+Session-update evidence: trace `gen_ai.response.model` is the service's record
+of the model configured at turn start (`src/routes.rs`, `turn_models` insert),
+updated only by a Codex reroute; it is not provider-reported. Independently,
+Codex's rollout `turn_context` recorded turn 1 `model=openai/gpt-5-mini`
+(default effort) and turn 2 `model=openai/gpt-5-nano effort=low`. Provider-side
+confirmation of the serving model was not checked.
+
+AGT-002, SES-003, BEH-002, BEH-008, and BEH-010 move to verified. BEH-010 has a
+second real-provider self-hosted run, its first on Linux. BEH-018 stays
+missing/open: a Modal Sandbox ran the executor, but whether that counts as
+provider interoperability is an open project decision. The G12 item to expand
+official SDK scenarios to every implemented resource/capability stays unchecked.
+Counts: 67 operations, 62 verified, 0 implemented, 0 partial, 5 missing (all
+out-of-scope environment templates); 18 behaviors, 16 verified, 0 partial,
+2 missing (BEH-011 out of scope; BEH-018 open).
+
+Deployment caveat: Modal's gVisor forbids the namespaces Codex's Linux sandbox
+needs. `serve.py` sets `sandbox_mode = "read-only"`, which cannot be enforced
+there: anything the worker runs under Codex's sandbox fails. Self-hosted
+sessions are unaffected because their commands run on the executor, which runs
+unsandboxed. [deploy/modal/README.md](deploy/modal/README.md) records how the
+suite ran inside the service Sandbox.
 
 ## Immediate next implementation slices
 
-Updated 2026-10-13. G00–G05 slices and the G01/G02 recovery slices that
+Updated 2026-11-13. G00–G05 slices and the G01/G02 recovery slices that
 previously led this list are complete; their history is in the goal sections
 above and in git.
 
-Only six in-scope inventory rows remain non-verified: AGT-002, SES-003,
-BEH-002, BEH-008, BEH-010, and BEH-018. All require real-provider evidence:
-saved configuration/updates, web search, environment lifecycle beyond one run,
-and executor interoperability with an actual provider. BEH-017 and EVT-002 have
-local verification; lost function waiters and bounded best-effort deltas are
-recorded limits, not remaining implementation slices.
+Only BEH-018 remains non-verified within scope. A Modal Sandbox ran the
+executor, but whether that counts as provider interoperability is an open
+project decision. The 2026-11-13 real-provider runs close AGT-002, SES-003,
+BEH-002, BEH-008, and BEH-010; BEH-017 and EVT-002 now have Linux evidence.
+Lost function waiters and bounded best-effort deltas remain recorded limits.
 
 1. **Projects, API keys, and permissions (G13): complete locally
    2026-10-12,** including project-scoped executor keys. The Admin API is out
@@ -2207,15 +2327,17 @@ recorded limits, not remaining implementation slices.
    event types, beta header, pagination evidence, cursor expiry, Files scope),
    and a second decision pass the same day.
 5. **Deferred functions and tool search (G06): complete locally 2026-10-12.**
-   Built-in web search (G07) still needs real-provider evidence.
+   Built-in web search (G07) passed real-provider acceptance 2026-11-13.
 6. **G08: complete locally 2026-10-13.** No public compaction controls exist in
    the pinned contract;
    nested calls, cancellation, model refusals, and compaction followed by cold
    resume have mock-provider evidence. Capability-directory skills, plugin
    skills, and pinned Skills API versions stay isolated through cold resume.
-7. **G12 evidence gaps.** SDK scenarios for every implemented resource and
-   provider interoperability (BEH-018). Windows and cross-OS worker/executor
-   runs are out of scope by decision (2026-10-13).
+7. **G12 evidence gaps.** Expand SDK scenarios to every implemented
+   resource/capability; that checklist item remains unchecked. Decide whether
+   the Modal executor run satisfies provider interoperability (BEH-018), which
+   stays missing/open. Windows and cross-OS worker/executor runs are out of
+   scope by decision (2026-10-13).
 
 ## How to maintain this plan
 

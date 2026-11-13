@@ -1,6 +1,6 @@
 # Agents API contract inventory
 
-Updated: 2026-10-13 (contract review date 2026-09-22).
+Updated: 2026-11-13 (contract review date 2026-09-22).
 
 This is the pinned G00 parity denominator for this service. The machine-readable
 inventory is [CONTRACT_INVENTORY.json](CONTRACT_INVENTORY.json). It records every
@@ -54,15 +54,16 @@ response variants and documented errors:
 - `verified`: the complete operation passed its required behavioral contract
   tests in the recorded environment.
 
-The current count (2026-10-13) is 60 verified, 0 implemented, 2 partial, and
+The current count (2026-11-13) is 62 verified, 0 implemented, 0 partial, and
 5 missing. The 5 missing are the environment template operations, which are out
 of scope since 2026-10-06. Verified: ART-001..004, SUB-001..006, TRN-002,
-AGT-001, AGT-003..005, SES-001..002, SES-004..005, EVT-001..002, ENV-001..003,
+AGT-001..005, SES-001..005, EVT-001..002, ENV-001..003,
 ITM-001, TRN-001, VLT-001..004, CRD-001..005, FIL-001..005, WHK-001..008,
 TRC-001, SKL-001..006, and SKV-001..005.
 ENV-002..003 moved to verified after the 2026-10-13 scope decision removed
-their only remaining evidence requirement. The 18 behavior rows are 13 verified,
-3 partial, and 2 missing (BEH-011 out of scope; BEH-018 open).
+their only remaining evidence requirement. AGT-002 and SES-003 moved to verified
+on the 2026-11-13 real-provider evidence below. The 18 behavior rows are
+16 verified, 0 partial, and 2 missing (BEH-011 out of scope; BEH-018 open).
 A partial operation does not count as completed parity.
 [PARITY.md](PARITY.md#current-status) has a per-area summary.
 
@@ -72,9 +73,10 @@ preserve foreign processes; a lock held past 10 seconds fails startup safely.
 Evidence: `runtime::worker_spawned_before_record_is_reclaimed_after_owner_crash`,
 `runtime::pid_reused_record_does_not_signal_foreign_process`, and
 `runtime::stale_spawn_intent_does_not_signal_another_worker`; recorded macOS
-runtime 16/16 and lib 24/24 passed, Linux not run. Lost function waiters stay
-unresolved/unavailable by decision: callbacks exist only in memory, resume
-replays only live requests, and new workers restart their request-ID counter.
+runtime 16/16 and lib 24/24 passed. Linux evidence follows under 2026-11-13.
+Lost function waiters stay unresolved/unavailable by decision: callbacks exist
+only in memory, resume replays only live requests, and new workers restart their
+request-ID counter.
 Legacy records remain supported; external workers are untouched. Executor loss
 is tracked separately in BEH-010.
 
@@ -96,9 +98,10 @@ verifies nested function results, cancellation, isolation, and model-mode
 refusals with a mock provider and real V8 host;
 `compaction::automatic_compaction_survives_cold_resume` verifies automatic
 compaction and complete public history after cold resume. The pinned contract
-has no public compaction settings or items. BEH-008 stays partial only for a
-real-provider web search run; inline authorization and request metadata are
-verified by `mcp::mcp_inline_authorization_and_metadata_survive_session_snapshots`
+has no public compaction settings or items. At this milestone BEH-008 stayed
+partial for real-provider web search (closed 2026-11-13); inline authorization
+and request metadata are verified by
+`mcp::mcp_inline_authorization_and_metadata_survive_session_snapshots`
 and the authorization unit tests (mock MCP server).
 
 G08 skills/plugins isolation is verified locally (2026-10-13):
@@ -108,6 +111,50 @@ API versions in two sessions' model-visible developer catalogs before and after
 API/worker restart and executor reconnection. Later defaults do not replace the
 pins; neither session receives the other's selections. Inventory statuses and
 counts are unchanged.
+
+## Linux and real-provider evidence (2026-11-13)
+
+Platform: Modal Sandbox, Linux x86_64 under gVisor (kernel `4.19.0-gvisor`),
+16 CPUs, Rust 1.95, built from HEAD `4bbd24459c`. All Linux test runs used
+`cargo nextest --retries 0`. The full `codex-agents-api` crate passed 93/93
+with `--run-ignored all`, including the three pinned SDK tests. A separate
+Sandbox repeated the recovery/streaming slice three times, 43/43 each:
+runtime binary 16/16 (including the three BEH-017 tests above), lib 24/24,
+and `environments::self_hosted_command_output_deltas_arrive_in_order_before_item_done`.
+This adds Linux evidence for BEH-017 and EVT-002 to their earlier macOS runs.
+
+The `codex-core` `-E 'test(/unified_exec/)'` slice passed 184/191. All EVT-002
+core tests above passed, including `early_exit` and `later_output` for both
+initial-output tests. The seven failures require Codex's Linux sandbox
+(bubblewrap), whose namespaces gVisor cannot host: `unshare -n` and bwrap fail
+with "Operation not permitted" and "bwrap: loopback: Failed RTM_NEWADDR".
+None was touched by this branch; this is an environment limitation, not a
+regression. G12's dated evidence in [GOALS.md](GOALS.md#linux-and-real-provider-evidence-2026-11-13)
+lists the seven tests.
+
+`tests/real_provider.py` ran inside the service Sandbox started with
+`deploy/modal/serve.py`, with `/opt/agents-api/bin/codex` as the stock
+`codex exec-server` executor. All eight original scenarios (`plain`, `stream`,
+`function`, `structured`, `web_search`, `cancel`, `traces`, `self_hosted`) passed
+against `openai/gpt-5-mini` via OpenRouter for 55,145 tokens. The new
+`saved_agent` and `session_update` scenarios (commit `e6cc90c2b2`) passed for
+16,228 tokens. AGT-002, SES-003, BEH-002, BEH-008, and BEH-010 move to verified;
+BEH-010 now has a second real-provider run, its first on Linux.
+
+One web-search session recorded five completed `web_search_call` items with
+search actions, including "site:python.org latest Python release", and an
+answer citing python.org. Three actions had an empty query. The service maps
+Codex's action faithfully (`src/records.rs`, `web_search_action`), so the blank
+comes from Codex or the provider; it was not investigated.
+
+The session-update trace's `gen_ai.response.model` is the service record of the
+model configured at turn start (`src/routes.rs`, `turn_models` insert), updated
+only by a Codex reroute; it is not provider-reported. Independently, Codex's
+rollout `turn_context` recorded turn 1 `model=openai/gpt-5-mini` (default effort)
+and turn 2 `model=openai/gpt-5-nano effort=low`. Provider-side confirmation of
+the serving model was not checked. BEH-018 stays missing/open: a Modal Sandbox
+ran the executor, but whether that counts as provider interoperability is an
+open project decision. G12's SDK scenario expansion remains unchecked.
 
 ## What is pinned
 
@@ -261,6 +308,11 @@ Amendments under the same `openai==3.17.0` pin:
   Managed-worker spawn-to-record recovery and initial/fast-exit command deltas
   have local evidence named above. Lost function waiters remain unresolved/
   unavailable by decision; deltas retain the 10,000-per-call and 64-chunk
-  pre-watcher limits. Counts: 67 operations, 60 verified, 0 implemented,
-  2 partial, 5 missing (out of scope); 18 behaviors, 13 verified, 3 partial,
-  2 missing (BEH-011 out of scope; BEH-018 open).
+  pre-watcher limits. Counts at this milestone: 67 operations, 60 verified,
+  0 implemented, 2 partial, 5 missing (out of scope); 18 behaviors, 13 verified,
+  3 partial, 2 missing (BEH-011 out of scope; BEH-018 open).
+- 2026-11-13: Linux and real-provider evidence recorded above (status only;
+  denominator unchanged). AGT-002, SES-003, BEH-002, BEH-008, and BEH-010 move
+  to verified. Counts: 67 operations, 62 verified, 0 implemented, 0 partial,
+  5 missing (out of scope); 18 behaviors, 16 verified, 0 partial, 2 missing
+  (BEH-011 out of scope; BEH-018 open).

@@ -1,5 +1,7 @@
 # Agents API on Modal
 
+Updated: 2026-11-13.
+
 Tools for hosting the Agents API in a [Modal](https://modal.com) Sandbox and
 evaluating it with coding tasks that need Codex's harness. They are not part of
 the service and are not run by its tests.
@@ -36,6 +38,50 @@ Known gap: Modal's tunnel does not send `x-forwarded-proto`, so a self-hosted
 session's `remote_url` reads `http://…/registry`. Executors inside the Sandbox
 use loopback and are unaffected. One outside it needs the https form of that
 URL and `--trusted-registry-host`.
+
+Deployment caveat (2026-11-13): Modal Sandboxes run under gVisor, which forbids
+the namespaces Codex's Linux sandbox (bubblewrap) needs. `serve.py` sets
+`sandbox_mode = "read-only"`, which cannot be enforced there: anything the
+worker runs under Codex's sandbox fails. `unshare -n` and bwrap namespace
+creation fail with "Operation not permitted"; Codex reports
+"bwrap: loopback: Failed RTM_NEWADDR". Self-hosted sessions are unaffected
+because their commands run on the executor, which runs unsandboxed.
+
+## Linux and real-provider evidence (2026-11-13)
+
+Linux test platform: Modal Sandbox, Linux x86_64 under gVisor (kernel
+`4.19.0-gvisor`), 16 CPUs, Rust 1.95, built from HEAD `4bbd24459c`. All test
+runs used `cargo nextest --retries 0`. The full `codex-agents-api` crate passed
+93/93 with `--run-ignored all`, including three pinned SDK tests. A separate
+Sandbox repeated recovery/streaming three times, 43/43 each (runtime binary
+16/16, lib 24/24, and the self-hosted command-output test). The core
+`-E 'test(/unified_exec/)'` slice passed 184/191; all cited EVT-002 tests passed.
+The seven failures require the bubblewrap namespaces above; none was touched
+by this branch. This is an environment limitation, not a regression; the exact
+tests are recorded in [GOALS.md](../../GOALS.md#linux-and-real-provider-evidence-2026-11-13).
+
+Real-provider run: the service was started with `deploy/modal/serve.py`.
+`tests/real_provider.py` ran inside the service Sandbox, with
+`/opt/agents-api/bin/codex` as the stock `codex exec-server` executor, so
+`self_hosted` ran on Linux. Against `openai/gpt-5-mini` via OpenRouter:
+
+- All eight original scenarios passed (`plain`, `stream`, `function`,
+  `structured`, `web_search`, `cancel`, `traces`, `self_hosted`): 55,145 tokens.
+- `saved_agent` and `session_update` (commit `e6cc90c2b2`) passed: 16,228 tokens.
+
+One web-search session recorded five completed `web_search_call` items with
+search actions, including "site:python.org latest Python release", and an
+answer citing python.org. Three actions had empty queries; the service maps
+Codex's action faithfully (`src/records.rs`, `web_search_action`), so the blank
+comes from Codex or the provider. It was not investigated.
+
+The session-update trace's `gen_ai.response.model` records the service's
+configured model at turn start (`src/routes.rs`, `turn_models` insert), updated
+only by a Codex reroute; it is not provider-reported. Independent rollout
+`turn_context` recorded turn 1 `model=openai/gpt-5-mini` (default effort) and
+turn 2 `model=openai/gpt-5-nano effort=low`. Provider-side confirmation of the
+serving model was not checked. BEH-018 stays missing/open pending a project
+decision on whether this Modal executor run counts as provider interoperability.
 
 ## Harness evals
 
