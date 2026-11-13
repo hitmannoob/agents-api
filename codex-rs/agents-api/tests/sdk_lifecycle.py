@@ -7,6 +7,7 @@ import time
 import openai
 
 from sdk_agents import check_saved_agents
+from sdk_helpers import assert_scenario_coverage
 from sdk_helpers import client as sdk_client
 from sdk_helpers import fixture
 from sdk_events import check_event_stream
@@ -35,6 +36,7 @@ def finish(stream):
 
 
 if len(sys.argv) == 3:
+    # Restart recovery is a subset; the initial invocation audits all operations.
     session_id = sys.argv[2]
     assert sessions.retrieve(session_id).status == "idle"
     assert len(list(sessions.turns.list(session_id))) == 3
@@ -235,3 +237,4 @@ print(
         {"session_id": session_id, "items": len(items), "sdk": openai.__version__}
     )
 )
+assert_scenario_coverage("sdk_lifecycle.py")

@@ -64,7 +64,8 @@ ENV-002..003 moved to verified after the 2026-10-13 scope decision removed
 their only remaining evidence requirement. AGT-002 and SES-003 moved to verified
 on the 2026-11-13 real-provider evidence below. The 18 behavior rows are
 17 verified, 0 partial, and 1 missing (BEH-011 out of scope); BEH-018 is verified
-by the separate-Sandbox public-tunnel run below.
+by the separate-Sandbox public-tunnel run below. G12's SDK coverage audit is
+also complete; no in-scope parity work remains.
 A partial operation does not count as completed parity.
 [PARITY.md](PARITY.md#current-status) has a per-area summary.
 
@@ -162,8 +163,8 @@ rollout `turn_context` recorded turn 1 `model=openai/gpt-5-mini` (default effort
 and turn 2 `model=openai/gpt-5-nano effort=low`. Provider-side confirmation of
 the serving model was not checked. At this milestone BEH-018 stayed missing:
 the executor ran in the service Sandbox over loopback. The later decision and
-separate-Sandbox run below close that gap. G12's SDK scenario expansion remains
-unchecked.
+separate-Sandbox run below close that gap. G12's SDK scenario expansion was also
+still unchecked at this milestone; the later SDK coverage audit below closes it.
 
 ## Provider interoperability (2026-11-13)
 
@@ -194,8 +195,23 @@ executor Sandbox running. BEH-018 moves to verified.
 After commit `eae7869510`, all ten `tests/real_provider.py` scenarios passed
 against the patched service for 81,365 tokens. The self-hosted scenario now
 passes `--trusted-registry-host` for a non-loopback advertised host; otherwise
-the stock CLI sends the key only to OpenAI or loopback hosts. The only remaining
-in-scope item is G12's SDK-scenario audit.
+the stock CLI sends the key only to OpenAI or loopback hosts. At this milestone,
+only G12's SDK-scenario audit was still pending; the subsequent audit below
+closes it.
+
+## SDK coverage audit (2026-11-13)
+
+The reviewer ran the full crate with the coverage changes applied to HEAD
+`4873a812c4` on Linux in Modal (gVisor x86_64, Rust 1.95), using
+`cargo nextest --retries 0 --run-ignored all`: 99/99 passed. This includes the
+static `sdk_scenario` assignment check and runtime assertions that all 49
+operations assigned to `sdk_lifecycle.py` and all 12 assigned to
+`sdk_environments.py` were called. TRC-001 retains raw-HTTP coverage; missing
+template operations are exempt. The reviewer also confirmed direct and
+`with_raw_response` recording and assertion failure for uncalled operations.
+G12 is complete; no in-scope parity work remains. Statuses and counts are
+unchanged. [GOALS.md](GOALS.md#g12--final-acceptance-and-operational-readiness)
+records the mechanism and named tests.
 
 ## What is pinned
 

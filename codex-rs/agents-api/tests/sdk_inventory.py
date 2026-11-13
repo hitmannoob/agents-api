@@ -7,17 +7,12 @@ import re
 import sys
 from pathlib import Path
 
-from openai.types.beta.agent import Agent
-from openai.types.beta.agent_session import AgentSession
-
-from sdk_helpers import SDK_VERSION, fixture, require_pinned_sdk
-
-
 HTTP_CALLS = {
     "GET": ("self._get(", "self._get_api_list("),
     "POST": ("self._post(",),
     "DELETE": ("self._delete(",),
 }
+SDK_SCENARIOS = {"sdk_lifecycle.py", "sdk_environments.py"}
 
 
 def resource(value):
@@ -61,7 +56,26 @@ def check_tests(inventory, crate):
     return sum(row["status"] != "missing" for row in rows)
 
 
+def check_scenarios(inventory, crate):
+    """Assign each implemented SDK operation to a real scenario entry script."""
+    assigned = 0
+    for row in inventory["operations"] + inventory["behaviors"]:
+        if row["status"] == "missing" or not row.get("sdk_method"):
+            assert "sdk_scenario" not in row, f"{row['id']}: unexpected sdk_scenario"
+            continue
+        scenario = row.get("sdk_scenario")
+        assert scenario in SDK_SCENARIOS, f"{row['id']}: invalid sdk_scenario {scenario!r}"
+        assert (crate / "tests" / scenario).is_file(), (row["id"], scenario)
+        assigned += 1
+    return assigned
+
+
 def main():
+    from openai.types.beta.agent import Agent
+    from openai.types.beta.agent_session import AgentSession
+
+    from sdk_helpers import SDK_VERSION, fixture, require_pinned_sdk
+
     require_pinned_sdk()
     with open(sys.argv[1], encoding="utf-8") as handle:
         inventory = json.load(handle)
@@ -101,7 +115,9 @@ def main():
         }
         assert actual == expected, (resource_name, sorted(expected), sorted(actual))
 
-    covered = check_tests(inventory, Path(sys.argv[1]).resolve().parent)
+    crate = Path(sys.argv[1]).resolve().parent
+    covered = check_tests(inventory, crate)
+    assigned = check_scenarios(inventory, crate)
 
     Agent.model_validate(fixture("agent_response"))
     AgentSession.model_validate(fixture("session_response"))
@@ -113,6 +129,7 @@ def main():
                     len(value) for value in expected_by_resource.values()
                 ),
                 "rows_with_tests": covered,
+                "sdk_operations_with_scenarios": assigned,
             }
         )
     )

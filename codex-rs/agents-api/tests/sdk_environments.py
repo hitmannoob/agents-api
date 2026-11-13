@@ -11,6 +11,7 @@ import time
 
 import openai
 
+from sdk_helpers import assert_scenario_coverage
 from sdk_helpers import client as sdk_client
 from sdk_helpers import message
 from sdk_sessions import idle
@@ -110,3 +111,4 @@ assert idle(sessions, waiting.id).required_actions == []
 sessions.delete(waiting.id)
 rejected(openai.NotFoundError, environments.retrieve, waiting.environment.id)
 print("sdk environments ok")
+assert_scenario_coverage("sdk_environments.py")

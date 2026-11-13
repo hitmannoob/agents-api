@@ -84,8 +84,10 @@ The separate executor Sandbox passed all seven public-tunnel interop checks,
 verifying BEH-018 by project decision. The subsequent full real-provider suite
 passed all ten scenarios via OpenRouter for 81,365 tokens. Counts: 67 operations,
 62 verified, 0 implemented, 0 partial, 5 missing (out of scope); 18 behaviors,
-17 verified, 0 partial, 1 missing (BEH-011 out of scope). Only G12's SDK-scenario
-audit remains in scope.
+17 verified, 0 partial, 1 missing (BEH-011 out of scope). The subsequent reviewer
+run with the SDK coverage changes applied to HEAD `4873a812c4` passed 99/99,
+including all 49 lifecycle and 12 environment operation coverage assertions.
+G12 is complete; no in-scope parity work remains.
 
 Current boundaries:
 
@@ -143,7 +145,7 @@ fixture design may start earlier.
 | G09 | Implement environment lifecycle (self-hosted complete locally; managed out of scope) | G00, G01, G02 | Self-hosted attachment, managed provisioning, lifecycle recovery |
 | G10 | Implement files and artifacts (complete locally for self-hosted, including the Skills API) | G00, G02; G09 for environment transfer | Storage contract, transfer, publication, cleanup |
 | G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
-| G12 | Prove end-to-end parity (open: SDK scenarios for every resource; provider interoperability verified 2026-11-13) | All applicable goals | Contract suite, real providers, failure matrix |
+| G12 | Prove end-to-end parity (complete 2026-11-13: SDK operation coverage and provider interoperability verified) | All applicable goals | Contract suite, real providers, failure matrix |
 | G13 | Projects, API keys, and permissions (complete locally 2026-10-12; Admin API out of scope) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
 
 Ship bounded changes within each goal. Do not combine a supervisor rewrite,
@@ -1651,7 +1653,7 @@ including Windows shutdown and orphan containment, are outside the parity target
 
 - [x] Map every G00 inventory entry to a behavior test and evidence. Verify schema
   variants, exact errors, pagination, timestamps, transitions, and size boundaries.
-- [ ] Expand official SDK scenarios to every implemented resource/capability.
+- [x] Expand official SDK scenarios to every implemented resource/capability.
   Include raw HTTP fixtures where SDK parsing hides a wire-contract discrepancy.
 - [x] Run a controlled real-provider suite with explicitly configured credentials
   and budget. Separate provider-dependent failures from service contract failures.
@@ -1666,6 +1668,29 @@ including Windows shutdown and orphan containment, are outside the parity target
   quotas, health checks, and graceful deployment. Add distributed worker routing
   only if deployment requirements call for it; it is not proof of public parity.
 
+SDK coverage audit (2026-11-13, **reviewer verified: Linux 99/99**): `sdk_scenario` assigns
+49 implemented SDK operations to `sdk_lifecycle.py` and 12 to
+`sdk_environments.py`. The inventory check enforces valid entry-script assignments
+and excludes missing rows and raw-HTTP-only TRC-001. On client creation, class-level
+wrappers record inventoried SDK calls once per method; each full scenario asserts
+its assigned rows were called, reporting uncalled IDs and resource methods.
+The lifecycle restart-only invocation remains a recovery subset. Reading every
+`sdk_*.py` found no absent operation calls, so no call gaps or mock-response changes
+were needed: ART-001, ART-003, and ART-004 already make real retrieve, delete, and
+content calls with asserted 404s for self-hosted artifacts. Initial local
+verification covered static checks and Python syntax compilation. The reviewer
+then ran the full `codex-agents-api` crate with these changes applied to HEAD
+`4873a812c4` on Linux in Modal (gVisor x86_64, Rust 1.95), using
+`cargo nextest --retries 0 --run-ignored all`: **99/99 passed**, including:
+
+- `contract::pinned_sdk_matches_operation_inventory`: static `sdk_scenario` check.
+- `contract::official_sdk_session_lifecycle`: all 49 assigned operations called.
+- `environments::official_sdk_self_hosted_environment`: all 12 assigned operations called.
+
+The reviewer also confirmed locally that recording captures direct and
+`with_raw_response` calls and that uncalled operations fail the coverage
+assertion. G12's SDK expansion item is accepted; no in-scope parity work remains.
+
 Evidence (2026-11-13, Linux and real providers): the full crate first passed
 93/93, recovery/streaming passed 43/43 three times, and the real-provider suite
 passed all eight original scenarios plus `saved_agent` and `session_update`.
@@ -1674,8 +1699,8 @@ section records the platform, core sandbox limitation, tokens, observations,
 and promotions. The later [provider interoperability](#provider-interoperability-2026-11-13)
 evidence records the public-URL fix (99/99 and crate clippy clean), separate
 executor Sandbox (7/7), project decision verifying BEH-018, and subsequent full
-real-provider suite (ten scenarios, 81,365 tokens). SDK scenarios for every
-implemented resource/capability remain unchecked. Modal cannot enforce
+real-provider suite (ten scenarios, 81,365 tokens). The reviewer-verified SDK
+coverage audit above closes the final G12 acceptance item. Modal cannot enforce
 `serve.py`'s read-only Codex sandbox under gVisor;
 self-hosted commands run on the unsandboxed executor and are unaffected.
 
@@ -2327,8 +2352,8 @@ AGT-002, SES-003, BEH-002, BEH-008, and BEH-010 move to verified. BEH-010 has a
 second real-provider self-hosted run, its first on Linux. At this milestone
 BEH-018 stayed missing pending a project decision: the executor ran in the
 service Sandbox over loopback. The later decision and separate-Sandbox evidence
-below close that gap. The G12 item to expand official SDK scenarios to every
-implemented resource/capability stays unchecked.
+below close that gap. The G12 SDK expansion item was still unchecked at this
+milestone; the later SDK coverage audit under G12 closes it.
 Counts at this milestone: 67 operations, 62 verified, 0 implemented, 0 partial,
 5 missing (all out-of-scope environment templates); 18 behaviors, 16 verified, 0 partial,
 2 missing (BEH-011 out of scope; BEH-018 open).
@@ -2382,7 +2407,8 @@ the stock CLI sends the key only to OpenAI or loopback hosts.
 
 BEH-018 moves to verified. Counts: 67 operations, 62 verified, 0 implemented,
 0 partial, 5 missing (out of scope); 18 behaviors, 17 verified, 0 partial,
-1 missing (BEH-011 out of scope). G12's SDK-scenario audit remains unchecked.
+1 missing (BEH-011 out of scope). G12's SDK-scenario audit was still pending at
+this milestone; the subsequent reviewer run recorded under G12 closes it.
 
 ## Immediate next implementation slices
 
@@ -2391,8 +2417,8 @@ previously led this list are complete; their history is in the goal sections
 above and in git.
 
 All in-scope operation and behavior rows are verified, including BEH-018's
-separate executor Sandbox through the public tunnel. The only remaining
-in-scope item is G12's SDK-scenario audit. Lost function waiters and bounded
+separate executor Sandbox through the public tunnel. G12's SDK-scenario audit
+is complete; no in-scope parity work remains. Lost function waiters and bounded
 best-effort deltas remain recorded limits.
 
 1. **Projects, API keys, and permissions (G13): complete locally
@@ -2411,10 +2437,11 @@ best-effort deltas remain recorded limits.
    nested calls, cancellation, model refusals, and compaction followed by cold
    resume have mock-provider evidence. Capability-directory skills, plugin
    skills, and pinned Skills API versions stay isolated through cold resume.
-7. **G12 SDK-scenario audit.** Expand SDK scenarios to every implemented
-   resource/capability; that checklist item remains unchecked. Provider
-   interoperability (BEH-018) is verified (2026-11-13). Windows and cross-OS
-   worker/executor runs are out of scope by decision (2026-10-13).
+7. **G12 SDK-scenario audit: complete 2026-11-13.** The reviewer Linux run passed
+   99/99, including the static assignment check and runtime coverage of all 61
+   assigned SDK operations. Provider interoperability (BEH-018) is also verified.
+   Windows and cross-OS worker/executor runs are out of scope by decision
+   (2026-10-13).
 
 ## How to maintain this plan
 

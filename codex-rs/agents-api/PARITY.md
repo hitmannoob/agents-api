@@ -8,9 +8,10 @@ Baseline reviewed: 2026-09-22, official Python SDK `openai==3.17.0` and the
 official Agents API guides. The [contract inventory](CONTRACT_INVENTORY.md)
 establishes a 67-operation denominator: 43 Agents API operations and 24 Files,
 Skills, and Webhooks operations required by documented workflows. The text/function
-session slice has an executable SDK contract check (`tests/sdk_lifecycle.py`)
-with strict response validation; `tests/sdk_inventory.py` detects drift in the
-pinned SDK resource surface.
+session lifecycle and self-hosted environment scenarios (`tests/sdk_lifecycle.py`
+and `tests/sdk_environments.py`) use strict response validation and assert calls
+to all 61 implemented SDK operations. `tests/sdk_inventory.py` detects drift in
+the pinned SDK resource surface and validates scenario assignments.
 
 Detailed implementation steps, dependencies, and acceptance gates are maintained
 in [GOALS.md](GOALS.md).
@@ -20,7 +21,8 @@ in [GOALS.md](GOALS.md).
 - Match public operations, request/response schemas, event types, status
   transitions, pagination, configuration semantics, and documented failure behavior.
 - Run supported official SDK examples against our service by changing the base
-  URL and credentials. SDK compatibility is an acceptance target, not a current claim.
+  URL and credentials. Compatibility is verified against the pinned SDK within
+  the documented parity scope.
 - Own harness startup, worker supervision, session routing, and persistent state.
 - Supply our own implementation for managed compute and external service
   integrations. Preserve the public contract where compatibility is intended;
@@ -99,7 +101,16 @@ running. BEH-018 is verified. After `eae7869510` added
 `--trusted-registry-host` for a non-loopback advertised host, the full ten-scenario
 `tests/real_provider.py` suite passed against the patched service for 81,365
 tokens. [GOALS.md](GOALS.md#provider-interoperability-2026-11-13) records the
-results; SDK scenarios for every resource remain open.
+results.
+
+SDK coverage acceptance (2026-11-13): the reviewer ran the full crate with the
+coverage changes applied to HEAD `4873a812c4` on Linux in Modal (gVisor x86_64,
+Rust 1.95), using `cargo nextest --retries 0 --run-ignored all`: 99/99 passed.
+The static scenario-assignment check and runtime coverage assertions passed for
+all 49 lifecycle and 12 environment operations. The reviewer also confirmed
+direct and `with_raw_response` recording and failure on uncalled operations.
+G12 is complete; no in-scope parity work remains. See the SDK coverage audit in
+[GOALS.md](GOALS.md#g12--final-acceptance-and-operational-readiness).
 
 Initial web-search observation (2026-11-13): one session recorded five completed
 search actions and an answer citing python.org; three actions had empty queries.
@@ -150,11 +161,9 @@ See [Modal deployment](deploy/modal/README.md).
 ### Path to `verified`
 
 Updated: 2026-11-13. All in-scope operation and behavior rows are verified,
-including provider interoperability through the public tunnel. Only the
-SDK-scenario audit remains in scope.
-
-1. **SDK evidence (G12):** expand official SDK scenarios to every implemented
-   resource/capability; the corresponding checklist item remains unchecked.
+including provider interoperability through the public tunnel. G12's SDK
+operation coverage is reviewer-verified by the 99/99 Linux run above, and the
+corresponding checklist item is complete. No in-scope parity work remains.
 
 ## Implementation sequence
 
