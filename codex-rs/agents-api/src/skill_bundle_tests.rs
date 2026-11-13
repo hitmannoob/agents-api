@@ -196,6 +196,25 @@ fn bundles_that_break_the_layout_are_refused() {
         )),
         "skill archives must not contain links: a/link"
     );
+    // Decoders other than stored and deflated may buffer without bound.
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let bzip2 =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Bzip2);
+    writer
+        .start_file("a/SKILL.md", zip::write::SimpleFileOptions::default())
+        .expect("manifest");
+    writer.write_all(manifest).expect("manifest contents");
+    writer.start_file("a/data.bin", bzip2).expect("bzip2 entry");
+    writer.write_all(&[0; 1024]).expect("bzip2 contents");
+    let compressed = writer.finish().expect("finish zip").into_inner();
+    let output = directory.path().join("bzip2-out");
+    assert_eq!(
+        message(package(
+            &parts(directory.path(), &[("a.zip", &compressed)]),
+            &output
+        )),
+        "skill archives must use stored or deflated entries: a/data.bin"
+    );
     let output = directory.path().join("not-zip-out");
     assert_eq!(
         message(package(

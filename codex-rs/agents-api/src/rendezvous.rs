@@ -17,6 +17,7 @@ use axum::response::Response;
 use futures::SinkExt;
 use futures::StreamExt;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -26,6 +27,10 @@ const MAX_FRAME_BYTES: usize = 256 * 1024;
 const SOCKET_BUFFER: usize = 256;
 /// Harness sockets per environment.
 const MAX_HARNESSES: usize = 256;
+/// Open relay streams per environment, across its harness sockets.
+const MAX_STREAMS: usize = 4096;
+/// Longest stream ID the relay keeps; Codex uses UUIDs.
+const MAX_STREAM_ID_BYTES: usize = 128;
 
 #[derive(Deserialize)]
 pub(crate) struct ExecutorQuery {
@@ -247,11 +252,13 @@ fn to_executor(state: &State, environment_id: &str, connection: u64, frame: Vec<
         return;
     };
     state.registry.with_slot(environment_id, |slot| {
-        let refusal = match slot.streams.get(&stream_id) {
-            Some(owner) if *owner != connection => Some("stream_in_use"),
-            _ if slot.executor.is_none() => Some("environment_offline"),
-            _ => None,
-        };
+        let refusal = refusal(
+            &slot.streams,
+            slot.executor.is_some(),
+            &stream_id,
+            resets,
+            connection,
+        );
         if let Some(reason) = refusal {
             if let Some(harness) = slot.harnesses.get(&connection) {
                 let _ = harness.try_send(reset(&stream_id, reason));
@@ -270,6 +277,29 @@ fn to_executor(state: &State, environment_id: &str, connection: u64, frame: Vec<
 }
 
 /// A frame's `stream_id` (field 2) and whether its body is a reset (field 8).
+/// Why a harness frame on `stream_id` may not reach the executor: another
+/// harness owns the stream, the executor is offline, or a new stream would
+/// exceed the table's bounds.
+fn refusal(
+    streams: &HashMap<String, u64>,
+    executor_online: bool,
+    stream_id: &str,
+    resets: bool,
+    connection: u64,
+) -> Option<&'static str> {
+    match streams.get(stream_id) {
+        Some(owner) if *owner != connection => Some("stream_in_use"),
+        _ if !executor_online => Some("environment_offline"),
+        // Only a new stream can grow the table, so only it is bounded.
+        None if !resets
+            && (stream_id.len() > MAX_STREAM_ID_BYTES || streams.len() >= MAX_STREAMS) =>
+        {
+            Some("stream_limit")
+        }
+        _ => None,
+    }
+}
+
 fn stream_of(frame: &[u8]) -> Option<(String, bool)> {
     let mut stream_id = None;
     let mut resets = false;

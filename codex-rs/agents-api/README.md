@@ -325,7 +325,8 @@ plus `input_image` parts. Images are `data:image/` URLs or https URLs. Codex
 accepts only inline images, so the service fetches a remote image before
 dispatching the input (at most 20 MiB, an `image/*` content type, no
 redirects, 15 seconds) and passes it on as a data URL; a fetch that fails
-refuses the input with 400. Fetches follow the egress rules for webhooks:
+refuses the input with 400. One request fetches at most 500 remote images and
+50 MiB of image data, as the Responses API accepts. Fetches follow the egress rules for webhooks:
 public addresses only, unless the operator allows the host with repeated
 `--allow-image-host <host>` flags or `AgentsApi::allow_image_hosts`, which
 also permits plain http. Invalid image data is left to Codex's image

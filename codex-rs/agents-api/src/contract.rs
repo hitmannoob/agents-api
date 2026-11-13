@@ -181,7 +181,12 @@ async fn create(
         Some(Value::Array(items)) if items.is_empty() => None,
         Some(input) => {
             let mut items = crate::input::message(input)?;
-            crate::images::inline(&state, &mut items).await?;
+            crate::images::inline(
+                &state,
+                &mut items,
+                &mut crate::images::Budget::per_request(),
+            )
+            .await?;
             Some(items)
         }
     };

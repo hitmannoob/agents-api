@@ -16,18 +16,50 @@ use std::time::Duration;
 pub(crate) const MAX_IMAGE_BYTES: usize = 20 << 20;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 15);
 
-/// Replace each remote image in parsed input with the image it names.
-pub(crate) async fn inline(state: &State, items: &mut [Value]) -> Result<(), ApiError> {
+/// Remote images fetched for one request, as the Responses API accepts.
+const MAX_REQUEST_IMAGES: usize = 500;
+/// Remote image bytes fetched for one request, as the Responses API accepts.
+const MAX_REQUEST_IMAGE_BYTES: usize = 50 << 20;
+
+/// What one request may still fetch. Each image is held, base64-encoded,
+/// until the request is dispatched, so the request as a whole is bounded.
+pub(crate) struct Budget {
+    images: usize,
+    bytes: usize,
+}
+
+impl Budget {
+    pub(crate) fn per_request() -> Self {
+        Self {
+            images: MAX_REQUEST_IMAGES,
+            bytes: MAX_REQUEST_IMAGE_BYTES,
+        }
+    }
+}
+
+/// Replace each remote image in parsed input with the image it names,
+/// charging `budget`.
+pub(crate) async fn inline(
+    state: &State,
+    items: &mut [Value],
+    budget: &mut Budget,
+) -> Result<(), ApiError> {
     for item in items.iter_mut().filter(|item| item["type"] == "image") {
         let Some(url) = item["url"].as_str().filter(|url| !url.starts_with("data:")) else {
             continue;
         };
-        item["url"] = json!(fetch(state, url).await?);
+        if budget.images == 0 {
+            return Err(invalid(format!(
+                "input_image: a request may fetch at most {MAX_REQUEST_IMAGES} remote images"
+            )));
+        }
+        budget.images -= 1;
+        item["url"] = json!(fetch(state, url, budget).await?);
     }
     Ok(())
 }
 
-async fn fetch(state: &State, url: &str) -> Result<String, ApiError> {
+async fn fetch(state: &State, url: &str, budget: &mut Budget) -> Result<String, ApiError> {
     let refused = |reason: String| invalid(format!("input_image {reason}"));
     let (host, addresses) = crate::egress::destination(url, &state.image_hosts)
         .await
@@ -76,7 +108,13 @@ async fn fetch(state: &State, url: &str) -> Result<String, ApiError> {
         if bytes.len() + chunk.len() > MAX_IMAGE_BYTES {
             return Err(refused("is larger than 20 MiB".into()));
         }
+        if bytes.len() + chunk.len() > budget.bytes {
+            return Err(invalid(
+                "input_image: a request may fetch at most 50 MiB of remote images",
+            ));
+        }
         bytes.extend_from_slice(&chunk);
     }
+    budget.bytes -= bytes.len();
     Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
 }

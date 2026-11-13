@@ -27,6 +27,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -40,12 +42,21 @@ const TIMED_OUT: &str =
 const RESTARTED: &str =
     "the service restarted while input waited for the environment; that input was dropped";
 
+/// Input batches one session may hold while its executor is offline.
+const MAX_WAITING_INPUTS: usize = 32;
+/// Serialized input bytes one session may hold while its executor is offline.
+const MAX_WAITING_BYTES: usize = 8 * 1024 * 1024;
+/// Serialized input bytes all sessions together may hold.
+const MAX_TOTAL_WAITING_BYTES: usize = 256 * 1024 * 1024;
+
 /// Input held while a session's executor is offline.
 pub(crate) struct Waits {
     /// Waiting input by session ID.
     inputs: Mutex<HashMap<String, Wait>>,
     /// How long input waits for the executor.
     pub(crate) limit: Mutex<Duration>,
+    /// Bytes of every queued input, released as each one leaves the queue.
+    total_bytes: Arc<AtomicUsize>,
 }
 
 impl Default for Waits {
@@ -53,14 +64,63 @@ impl Default for Waits {
         Self {
             inputs: Mutex::default(),
             limit: Mutex::new(CONNECTION_WAIT),
+            total_bytes: Arc::default(),
         }
     }
 }
 
 struct Wait {
-    inputs: VecDeque<Vec<Value>>,
+    inputs: VecDeque<Queued>,
     /// Tells this wait apart from a later one for the same session.
     generation: u64,
+}
+
+/// One queued input batch. Dropping it, whether it started, was cancelled,
+/// timed out, or its session was deleted, returns its bytes to the budget.
+struct Queued {
+    items: Vec<Value>,
+    bytes: usize,
+    total: Arc<AtomicUsize>,
+}
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        self.total.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+impl Waits {
+    /// Count `items` against the queue limits, or refuse them before they are
+    /// held. `waiting` is the session's queue so far, if any.
+    fn admit(&self, waiting: Option<&Wait>, items: Vec<Value>) -> Result<Queued, ApiError> {
+        let bytes = serde_json::to_vec(&items).map_or(usize::MAX, |encoded| encoded.len());
+        let (count, held) = waiting.map_or((0, 0), |wait| {
+            (
+                wait.inputs.len(),
+                wait.inputs.iter().map(|queued| queued.bytes).sum(),
+            )
+        });
+        let too_much = || {
+            ApiError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too much input is waiting for this session's environment to connect".into(),
+            )
+        };
+        if count >= MAX_WAITING_INPUTS || held + bytes > MAX_WAITING_BYTES {
+            return Err(too_much());
+        }
+        let previous = self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
+        let queued = Queued {
+            items,
+            bytes,
+            total: Arc::clone(&self.total_bytes),
+        };
+        if previous + bytes > MAX_TOTAL_WAITING_BYTES {
+            // Dropping `queued` releases the reservation.
+            return Err(too_much());
+        }
+        Ok(queued)
+    }
 }
 
 /// A new environment from a `self_hosted` environment parameter.
@@ -302,13 +362,14 @@ pub(crate) async fn submit(
         let mut waits = crate::lock(&state.waits.inputs);
         if let Some(wait) = waits.get_mut(session_id) {
             // Earlier input is still waiting or starting; keep the order.
-            wait.inputs.push_back(items);
+            let queued = state.waits.admit(Some(wait), items)?;
+            wait.inputs.push_back(queued);
             return Ok(());
         }
         if connected {
             Some(items)
         } else {
-            let inputs = VecDeque::from([items]);
+            let inputs = VecDeque::from([state.waits.admit(/*waiting*/ None, items)?]);
             waits.insert(session_id.to_owned(), Wait { inputs, generation });
             None
         }
@@ -419,7 +480,8 @@ async fn wait(state: Weak<State>, session_id: String, environment_id: String, ge
                 .get_mut(&session_id)
                 .and_then(|wait| wait.inputs.pop_front())
             {
-                Some(items) => items,
+                // Its bytes return to the budget as it leaves the queue.
+                Some(mut queued) => std::mem::take(&mut queued.items),
                 None => {
                     waits.remove(&session_id);
                     return;
@@ -523,3 +585,7 @@ pub(crate) async fn forget(state: &State, environment_id: &str) {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "environments_tests.rs"]
+mod tests;

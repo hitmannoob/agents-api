@@ -27,6 +27,7 @@ async fn remote_input_images_are_fetched_under_the_egress_rules() -> anyhow::Res
             ("/page.html", ResponseTemplate::new(/*s*/ 200).set_body_raw("<html></html>", "text/html")),
             ("/missing.png", ResponseTemplate::new(/*s*/ 404)),
             ("/moved.png", ResponseTemplate::new(/*s*/ 302).insert_header("location", "/pixel.png")),
+            ("/large.png", ResponseTemplate::new(/*s*/ 200).set_body_raw(vec![0u8; 15 << 20], "image/png")),
         ] {
             Mock::given(path(route)).respond_with(response).mount(&images).await;
         }
@@ -77,6 +78,12 @@ async fn remote_input_images_are_fetched_under_the_egress_rules() -> anyhow::Res
             assert_eq!(refused(send(image_input(&format!("{}/{route}", images.uri()))).await?).await?,
                 (reqwest::StatusCode::BAD_REQUEST, json!(message)), "{route}");
         }
+        // Each image is under 20 MiB, but one request may fetch at most 50 MiB
+        // of remote images in total.
+        let large = json!({"type":"input_image","image_url":format!("{}/large.png", images.uri())});
+        let four = json!([{"role":"user","content":[large, large, large, large]}]);
+        assert_eq!(refused(send(four).await?).await?, (reqwest::StatusCode::BAD_REQUEST,
+            json!("input_image: a request may fetch at most 50 MiB of remote images")));
         let turns = request(&client, reqwest::Method::GET, &format!("{url}/turns"), Value::Null).await?;
         assert_eq!(turns["data"].as_array().map(Vec::len), Some(1));
 

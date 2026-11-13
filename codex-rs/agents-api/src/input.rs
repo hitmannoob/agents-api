@@ -205,9 +205,11 @@ fn plan(events: Vec<Input>) -> Result<Vec<Event>, ApiError> {
 /// Fetch the message's remote images, then check the session can take the
 /// events. A replayed request skips both.
 async fn prepare(state: &State, id: &str, events: &mut [Event]) -> Result<(), ApiError> {
+    // One budget for the whole request.
+    let mut budget = crate::images::Budget::per_request();
     for event in events.iter_mut() {
         if let Event::Message(items) = event {
-            crate::images::inline(state, items).await?;
+            crate::images::inline(state, items, &mut budget).await?;
         }
     }
     check(state, id, events).await

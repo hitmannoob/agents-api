@@ -77,6 +77,18 @@ pub(crate) fn package(parts: &[Part], output: &Path) -> Result<Bundle, ApiError>
                 if entry.encrypted() {
                     return Err(invalid("skill archives must not be encrypted"));
                 }
+                // Stored and deflated entries decode in bounded memory. Other
+                // decoders (LZMA, bzip2, zstd) can buffer large dictionaries
+                // inside one read, before the size limits see any bytes.
+                if !matches!(
+                    entry.compression(),
+                    zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated
+                ) {
+                    return Err(invalid(format!(
+                        "skill archives must use stored or deflated entries: {}",
+                        entry.name()
+                    )));
+                }
                 if entry.is_symlink() {
                     return Err(invalid(format!(
                         "skill archives must not contain links: {}",

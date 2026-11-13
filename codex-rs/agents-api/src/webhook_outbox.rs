@@ -24,6 +24,9 @@ const MAX_BACKOFF_SECS: i64 = 60 * 60;
 const IDLE_POLL: Duration = Duration::from_secs(/*secs*/ 5);
 /// Deliveries claimed per round, and endpoints served at once.
 const BATCH: i64 = 64;
+/// Deliveries one endpoint gets per round, so a receiver that answers slowly
+/// delays other endpoints by at most this many attempt timeouts.
+const PER_ENDPOINT: i64 = 4;
 const CONCURRENT_ENDPOINTS: usize = 8;
 /// How long finished deliveries are kept.
 const RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
@@ -138,8 +141,11 @@ struct Due {
 /// concurrently, then return how long to wait for the next one.
 async fn round(state: &State) -> anyhow::Result<Duration> {
     let pool = &state.store.0;
-    let rows: Vec<(String, String, String, i64, i64)> = sqlx::query_as("SELECT id, endpoint_id, body, attempts, created_at FROM webhook_deliveries WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY seq LIMIT ?")
+    // A few of each endpoint's oldest due deliveries, so one receiver's
+    // backlog or slow answers cannot fill a round or hold it for long.
+    let rows: Vec<(String, String, String, i64, i64)> = sqlx::query_as("SELECT id, endpoint_id, body, attempts, created_at FROM (SELECT id, endpoint_id, body, attempts, created_at, seq, row_number() OVER (PARTITION BY endpoint_id ORDER BY seq) AS position FROM webhook_deliveries WHERE status = 'pending' AND next_attempt_at <= ?) WHERE position <= ? ORDER BY seq LIMIT ?")
         .bind(now() as i64)
+        .bind(PER_ENDPOINT)
         .bind(BATCH)
         .fetch_all(pool)
         .await?;
