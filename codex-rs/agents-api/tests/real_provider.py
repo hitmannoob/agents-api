@@ -26,12 +26,14 @@ Requires the pinned SDK (openai==3.17.0). Exits non-zero only on FAIL.
 
 import argparse
 import base64
+import ipaddress
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 import openai
 
@@ -422,15 +424,29 @@ def self_hosted(run, workspace):
         environment={"type": "self_hosted", "workspace_directory": workspace}
     )
     environment = session.environment
+    command = [
+        executor,
+        "exec-server",
+        "--remote",
+        environment.remote_url,
+        "--environment-id",
+        environment.id,
+    ]
+    host = urlsplit(environment.remote_url).hostname
+    try:
+        address = ipaddress.ip_address(host)
+        is_loopback = (
+            address.is_loopback
+            if address.version == 4
+            else address == ipaddress.IPv6Address("::1")
+        )
+    except ValueError:
+        is_loopback = host == "localhost"
+    if not is_loopback:
+        # The suite already trusts this service with the environment key.
+        command.extend(["--trusted-registry-host", host])
     process = subprocess.Popen(
-        [
-            executor,
-            "exec-server",
-            "--remote",
-            environment.remote_url,
-            "--environment-id",
-            environment.id,
-        ],
+        command,
         env={**os.environ, "CODEX_API_KEY": key},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
