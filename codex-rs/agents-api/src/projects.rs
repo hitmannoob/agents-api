@@ -264,10 +264,15 @@ pub(crate) fn required(method: &axum::http::Method, path: &str) -> &'static [&'s
             &["api.webhooks.write"]
         }
     } else if under("/v1/agents") || under("/v1/sessions") || under("/v1/prototype/agents") {
+        // The prototype aliases of input, tool results, and cancel need the
+        // same authority as their official `/events` counterparts.
         let runs_turns = path == "/v1/agents/sessions"
             || path == "/v1/sessions"
             || (path.starts_with("/v1/agents/sessions/") && path.ends_with("/events"))
-            || (path.starts_with("/v1/sessions/") && path.ends_with("/input"));
+            || (path.starts_with("/v1/sessions/")
+                && (path.ends_with("/input")
+                    || path.ends_with("/tool-results")
+                    || path.ends_with("/cancel")));
         if read {
             &["api.agents.read"]
         } else if runs_turns {

@@ -96,6 +96,14 @@ async fn malformed_and_oversized_uploads_are_refused() {
         messages(receive_in_chunks(none, 5, 1024).await.0),
         Some("file is required".to_owned())
     );
+    // An otherwise valid upload is refused once text before the first
+    // boundary outgrows the header limit, instead of being buffered.
+    let mut padded = vec![b'x'; 2 * MAX_FIELD_BYTES];
+    padded.extend(body(&[("file", Some("a.txt"), b"abc")]));
+    assert_eq!(
+        messages(receive_in_chunks(padded, 4096, 1024).await.0),
+        Some("malformed multipart body".to_owned())
+    );
 }
 
 #[tokio::test]

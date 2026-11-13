@@ -898,7 +898,8 @@ async fn project_environment_keys_connect_only_their_projects_environments() -> 
             let project = project.to_owned();
             async move { anyhow::Ok(admin.create_key(&project, "", &permissions).await?.value) }
         };
-        let connect = key(codex_agents_api::projects::DEFAULT_PROJECT, &["api.environments.connect"]).await?;
+        let created = admin.create_key(codex_agents_api::projects::DEFAULT_PROJECT, "", &["api.environments.connect".to_owned()]).await?;
+        let (connect, connect_id) = (created.value, created.key.id);
         let agents_only = key(codex_agents_api::projects::DEFAULT_PROJECT, &["api.agents.read", "api.agents.write"]).await?;
         let other_connect = key(&other.id, &["api.environments.connect"]).await?;
         let client = reqwest::Client::new();
@@ -927,13 +928,26 @@ async fn project_environment_keys_connect_only_their_projects_environments() -> 
         assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
 
         // An executor with the project key connects for real.
+        api.set_executor_reauthorize_interval(Duration::from_millis(/*millis*/ 500));
         let _running = executor_with(&format!("{origin}/registry"), &environment_id, Arc::new(ProjectKey(connect)))?;
-        loop {
-            let info = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?;
-            if info["status"] == "connected" {
-                break;
-            }
+        let status = || {
+            let client = client.clone();
+            let url = format!("{base}/agents/environments/{environment_id}");
+            async move { anyhow::Ok(request(&client, reqwest::Method::GET, &url, Value::Null).await?["status"].clone()) }
+        };
+        while status().await? != "connected" {
             tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        }
+
+        // Revoking the key closes the open socket, and the executor's earlier
+        // registration token cannot reopen it.
+        admin.revoke_key(&connect_id).await?;
+        while status().await? == "connected" {
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        }
+        for _ in 0..30 {
+            assert_ne!(status().await?, "connected", "a revoked key reconnected");
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 100)).await;
         }
         Ok::<_, anyhow::Error>(())
     })

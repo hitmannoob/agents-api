@@ -78,9 +78,16 @@ pub(crate) async fn resolve(
         }
         let chosen = match credential_id {
             Some(credential_id) => {
-                if !available.iter().any(|(id, _)| id == credential_id) {
+                let Some((_, server)) = available.iter().find(|(id, _)| id == credential_id) else {
                     return Err(invalid(format!(
                         "credential {credential_id} for MCP server {label} is not in the session's vaults"
+                    )));
+                };
+                // A credential's token goes only to the server it was stored
+                // for; naming it chooses among matches, never redirects it.
+                if server != url {
+                    return Err(invalid(format!(
+                        "credential {credential_id} is for a different MCP server than {label}"
                     )));
                 }
                 Some(credential_id.to_owned())

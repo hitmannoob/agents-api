@@ -65,6 +65,10 @@ pub(crate) struct Registration {
     /// Authenticates the executor's rendezvous websocket, which carries no
     /// authorization header.
     pub(crate) executor_token: String,
+    /// The environment key or project API key that registered, held only in
+    /// memory, so the rendezvous can re-authorize it and a revoked key stops
+    /// working for registrations it made.
+    pub(crate) credential: String,
 }
 
 struct Authorization {
@@ -129,6 +133,8 @@ pub(crate) struct Registry {
     harness_token: String,
     slots: Mutex<HashMap<String, Slot>>,
     next_connection: std::sync::atomic::AtomicU64,
+    /// How often an open executor socket re-checks the key that registered it.
+    pub(crate) reauthorize_interval: Mutex<std::time::Duration>,
 }
 
 impl Default for Registry {
@@ -139,6 +145,7 @@ impl Default for Registry {
             harness_token: format!("harness_{}", Uuid::new_v4().simple()),
             slots: Mutex::new(HashMap::new()),
             next_connection: std::sync::atomic::AtomicU64::new(1),
+            reauthorize_interval: Mutex::new(std::time::Duration::from_secs(/*secs*/ 30)),
         }
     }
 }
@@ -253,6 +260,17 @@ async fn executor_allowed(
     headers: &HeaderMap,
     environment_id: &str,
 ) -> Result<(), Response> {
+    authorize_executor(state, bearer(headers).unwrap_or_default(), environment_id).await
+}
+
+/// Whether `presented` (the environment key or a project API key) may act as
+/// this environment's executor right now: the key is current, holds
+/// `api.environments.connect`, and belongs to the environment's project.
+pub(crate) async fn authorize_executor(
+    state: &State,
+    presented: &str,
+    environment_id: &str,
+) -> Result<(), Response> {
     let Some(key) = state.registry.environment_key.get() else {
         return Err(error(
             StatusCode::NOT_IMPLEMENTED,
@@ -274,7 +292,6 @@ async fn executor_allowed(
             "no session uses this environment",
         )
     };
-    let presented = bearer(headers).unwrap_or_default();
     let owner = crate::projects::environment_project(state, environment_id)
         .await
         .map_err(internal)?;
@@ -304,7 +321,7 @@ async fn executor_allowed(
     }
 }
 
-fn constant_time_eq(left: &str, right: &str) -> bool {
+pub(crate) fn constant_time_eq(left: &str, right: &str) -> bool {
     left.len() == right.len()
         && left
             .bytes()
@@ -411,6 +428,7 @@ async fn register(
             id: registration_id.clone(),
             executor_public_key: request.executor_public_key,
             executor_token,
+            credential: bearer(&headers).unwrap_or_default().to_owned(),
         });
         slot.executor = None;
         slot.authorizations.clear();

@@ -415,6 +415,13 @@ impl AgentsApi {
         *lock(&self.state.waits.limit) = wait;
     }
 
+    /// How often a connected executor's key is re-checked, which bounds how
+    /// long a revoked key keeps an open executor socket. Thirty seconds is the
+    /// default.
+    pub fn set_executor_reauthorize_interval(&self, interval: std::time::Duration) {
+        *lock(&self.state.registry.reauthorize_interval) = interval;
+    }
+
     /// Allow public MCP servers on these hosts even when they resolve to
     /// loopback, private, or link-local addresses, or use plain http.
     pub fn allow_mcp_hosts(&self, hosts: impl IntoIterator<Item = String>) {

@@ -46,24 +46,46 @@ pub(crate) async fn executor(
     Query(query): Query<ExecutorQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    let current = state.registry.with_slot(&environment_id, |slot| {
-        slot.registration.as_ref().is_some_and(|registration| {
-            registration.id == query.registration && registration.executor_token == query.token
+    let credential = state
+        .registry
+        .with_slot(&environment_id, |slot| {
+            slot.registration
+                .as_ref()
+                .filter(|registration| {
+                    registration.id == query.registration
+                        && crate::registry::constant_time_eq(
+                            &registration.executor_token,
+                            &query.token,
+                        )
+                })
+                .map(|registration| registration.credential.clone())
         })
-    }) == Some(true);
-    if !current {
+        .flatten();
+    let Some(credential) = credential else {
         return error(
             StatusCode::UNAUTHORIZED,
             "registration_rejected",
             "register again",
         );
+    };
+    // The key that registered must still be valid: a revoked key cannot
+    // reopen the socket with a token it obtained earlier.
+    if let Err(response) =
+        crate::registry::authorize_executor(&state, &credential, &environment_id).await
+    {
+        return response;
     }
     upgrade
         .max_message_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| run_executor(state, environment_id, socket))
+        .on_upgrade(move |socket| run_executor(state, environment_id, credential, socket))
 }
 
-async fn run_executor(state: Arc<State>, environment_id: String, socket: WebSocket) {
+async fn run_executor(
+    state: Arc<State>,
+    environment_id: String,
+    credential: String,
+    socket: WebSocket,
+) {
     let (sender, mut outbound) = mpsc::channel::<Vec<u8>>(SOCKET_BUFFER);
     let generation = state.registry.next_connection();
     // A newer connection replaces an older one; dropping the old sender
@@ -80,8 +102,21 @@ async fn run_executor(state: Arc<State>, environment_id: String, socket: WebSock
     }
     tracing::info!(environment_id, "executor connected");
     let (mut sink, mut stream) = socket.split();
+    // Keys are revoked from the CLI, outside this process, so an open socket
+    // re-checks its key periodically and closes once it is no longer valid.
+    let period = *crate::lock(&state.registry.reauthorize_interval);
+    let mut reauthorize = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     loop {
         tokio::select! {
+            _ = reauthorize.tick() => {
+                if crate::registry::authorize_executor(&state, &credential, &environment_id)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(environment_id, "executor key no longer authorized");
+                    break;
+                }
+            }
             frame = outbound.recv() => match frame {
                 Some(frame) => if sink.send(Message::Binary(frame.into())).await.is_err() { break },
                 None => break,

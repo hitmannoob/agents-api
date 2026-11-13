@@ -213,6 +213,13 @@ async fn vault_credentials_authenticate_mcp_as_session_snapshots() -> anyhow::Re
         let mut foreign = create("call-mcp foreign");
         foreign["agent"]["tools"][0]["credential_id"] = json!("cred_missing");
         assert_eq!(client.post(&sessions).bearer_auth(TOKEN).json(&foreign).send().await?.status(), reqwest::StatusCode::BAD_REQUEST);
+        // Naming a credential cannot send its token to a different server.
+        let mut redirected = create("call-mcp redirected");
+        redirected["agent"]["tools"][0]["transport"]["server_url"] = json!(format!("{mcp_url}/elsewhere"));
+        redirected["agent"]["tools"][0]["credential_id"] = a["id"].clone();
+        let response = client.post(&sessions).bearer_auth(TOKEN).json(&redirected).send().await?;
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(response.text().await?.contains("is for a different MCP server"));
         let mut explicit = create("call-mcp explicit");
         explicit["agent"]["tools"][0]["credential_id"] = a["id"].clone();
         request(&client, reqwest::Method::POST, &sessions, explicit).await?;

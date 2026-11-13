@@ -162,10 +162,15 @@ async fn parse(
     loop {
         // Consume what the buffer holds; `None` asks for more input.
         let progressed = match &mut phase {
-            Phase::Preamble => find(&buffer, &separator).map(|at| {
-                buffer.drain(..at + separator.len());
-                phase = Phase::Delimited;
-            }),
+            // Bounded like a part's headers, so text before the first
+            // boundary cannot grow the buffer without limit.
+            Phase::Preamble => match find(&buffer, &separator) {
+                None if buffer.len() > MAX_FIELD_BYTES => return Err(malformed()),
+                found => found.map(|at| {
+                    buffer.drain(..at + separator.len());
+                    phase = Phase::Delimited;
+                }),
+            },
             Phase::Delimited if buffer.len() < 2 => None,
             Phase::Delimited => {
                 match &buffer[..2] {

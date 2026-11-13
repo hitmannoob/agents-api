@@ -584,7 +584,9 @@ secrets directory.
 - **Matching:** a session lists up to 32 `vault_ids`. Each HTTP MCP server
   takes the credential its `credential_id` names, which must be in those
   vaults, or else the only credential whose `mcp_server_url` equals its URL.
-  Several matches are rejected; set `credential_id` to choose.
+  Several matches are rejected; set `credential_id` to choose. A named
+  credential must also have the server's URL as its `mcp_server_url` (400
+  otherwise), so a token only ever reaches the server it was stored for.
 - **Rotation and deletion:** a session copies its secrets when it is created.
   Rotating or deleting a credential, or deleting its vault, changes only
   sessions created afterwards, as the guide documents.

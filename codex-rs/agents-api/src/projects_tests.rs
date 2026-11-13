@@ -4,7 +4,7 @@ use pretty_assertions::assert_eq;
 
 #[test]
 fn operations_require_their_resource_permission() {
-    let cases: [(Method, &str, &[&str]); 14] = [
+    let cases: [(Method, &str, &[&str]); 16] = [
         (Method::GET, "/v1/agents", &["api.agents.read"]),
         (Method::POST, "/v1/agents/agent-1", &["api.agents.write"]),
         (
@@ -35,6 +35,16 @@ fn operations_require_their_resource_permission() {
         (
             Method::POST,
             "/v1/sessions/s/input",
+            &["api.agents.write", "api.responses.write"],
+        ),
+        (
+            Method::POST,
+            "/v1/sessions/s/turns/t/tool-results",
+            &["api.agents.write", "api.responses.write"],
+        ),
+        (
+            Method::POST,
+            "/v1/sessions/s/turns/t/cancel",
             &["api.agents.write", "api.responses.write"],
         ),
         (
