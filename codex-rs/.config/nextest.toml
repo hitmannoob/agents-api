@@ -20,6 +20,12 @@ slow-timeout = { period = "1m", terminate-after = 3 }
 filter = 'package(codex-cli) & binary(app_server_daemon) & test(packaged_daemon_)'
 slow-timeout = { period = "1m", terminate-after = 2 }
 
+[[profile.default.overrides]]
+# Every vault write re-encrypts the secrets file with a deliberately slow key
+# derivation, and this case writes many times across two restarts.
+filter = 'package(codex-agents-api) & test(=vaults::vault_credentials_authenticate_mcp_as_session_snapshots)'
+slow-timeout = { period = "1m", terminate-after = 2 }
+
 [profile.default.junit]
 path = "junit.xml"
 
