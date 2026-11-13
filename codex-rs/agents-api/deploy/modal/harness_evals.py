@@ -164,7 +164,8 @@ class LocalBox:
         handle.wait()
 
 
-def run_task(client, box, model, name):
+def prepare(box, name):
+    """Create a task's workspace and return (workspace, prompt, checker)."""
     files, prompt, checker = TASKS[name]
     workspace = os.path.join(box.root, name)
     setup = [f"rm -rf {workspace} && mkdir -p {workspace} && cd {workspace}"]
@@ -186,6 +187,77 @@ def run_task(client, box, model, name):
             f"python3 -c \"import hashlib; print(hashlib.sha256(open('{workspace}/test_calc.py','rb').read()).hexdigest())\""
         )
         checker = checker.format(test_digest=digest.strip())
+    return workspace, prompt, checker
+
+
+def run_cli_task(box, codex, home, model, name):
+    """The same task through the stock Codex CLI, without the Agents API: no
+    approvals or sandbox, as the service's self-hosted sessions run."""
+    workspace, prompt, checker = prepare(box, name)
+    started = time.monotonic()
+    try:
+        process = subprocess.run(
+            [
+                codex,
+                "exec",
+                "-m",
+                model,
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--json",
+                "-C",
+                workspace,
+                "-c",
+                "web_search=disabled",
+                "-c",
+                "features.apps=false",
+                prompt,
+            ],
+            env={**os.environ, "CODEX_HOME": home},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=TURN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(f"codex exec did not finish in {TURN_TIMEOUT}s")
+    elapsed = time.monotonic() - started
+    events = []
+    for line in process.stdout.splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    commands = [
+        event["item"]
+        for event in events
+        if event.get("type") == "item.completed"
+        and event.get("item", {}).get("type") == "command_execution"
+    ]
+    usage = next(
+        (event["usage"] for event in events if event.get("type") == "turn.completed"),
+        {},
+    )
+    finished = any(event.get("type") == "turn.completed" for event in events)
+    check, out, err = box.sh(f"cd {workspace} && {checker}")
+    return {
+        "task": name,
+        "result": "PASS" if check == 0 else "FAIL",
+        "turns": ["completed" if finished else "failed"],
+        "commands": len(commands),
+        "failed_commands": sum(
+            item.get("status") == "failed" or (item.get("exit_code") not in (0, None))
+            for item in commands
+        ),
+        "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        "seconds": round(elapsed, 1),
+        "detail": "" if check == 0 else (err or out or process.stderr).strip()[-200:],
+    }
+
+
+def run_task(client, box, model, name):
+    workspace, prompt, checker = prepare(box, name)
     sessions = client.beta.agents.sessions
     session = sessions.create(
         agent={"model": model},
@@ -251,7 +323,9 @@ def run_task(client, box, model, name):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("state")
+    parser.add_argument(
+        "state", nargs="?", help="endpoint state directory (not used with --codex-cli)"
+    )
     parser.add_argument("--only")
     parser.add_argument("--model", default="openai/gpt-5-mini")
     parser.add_argument("--budget", type=int, default=400_000)
@@ -278,9 +352,26 @@ def main():
     parser.add_argument(
         "--workspaces", help="local workspace root (default: a temporary directory)"
     )
+    parser.add_argument(
+        "--codex-cli",
+        action="store_true",
+        help="run the tasks with `codex exec` directly, without the Agents API",
+    )
+    parser.add_argument(
+        "--codex-home",
+        help="CODEX_HOME holding the CLI's config.toml (for --codex-cli)",
+    )
     args = parser.parse_args()
     read = lambda name: open(f"{args.state}/{name}", encoding="utf-8").read().strip()
-    if args.local:
+    if args.codex_cli:
+        root = os.path.realpath(
+            args.workspaces or tempfile.mkdtemp(prefix="agents-api-evals-")
+        )
+        os.makedirs(root, exist_ok=True)
+        box = LocalBox(root, os.path.realpath(args.executor), None, None)
+        home = os.path.realpath(args.codex_home)
+        attempt = lambda name: run_cli_task(box, box.executor, home, args.model, name)
+    elif args.local:
         url = args.url.rstrip("/")
         root = os.path.realpath(
             args.workspaces or tempfile.mkdtemp(prefix="agents-api-evals-")
@@ -295,13 +386,15 @@ def main():
     else:
         url = read("url")
         box = ModalBox(modal.Sandbox.from_id(read("sandbox-id")))
-    client = openai.OpenAI(
-        base_url=f"{url}/v1",
-        api_key=read("token"),
-        max_retries=0,
-        timeout=60,
-        _strict_response_validation=True,
-    )
+    if not args.codex_cli:
+        client = openai.OpenAI(
+            base_url=f"{url}/v1",
+            api_key=read("token"),
+            max_retries=0,
+            timeout=60,
+            _strict_response_validation=True,
+        )
+        attempt = lambda name: run_task(client, box, args.model, name)
     names = args.only.split(",") if args.only else list(TASKS)
     results, spent = [], 0
     for name in names:
@@ -309,7 +402,7 @@ def main():
             results.append({"task": name, "result": "SKIP", "detail": "budget spent"})
             continue
         try:
-            result = run_task(client, box, args.model, name)
+            result = attempt(name)
         except Exception as error:  # A harness or service problem, not a model miss.
             result = {"task": name, "result": "ERROR", "detail": str(error)[-300:]}
         spent += result.get("tokens", 0)
