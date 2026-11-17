@@ -157,7 +157,7 @@ if [ -s /data/provider.py ]; then
 fi
 /opt/agents-api/bin/codex-agents-api --listen 127.0.0.1:4501 --data-directory /data \
   --codex-home /data/codex-home --app-server-bin /opt/agents-api/bin/codex-app-server \
-  --public-url "$(cat /data/public-url)" "${{managed[@]}}" \
+  --public-url "$(cat /data/public-url)" "${{managed[@]}}" $(cat /data/service-args 2>/dev/null) \
   2>&1 | tee /data/logs/agents-api.log
 """
 
@@ -218,6 +218,7 @@ def start(
     model=None,
     managed=False,
     image_id=None,
+    service_args=(),
 ):
     secret, default_model = PROVIDERS[provider]
     config = CONFIG.format(
@@ -263,6 +264,9 @@ def start(
         timeout=int(hours * 3600),
     )
     url = sandbox.tunnels()[8080].url.rstrip("/")
+    if service_args:
+        sandbox.exec("mkdir", "-p", "/data").wait()
+        sandbox.filesystem.write_text(" ".join(service_args), "/data/service-args")
     if managed:
         # Written before the public URL, which is what the script waits for.
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "provider.py"), encoding="utf-8") as handle:
@@ -338,6 +342,14 @@ def main():
         help="start from this built image instead of building HEAD (the ID `build` prints)",
     )
     parser.add_argument(
+        "--idle-suspend-secs", type=int,
+        help="seconds an idle managed environment keeps its sandbox (service default 600)",
+    )
+    parser.add_argument(
+        "--snapshot-ttl-secs", type=int,
+        help="seconds managed environment snapshots are kept (service default 7 days)",
+    )
+    parser.add_argument(
         "--managed-environments",
         action="store_true",
         help=f"provision openai_hosted environments as Modal Sandboxes (needs the {MODAL_TOKEN_SECRET} secret)",
@@ -359,6 +371,10 @@ def main():
             args.model,
             args.managed_environments,
             args.image_id,
+            [
+                *([f"--environment-idle-suspend-secs={args.idle_suspend_secs}"] if args.idle_suspend_secs else []),
+                *([f"--environment-snapshot-ttl-secs={args.snapshot_ttl_secs}"] if args.snapshot_ttl_secs else []),
+            ],
         )
     elif args.command == "logs":
         process = sandbox_for(args.state).exec(

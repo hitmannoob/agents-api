@@ -4,7 +4,9 @@
 //! A loop checks each provisioned managed environment every
 //! [`Lifecycle::tick`](crate::managed::Lifecycle):
 //! - A connected environment is snapshotted once it connects, after a busy
-//!   spell ends, and every `snapshot_interval` while it stays busy.
+//!   spell ends, and every `snapshot_interval` while it stays busy. Turns
+//!   starting and ending record activity, so a spell shorter than a tick
+//!   still gets its snapshot.
 //! - One whose executor stayed disconnected for `death_grace` is checked with
 //!   the provider; if its sandbox is gone (or never reconnects), a new sandbox
 //!   is provisioned from the latest snapshot under the same environment ID and

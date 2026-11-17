@@ -301,6 +301,14 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
                 events.extend(close_items(&mut tx, &id, turn_id).await?);
                 state.streams.end_turn(&id, turn_id);
             }
+            // A managed environment's lifecycle snapshots it after each spell
+            // of work, which turns starting and ending mark.
+            sqlx::query("UPDATE environments SET activity_ms = ? WHERE session_id = ? AND provider IS NOT NULL")
+                .bind(now_ms())
+                .bind(&id)
+                .execute(&mut *tx)
+                .await
+                .map_err(anyhow::Error::from)?;
             save(&mut *tx, &id, "turn", &turn, turn_id, subagent).await?;
             observed(&mut tx, &id, "turn", turn_id, status != "in_progress").await?;
             if status != "in_progress" {
