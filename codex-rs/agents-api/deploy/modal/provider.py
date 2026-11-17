@@ -93,7 +93,17 @@ class Provider:
                 "AGENTS_API_ENVIRONMENT_ID": request["environment_id"],
             }
         )
+        network = request.get("network") or {"access": "enabled"}
+        # A Sandbox created with open networking cannot be restricted later,
+        # so one that will be starts with an explicit allow-all policy.
+        restricted = network["access"] != "enabled"
+        policy = (
+            {"outbound_cidr_allowlist": ["0.0.0.0/0"], "outbound_domain_allowlist": ["*"]}
+            if restricted
+            else {}
+        )
         sandbox = modal.Sandbox.create(
+            **policy,
             app=self.app,
             image=packaged(self.base, request.get("packages") or {}),
             secrets=[secret],
@@ -117,12 +127,13 @@ class Provider:
                     # Setup output can echo confidential values, so only the
                     # exit status is reported.
                     raise RuntimeError(f"a setup command exited with status {code}")
-            network = request.get("network") or {"access": "enabled"}
-            if network["access"] != "enabled":
+            if restricted:
                 # Applied before the executor starts, so its connection to the
-                # registry is never cut.
+                # registry is never cut. No CIDR is allowed on its own.
                 allowed = [host, *(network.get("allowed_domains") or [])]
-                sandbox._experimental_set_outbound_network_policy(outbound_domain_allowlist=allowed)
+                sandbox._experimental_set_outbound_network_policy(
+                    outbound_cidr_allowlist=[], outbound_domain_allowlist=allowed
+                )
             sandbox.exec(
                 "bash",
                 "-c",

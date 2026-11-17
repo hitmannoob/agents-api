@@ -2648,6 +2648,13 @@ domain allowlist once setup finishes, with the registry host always allowed;
 security follow-up: commands in the sandbox can read the connect token from
 the environment (it grants only this environment's registry access); hand it
 to the executor without leaving it in the environment.
+Real Modal run (2026-11-17): a `restricted` environment allowing only
+`example.com`, with two inline files and a setup command, was ready at 6.9 s
+and connected at 8.5 s; `curl https://example.com` succeeded and
+`curl https://www.google.com` failed (curl exit 35); the agent read the files,
+fixed the bug, and passed the tests. Modal refuses to restrict a Sandbox
+created with open networking, so a restricted one starts with an explicit
+allow-all policy (`*`, `0.0.0.0/0`) that setup runs under.
 
 ## G16 — Scale and operate as a managed service (planned 2026-11-17)
 
