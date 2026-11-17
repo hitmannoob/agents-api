@@ -684,6 +684,40 @@ pub(crate) fn new_token() -> String {
     )
 }
 
+/// Bind a managed environment's connect token to the executor registering
+/// with it. Returns false when the token is already bound to another
+/// executor's key; registrations with any other credential are not bound.
+/// Agent commands can read the token (they run as the executor's user), but
+/// only after the executor registered, by when it opens nothing for them.
+pub(crate) async fn bind_executor(
+    state: &State,
+    environment_id: &str,
+    presented: &str,
+    executor_key: &impl Serialize,
+) -> anyhow::Result<bool> {
+    let presented = digest(presented);
+    let managed_token: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT executor_key FROM environments WHERE id = ? AND provider IS NOT NULL AND token_sha256 = ?",
+    )
+    .bind(environment_id)
+    .bind(&presented)
+    .fetch_optional(&state.store.0)
+    .await?;
+    if managed_token.is_none() {
+        return Ok(true);
+    }
+    let key = serde_json::to_string(executor_key)?;
+    let bound = sqlx::query(
+        "UPDATE environments SET executor_key = ?1 WHERE id = ?2 AND token_sha256 = ?3 AND (executor_key IS NULL OR executor_key = ?1)",
+    )
+    .bind(&key)
+    .bind(environment_id)
+    .bind(&presented)
+    .execute(&state.store.0)
+    .await?;
+    Ok(bound.rows_affected() == 1)
+}
+
 pub(crate) fn digest(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }

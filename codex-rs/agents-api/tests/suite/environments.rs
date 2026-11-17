@@ -1425,6 +1425,14 @@ async fn managed_environments_are_provisioned_connected_and_destroyed() -> anyho
         };
         assert_eq!(register(&environment_id, &token).await?, 400);
         assert_eq!(register(&failed_environment, &token).await?, 401);
+        // The token is bound to the executor that registered with it: code in
+        // the sandbox that reads it cannot register another executor.
+        let hijack = client.post(format!("{origin}/registry/cloud/environment/{environment_id}/register")).bearer_auth(&token)
+            .json(&json!({"security_profile":"noise_hybrid_ik_v1","executor_public_key":{"suite":"noise_hybrid_ik_v1","x25519_public_key":"aW50cnVkZXI=","mlkem768_public_key":"aW50cnVkZXI="}}))
+            .send().await?;
+        assert_eq!((hijack.status().as_u16(), hijack.json::<Value>().await?["error"]["code"].clone()), (403, json!("environment_token_bound")));
+        assert_eq!(request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?["status"],
+            json!("connected"));
         // A connect token grants nothing else.
         assert_eq!(client.get(format!("{base}/agents")).bearer_auth(&token).send().await?.status(), reqwest::StatusCode::UNAUTHORIZED);
 

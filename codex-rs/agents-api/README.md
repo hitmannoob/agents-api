@@ -612,7 +612,12 @@ program that answers the JSON-lines protocol it documents.
   fails the input waiting for it, and later input returns 409.
 - **Credentials:** each environment's executor presents a connect token
   generated for that environment and accepted for no other, and for nothing
-  but the registry. Only its SHA-256 is kept.
+  but the registry. Only its SHA-256 is kept. The first executor to register
+  with it binds it to that executor's public key: agent commands run as the
+  executor's user and can read the token, but by then it cannot register any
+  other executor (403 `environment_token_bound`). The Modal provider hands
+  the token only to the executor's process, not to setup or the rest of the
+  Sandbox. A reset or resume issues a new token.
 - **Lifecycle:** a connected environment is snapshotted (the provider's
   filesystem snapshot) when it connects, after each busy spell, and every
   5 minutes while busy. An executor that stays disconnected for 30 seconds

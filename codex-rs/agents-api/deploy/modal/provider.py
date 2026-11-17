@@ -26,8 +26,9 @@ order in `/workspace` with full network access, then applies the network
 policy (Modal's outbound domain allowlist; the registry's host stays reachable
 so the executor can connect), and finally runs the stock `codex exec-server`,
 which dials the service's registry with the environment's own connect token.
-The token and the `env` values reach the Sandbox as a Modal secret, never on a
-command line.
+The `env` values reach the whole Sandbox as a Modal secret, for its commands;
+the token reaches only the executor's process, never setup or the command
+line. The service binds the token to the first executor that registers.
 
 Usage: provider.py --image-id IM_ID   (the image `serve.py build` prints)
        provider.py --build            (build the image from this checkout's HEAD)
@@ -52,7 +53,7 @@ CODEX = "/opt/agents-api/bin/codex"
 # CPU cores and memory (MiB) for each public container size.
 SIZES = {"small": (1, 2048), "medium": (2, 4096), "large": (4, 8192)}
 
-# Run after setup: the executor, with its token from the Modal secret.
+# Run after setup: the executor, with its token from its own Modal secret.
 EXECUTOR = """
 set -euo pipefail
 mkdir -p {workspace}
@@ -91,9 +92,11 @@ class Provider:
         # The stock CLI sends its key only to OpenAI or loopback hosts unless
         # the registry's host is trusted explicitly.
         trusted = "" if host.endswith(("openai.com", "openai.org")) else f"--trusted-registry-host {host}"
-        secret = modal.Secret.from_dict(
+        # The session's own variables are for its commands; the connect
+        # token reaches only the executor's process, never setup or PID 1.
+        secret = modal.Secret.from_dict(request.get("env") or {})
+        executor_secret = modal.Secret.from_dict(
             {
-                **(request.get("env") or {}),
                 "AGENTS_API_ENVIRONMENT_TOKEN": request["token"],
                 "AGENTS_API_REGISTRY_URL": registry,
                 "AGENTS_API_ENVIRONMENT_ID": request["environment_id"],
@@ -147,6 +150,7 @@ class Provider:
                 "bash",
                 "-c",
                 EXECUTOR.format(workspace=WORKSPACE, codex=CODEX, trusted=trusted),
+                secrets=[executor_secret],
             )
         except Exception:
             sandbox.terminate()

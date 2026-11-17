@@ -2644,10 +2644,10 @@ resolved in the caller's project before the session exists, and written by
 the provider before setup; responses list metadata only. `network.access`
 `disabled` and `restricted` (`allowed_domains`) apply through Modal's outbound
 domain allowlist once setup finishes, with the registry host always allowed;
-`blocked_domains` returns 400 because Modal enforces allowlists only. Open
-security follow-up: commands in the sandbox can read the connect token from
-the environment (it grants only this environment's registry access); hand it
-to the executor without leaving it in the environment.
+`blocked_domains` returns 400 because Modal enforces allowlists only. The
+connect token is bound to the first executor's public key at registration
+(2026-11-17), so code in the sandbox that reads it cannot register another
+executor; the Modal provider gives it only to the executor's process.
 Real Modal run (2026-11-17): a `restricted` environment allowing only
 `example.com`, with two inline files and a setup command, was ready at 6.9 s
 and connected at 8.5 s; `curl https://example.com` succeeded and

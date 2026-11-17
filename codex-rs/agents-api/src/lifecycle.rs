@@ -312,7 +312,7 @@ async fn restore(
     };
     let public: Value = serde_json::from_str(&data)?;
     let token = crate::managed::new_token();
-    sqlx::query("UPDATE environments SET token_sha256 = ? WHERE id = ?")
+    sqlx::query("UPDATE environments SET token_sha256 = ?, executor_key = NULL WHERE id = ?")
         .bind(crate::managed::digest(&token))
         .bind(environment_id)
         .execute(&state.store.0)

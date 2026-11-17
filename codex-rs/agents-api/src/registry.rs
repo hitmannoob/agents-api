@@ -422,6 +422,30 @@ async fn register(
             "only noise_hybrid_ik_v1 is supported",
         );
     }
+    match crate::managed::bind_executor(
+        &state,
+        &environment_id,
+        bearer(&headers).unwrap_or_default(),
+        &request.executor_public_key,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return error(
+                StatusCode::FORBIDDEN,
+                "environment_token_bound",
+                "this environment's connect token is bound to another executor",
+            );
+        }
+        Err(_) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "registry error",
+            );
+        }
+    }
     let registration_id = format!("reg_{}", Uuid::new_v4().simple());
     let executor_token = format!("exe_{}", Uuid::new_v4().simple());
     let url = websocket_url(
