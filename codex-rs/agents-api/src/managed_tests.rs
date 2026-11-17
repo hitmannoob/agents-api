@@ -2,14 +2,14 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 fn refused(environment: Value) -> String {
-    match parse(&environment) {
+    match parse(&environment, WORKSPACE) {
         Ok(_) => panic!("{environment} was accepted"),
         Err(error) => error.1,
     }
 }
 
 fn accepted(environment: Value) -> Hosted {
-    match parse(&environment) {
+    match parse(&environment, WORKSPACE) {
         Ok(hosted) => hosted,
         Err(error) => panic!("{environment} was refused: {}", error.1),
     }
@@ -30,7 +30,31 @@ fn hosted_configuration_defaults_and_keeps_supported_fields() {
     let hosted = accepted(json!({"type":"openai_hosted","container_size":"large",
         "packages":{"python":["requests==2.32.3","pkg[extra]>=1"],"npm":["@scope/tool@1.2.0"],"system":["ripgrep"]},
         "env":{"MODE":"test","_TOKEN":"value"},"setup_commands":[{"command":"make setup","cwd":"/workspace/app"},{"command":"true"}],
-        "network":{"access":"enabled","allowed_domains":[]},"files":[],"skills":null,"desktop":{"enabled":false}}));
+        "network":{"access":"restricted","allowed_domains":["pypi.org","files.pythonhosted.org"]},
+        "files":[{"type":"inline","path":"/workspace/app/a.txt","data":"aGk="},{"type":"file_id","path":"/workspace/b.csv","file_id":"file-1"}],
+        "skills":null,"desktop":{"enabled":false}}));
+    assert_eq!(
+        hosted
+            .files
+            .iter()
+            .map(|file| (
+                file.path.as_str(),
+                file.file_id.as_deref(),
+                file.contents.as_slice()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("/workspace/app/a.txt", None, b"hi".as_slice()),
+            ("/workspace/b.csv", Some("file-1"), b"".as_slice())
+        ]
+    );
+    assert_eq!(
+        (
+            hosted.network.access.as_str(),
+            hosted.network.allowed_domains.len()
+        ),
+        ("restricted", 2)
+    );
     assert_eq!(
         (
             hosted.container_size.as_str(),
@@ -55,24 +79,59 @@ fn unsupported_or_unsafe_hosted_configuration_is_refused() {
             "field environment_id is not supported",
         ),
         (
-            json!({"type":"openai_hosted","files":[{"type":"inline","path":"/workspace/a","data":"YQ=="}]}),
-            "field files is not supported",
-        ),
-        (
             json!({"type":"openai_hosted","desktop":{"enabled":true}}),
             "field desktop is not supported",
         ),
         (
-            json!({"type":"openai_hosted","network":{"access":"disabled"}}),
-            "field network is not supported",
-        ),
-        (
-            json!({"type":"openai_hosted","network":{"access":"enabled","blocked_domains":["a.com"]}}),
-            "field network is not supported",
-        ),
-        (
             json!({"type":"openai_hosted","container_size":"huge"}),
             "container_size must be",
+        ),
+        // Modal enforces allowlists only, so a denylist is refused.
+        (
+            json!({"type":"openai_hosted","network":{"access":"restricted","blocked_domains":["a.com"]}}),
+            "blocked_domains is not supported",
+        ),
+        (
+            json!({"type":"openai_hosted","network":{"access":"enabled","allowed_domains":["pypi.org"]}}),
+            "requires access restricted",
+        ),
+        (
+            json!({"type":"openai_hosted","network":{"access":"restricted","allowed_domains":["*.pypi.org"]}}),
+            "without wildcards",
+        ),
+        (
+            json!({"type":"openai_hosted","network":{"access":"restricted","allowed_domains":["https://pypi.org"]}}),
+            "without wildcards",
+        ),
+        (
+            json!({"type":"openai_hosted","network":{"access":"open"}}),
+            "network.access must be",
+        ),
+        // Files land inside the workspace, once each.
+        (
+            json!({"type":"openai_hosted","files":[{"type":"inline","path":"/etc/passwd","data":"YQ=="}]}),
+            "must be an absolute path inside /workspace",
+        ),
+        (
+            json!({"type":"openai_hosted","files":[{"type":"inline","path":"/workspace/../etc/x","data":"YQ=="}]}),
+            "must be an absolute path inside /workspace",
+        ),
+        (
+            json!({"type":"openai_hosted","files":[{"type":"inline","path":"/workspace","data":"YQ=="}]}),
+            "must be an absolute path inside /workspace",
+        ),
+        (
+            json!({"type":"openai_hosted","files":[{"type":"inline","path":"/workspace/a","data":"YQ=="},
+                {"type":"file_id","path":"/workspace/a","file_id":"file-x"}]}),
+            "listed twice",
+        ),
+        (
+            json!({"type":"openai_hosted","files":[{"type":"inline","path":"/workspace/a","data":"not base64!"}]}),
+            "standard base64",
+        ),
+        (
+            json!({"type":"openai_hosted","files":[{"type":"url","path":"/workspace/a"}]}),
+            "files must be a list",
         ),
         // A package is one installer argument: no options, quotes, or shell syntax.
         (
@@ -134,7 +193,12 @@ fn provision_request(environment_id: &str) -> ProvisionRequest {
         container_size: "medium".to_owned(),
         packages: Packages::default(),
         env: BTreeMap::new(),
+        files: Vec::new(),
         setup_commands: Vec::new(),
+        network: Network {
+            access: "enabled".to_owned(),
+            allowed_domains: Vec::new(),
+        },
     }
 }
 

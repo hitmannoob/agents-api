@@ -211,14 +211,14 @@ pub(crate) async fn retrieve(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     crate::projects::require(&state, &principal.project_id, &id, Resource::Environment).await?;
-    let row: Option<(String, bool, bool, bool, bool)> = sqlx::query_as(
-        "SELECT session_id, connected_once, failed, provider IS NOT NULL, provisioned FROM environments WHERE id = ?",
+    let row: Option<(String, bool, bool, bool, bool, String)> = sqlx::query_as(
+        "SELECT session_id, connected_once, failed, provider IS NOT NULL, provisioned, data FROM environments WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.store.0)
     .await
     .map_err(anyhow::Error::from)?;
-    let (session_id, connected_once, failed, managed, provisioned) =
+    let (session_id, connected_once, failed, managed, provisioned, data) =
         row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "environment not found".into()))?;
     // A connected executor wins; input that timed out waiting for one, or a
     // sandbox that could not be provisioned, leaves the environment failed
@@ -238,10 +238,17 @@ pub(crate) async fn retrieve(
     } else {
         "self_hosted"
     };
+    // A managed environment lists the files it was provisioned with; a
+    // self-hosted one has none of its own.
+    let files = if managed {
+        serde_json::from_str::<Value>(&data).map_err(anyhow::Error::from)?["files"].clone()
+    } else {
+        json!([])
+    };
     let skills = crate::session_skills::installed(&state, &session_id).await?;
     Ok(Json(
         json!({"id": id, "object": "agent.environment", "type": kind,
-            "status": status, "files": [], "plugins": [], "skills": skills}),
+            "status": status, "files": files, "plugins": [], "skills": skills}),
     ))
 }
 

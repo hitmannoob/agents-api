@@ -6,25 +6,31 @@ requests run concurrently, so responses may arrive out of order.
 
   {"id": 1, "op": "provision", "environment_id": "env_…", "registry_url": "https://…/registry",
    "token": "…", "container_size": "medium", "packages": {"system": [], "python": [], "npm": []},
-   "env": {"KEY": "value"}, "setup_commands": [{"command": "…", "cwd": "/workspace"}],
-   "lifetime_seconds": 86400}
+   "env": {"KEY": "value"}, "files": [{"path": "/workspace/…", "data": "<base64>"}],
+   "setup_commands": [{"command": "…", "cwd": "/workspace"}],
+   "network": {"access": "restricted", "allowed_domains": ["pypi.org"]}, "lifetime_seconds": 86400}
   → {"id": 1, "ok": true, "sandbox_id": "sb-…"}
 
   {"id": 2, "op": "destroy", "sandbox_id": "sb-…"}   → {"id": 2, "ok": true}
   {"id": 3, "op": "status", "sandbox_id": "sb-…"}    → {"id": 3, "ok": true, "running": true}
 
 A failure answers {"id": n, "ok": false, "error": "…"}. A provisioned Sandbox
-installs the requested packages, runs the setup commands in order in
-`/workspace`, and then runs the stock `codex exec-server`, which dials the
-service's registry with the environment's own connect token. The token and the
-`env` values reach the Sandbox as a Modal secret, never on a command line.
+installs the requested packages, writes the files, runs the setup commands in
+order in `/workspace` with full network access, then applies the network
+policy (Modal's outbound domain allowlist; the registry's host stays reachable
+so the executor can connect), and finally runs the stock `codex exec-server`,
+which dials the service's registry with the environment's own connect token.
+The token and the `env` values reach the Sandbox as a Modal secret, never on a
+command line.
 
 Usage: provider.py --image-id IM_ID   (the image `serve.py build` prints)
        provider.py --build            (build the image from this checkout's HEAD)
 """
 
 import argparse
+import base64
 import json
+import posixpath
 import sys
 import tempfile
 import threading
@@ -99,6 +105,9 @@ class Provider:
         )
         try:
             sandbox.exec("mkdir", "-p", WORKSPACE).wait()
+            for file in request.get("files") or []:
+                sandbox.exec("mkdir", "-p", posixpath.dirname(file["path"])).wait()
+                sandbox.filesystem.write_bytes(base64.b64decode(file["data"]), file["path"])
             for step in request.get("setup_commands") or []:
                 process = sandbox.exec(
                     "bash", "-lc", step["command"], workdir=step.get("cwd") or WORKSPACE
@@ -108,6 +117,12 @@ class Provider:
                     # Setup output can echo confidential values, so only the
                     # exit status is reported.
                     raise RuntimeError(f"a setup command exited with status {code}")
+            network = request.get("network") or {"access": "enabled"}
+            if network["access"] != "enabled":
+                # Applied before the executor starts, so its connection to the
+                # registry is never cut.
+                allowed = [host, *(network.get("allowed_domains") or [])]
+                sandbox._experimental_set_outbound_network_policy(outbound_domain_allowlist=allowed)
             sandbox.exec(
                 "bash",
                 "-c",

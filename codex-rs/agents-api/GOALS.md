@@ -2638,6 +2638,17 @@ fixed the bug with `apply_patch` and ran `python -m pytest -q` (2 passed) by
 token secret (`agents-api-modal`), since Sandboxes carry no Modal credentials;
 running the service as a Modal Function would avoid it.
 
+Progress (2026-11-17, slice 2): files and network policy. `files` takes up to
+64 inline or `file_id` files (50 MiB together) at paths inside the workspace,
+resolved in the caller's project before the session exists, and written by
+the provider before setup; responses list metadata only. `network.access`
+`disabled` and `restricted` (`allowed_domains`) apply through Modal's outbound
+domain allowlist once setup finishes, with the registry host always allowed;
+`blocked_domains` returns 400 because Modal enforces allowlists only. Open
+security follow-up: commands in the sandbox can read the connect token from
+the environment (it grants only this environment's registry access); hand it
+to the executor without leaving it in the environment.
+
 ## G16 — Scale and operate as a managed service (planned 2026-11-17)
 
 **Outcome:** the service runs across several nodes, survives the loss of any

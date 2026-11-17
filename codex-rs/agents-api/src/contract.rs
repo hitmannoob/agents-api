@@ -167,7 +167,8 @@ async fn create(
                     "openai_hosted environments need the environment registry; the operator must configure an environment key".into(),
                 ));
             }
-            hosted = Some(crate::managed::parse(&params.environment)?);
+            let parsed = crate::managed::parse(&params.environment, &provider.workspace())?;
+            hosted = Some(crate::managed::resolve(&state, &principal.project_id, parsed).await?);
             // The provisioned executor runs commands exactly as a self-hosted one.
             environment = Environment::SelfHosted {
                 id: format!("env_{}", Uuid::new_v4().simple()),

@@ -44,6 +44,11 @@ const MAX_ENV: usize = 128;
 const MAX_ENV_BYTES: usize = 64 * 1024;
 const MAX_SETUP_COMMANDS: usize = 32;
 const MAX_COMMAND_BYTES: usize = 16 * 1024;
+const MAX_FILES: usize = 64;
+/// Bytes of all of one environment's files together.
+const MAX_FILES_BYTES: usize = 50 * 1024 * 1024;
+const MAX_PATH_BYTES: usize = 4096;
+const MAX_DOMAINS: usize = 256;
 /// How long one provider call may take; a first image build is the slow case.
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 
@@ -67,6 +72,26 @@ pub struct SetupCommand {
     pub cwd: Option<String>,
 }
 
+/// A file written into the workspace before the setup commands run.
+#[derive(Clone, Serialize)]
+pub struct ProvisionFile {
+    /// An absolute path inside the workspace.
+    pub path: String,
+    /// The contents, in standard base64.
+    pub data: String,
+}
+
+/// Outbound network access once setup has finished; setup itself has full
+/// access, so it can fetch what it needs.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Network {
+    /// `enabled`, `disabled`, or `restricted`.
+    pub access: String,
+    /// The domains a restricted environment may reach. The registry's host is
+    /// always reachable, or the executor could not connect.
+    pub allowed_domains: Vec<String>,
+}
+
 /// What a provider needs to start one environment's executor. It holds the
 /// connect token and confidential values, so it is never logged.
 #[derive(Clone, Serialize)]
@@ -80,7 +105,9 @@ pub struct ProvisionRequest {
     pub container_size: String,
     pub packages: Packages,
     pub env: BTreeMap<String, String>,
+    pub files: Vec<ProvisionFile>,
     pub setup_commands: Vec<SetupCommand>,
+    pub network: Network,
 }
 
 /// Starts and removes the sandboxes managed environments run in.
@@ -267,7 +294,186 @@ pub(crate) struct Hosted {
     container_size: String,
     packages: Packages,
     env: BTreeMap<String, String>,
+    files: Vec<HostedFile>,
     setup_commands: Vec<SetupCommand>,
+    network: Network,
+}
+
+/// A requested file: inline contents, or a Files API file read by [`resolve`].
+struct HostedFile {
+    path: String,
+    file_id: Option<String>,
+    contents: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum FileParam {
+    Inline { path: String, data: String },
+    FileId { path: String, file_id: String },
+}
+
+/// Whether `path` names a file inside `workspace`: absolute, without `.`,
+/// `..`, or empty components.
+fn inside(workspace: &str, path: &str) -> bool {
+    let root = workspace.trim_end_matches('/');
+    path.len() <= MAX_PATH_BYTES
+        && !path.contains('\0')
+        && path
+            .strip_prefix(root)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|rest| {
+                !rest.is_empty()
+                    && rest
+                        .split('/')
+                        .all(|part| !part.is_empty() && part != "." && part != "..")
+            })
+}
+
+/// A domain name as the official service takes one: no scheme, port, or
+/// wildcard.
+fn domain(name: &str) -> bool {
+    name.len() <= 253
+        && name.contains('.')
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
+
+fn network(value: Option<&Value>) -> Result<Network, ApiError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(Network {
+            access: "enabled".to_owned(),
+            allowed_domains: Vec::new(),
+        });
+    };
+    let fields = value
+        .as_object()
+        .ok_or_else(|| invalid("network must be an object"))?;
+    if let Some(key) = fields
+        .keys()
+        .find(|key| !["access", "allowed_domains", "blocked_domains"].contains(&key.as_str()))
+    {
+        return Err(invalid(format!("network.{key} is not a network setting")));
+    }
+    let list = |key: &str| -> Result<Vec<String>, ApiError> {
+        match fields.get(key) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(list) => serde_json::from_value(list.clone())
+                .map_err(|_| invalid(format!("network.{key} must be a list of domains"))),
+        }
+    };
+    if !list("blocked_domains")?.is_empty() {
+        return Err(invalid(
+            "network.blocked_domains is not supported by this service; list allowed_domains with access restricted",
+        ));
+    }
+    let access = match fields.get("access") {
+        None | Some(Value::Null) => "enabled",
+        Some(Value::String(access))
+            if ["enabled", "disabled", "restricted"].contains(&access.as_str()) =>
+        {
+            access.as_str()
+        }
+        Some(_) => {
+            return Err(invalid(
+                "network.access must be enabled, disabled, or restricted",
+            ));
+        }
+    };
+    let allowed_domains = list("allowed_domains")?;
+    if !allowed_domains.is_empty() && access != "restricted" {
+        return Err(invalid(
+            "network.allowed_domains requires access restricted",
+        ));
+    }
+    if allowed_domains.len() > MAX_DOMAINS || !allowed_domains.iter().all(|name| domain(name)) {
+        return Err(invalid(format!(
+            "network.allowed_domains takes at most {MAX_DOMAINS} lowercase domain names, without wildcards"
+        )));
+    }
+    Ok(Network {
+        access: access.to_owned(),
+        allowed_domains,
+    })
+}
+
+fn files(value: Option<&Value>, workspace: &str) -> Result<Vec<HostedFile>, ApiError> {
+    let params: Vec<FileParam> = match value {
+        None | Some(Value::Null) => Vec::new(),
+        Some(files) => serde_json::from_value(files.clone()).map_err(|_| {
+            invalid("files must be a list of {type: inline, path, data} or {type: file_id, path, file_id}")
+        })?,
+    };
+    if params.len() > MAX_FILES {
+        return Err(invalid(format!("files takes at most {MAX_FILES} files")));
+    }
+    let mut files = Vec::new();
+    for param in params {
+        let (path, file_id, contents) = match param {
+            FileParam::Inline { path, data } => {
+                let contents = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    data.as_bytes(),
+                )
+                .map_err(|_| invalid("files: data must be standard base64"))?;
+                (path, None, contents)
+            }
+            FileParam::FileId { path, file_id } => (path, Some(file_id), Vec::new()),
+        };
+        if !inside(workspace, &path) {
+            return Err(invalid(format!(
+                "files: {path} must be an absolute path inside {workspace}"
+            )));
+        }
+        if files.iter().any(|file: &HostedFile| file.path == path) {
+            return Err(invalid(format!("files: {path} is listed twice")));
+        }
+        files.push(HostedFile {
+            path,
+            file_id,
+            contents,
+        });
+    }
+    Ok(files)
+}
+
+/// Read the Files API files a hosted environment names, within the caller's
+/// project, and bound the environment's files together.
+pub(crate) async fn resolve(
+    state: &State,
+    project_id: &str,
+    mut hosted: Hosted,
+) -> Result<Hosted, ApiError> {
+    for file in &mut hosted.files {
+        if let Some(file_id) = &file.file_id {
+            file.contents = match crate::files::read(state, project_id, file_id).await {
+                Ok(contents) => contents,
+                Err(error) if error.0 == axum::http::StatusCode::NOT_FOUND => {
+                    return Err(invalid(format!("files: file {file_id} not found")));
+                }
+                Err(error) => return Err(error),
+            };
+        }
+    }
+    if hosted
+        .files
+        .iter()
+        .map(|file| file.contents.len())
+        .sum::<usize>()
+        > MAX_FILES_BYTES
+    {
+        return Err(invalid(format!(
+            "files are limited to {MAX_FILES_BYTES} bytes per environment"
+        )));
+    }
+    Ok(hosted)
 }
 
 fn empty(value: &Value) -> bool {
@@ -294,26 +500,18 @@ fn env_name(name: &str) -> bool {
         && !name.starts_with("AGENTS_API_")
 }
 
-/// Parse an `openai_hosted` environment. Fields this service does not support
-/// yet are refused rather than ignored.
-pub(crate) fn parse(value: &Value) -> Result<Hosted, ApiError> {
+/// Parse an `openai_hosted` environment whose commands run in `workspace`.
+/// Fields this service does not support yet are refused rather than ignored.
+pub(crate) fn parse(value: &Value, workspace: &str) -> Result<Hosted, ApiError> {
     let fields = value
         .as_object()
         .ok_or_else(|| invalid("environment must be an object"))?;
     for (key, field) in fields {
         let supported = match key.as_str() {
-            "type" | "container_size" | "packages" | "env" | "setup_commands" => true,
-            "capability_directories" | "files" | "skills" | "plugins" => empty(field),
+            "type" | "container_size" | "packages" | "env" | "setup_commands" | "files"
+            | "network" => true,
+            "capability_directories" | "skills" | "plugins" => empty(field),
             "desktop" => field.is_null() || field == &json!({"enabled": false}),
-            "network" => {
-                field.is_null()
-                    || (field["access"] == "enabled"
-                        && field.as_object().is_some_and(|network| {
-                            network
-                                .iter()
-                                .all(|(name, value)| name == "access" || empty(value))
-                        }))
-            }
             _ => false,
         };
         if !supported {
@@ -383,7 +581,9 @@ pub(crate) fn parse(value: &Value) -> Result<Hosted, ApiError> {
         container_size,
         packages,
         env,
+        files: files(fields.get("files"), workspace)?,
         setup_commands,
+        network: network(fields.get("network"))?,
     })
 }
 
@@ -414,9 +614,25 @@ pub(crate) async fn create(
     hosted: Hosted,
     registry_url: String,
 ) -> anyhow::Result<(Value, ProvisionRequest)> {
-    let public = json!({"id": environment_id, "type": "openai_hosted", "capability_directories": [], "files": [],
-        "network": {"access": "enabled", "allowed_domains": []}, "packages": hosted.packages, "plugins": [],
-        "skills": [], "container_size": hosted.container_size, "desktop": null});
+    // Only safe metadata is public: files without their contents, and the
+    // network policy the sandbox enforces.
+    let files: Vec<Value> = hosted
+        .files
+        .iter()
+        .map(|file| {
+            let mut public = json!({"id": format!("envfile_{}", Uuid::new_v4().simple()),
+                "type": if file.file_id.is_some() { "file_id" } else { "inline" },
+                "path": file.path, "size_bytes": file.contents.len()});
+            if let Some(file_id) = &file.file_id {
+                public["file_id"] = json!(file_id);
+            }
+            public
+        })
+        .collect();
+    let public = json!({"id": environment_id, "type": "openai_hosted", "capability_directories": [], "files": files,
+        "network": {"access": hosted.network.access, "allowed_domains": hosted.network.allowed_domains},
+        "packages": hosted.packages, "plugins": [], "skills": [], "container_size": hosted.container_size,
+        "desktop": null});
     let token = format!(
         "envtok_{}{}",
         Uuid::new_v4().simple(),
@@ -436,7 +652,19 @@ pub(crate) async fn create(
         container_size: hosted.container_size,
         packages: hosted.packages,
         env: hosted.env,
+        files: hosted
+            .files
+            .into_iter()
+            .map(|file| ProvisionFile {
+                path: file.path,
+                data: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    file.contents,
+                ),
+            })
+            .collect(),
         setup_commands: hosted.setup_commands,
+        network: hosted.network,
     };
     Ok((public, request))
 }

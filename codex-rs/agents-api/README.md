@@ -585,12 +585,24 @@ sandboxes can reach; otherwise such sessions return 501.
 program that answers the JSON-lines protocol it documents.
 - **Configuration:** `container_size` (`small`, `medium`, `large`; default
   `medium`), `packages` (`npm`, `python`, and `system` lists, one installer
-  argument each), `env`, and `setup_commands` (`{command, cwd}`, run in order
-  before the executor starts, in `/workspace` by default). `env` and
-  `setup_commands` are confidential: they reach only the provider, and are
-  never stored or returned. Network access is `enabled`. Templates,
-  `environment_id`, `files`, `skills`, `plugins`, `capability_directories`,
-  `desktop`, and other network policies return 400 for now.
+  argument each), `env`, `files`, `setup_commands` (`{command, cwd}`, run in
+  order before the executor starts, in `/workspace` by default), and
+  `network`. `env` and `setup_commands` are confidential: they reach only the
+  provider, and are never stored or returned. Templates, `environment_id`,
+  `skills`, `plugins`, `capability_directories`, and `desktop` return 400 for
+  now.
+- **Files:** up to 64 files and 50 MiB per environment, each
+  `{type: "inline", path, data}` (standard base64) or
+  `{type: "file_id", path, file_id}` read from the Files API in the caller's
+  project, at an absolute path inside `/workspace`. They are written before
+  the setup commands run. Responses list only `{id, type, file_id, path,
+  size_bytes}`, and `GET /v1/agents/environments/{id}` lists them too.
+- **Network:** `access` is `enabled` (the default), `disabled`, or
+  `restricted` with `allowed_domains` (exact lowercase names, no wildcards).
+  Setup has full access; the policy applies once it finishes, before the
+  executor starts. The registry's host stays reachable so the executor can
+  connect, which also leaves this service's own host reachable.
+  `blocked_domains` returns 400: the Modal provider enforces allowlists only.
 - **Lifecycle:** the session is created at once with its environment
   `pending`; `agent.session.environment.ready` follows when the sandbox runs,
   then `connected` when its executor dials in. Input meanwhile waits as it

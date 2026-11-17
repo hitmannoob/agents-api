@@ -1279,8 +1279,11 @@ async fn managed_environments_are_provisioned_connected_and_destroyed() -> anyho
         let origin = base.trim_end_matches("/v1").to_owned();
         let client = reqwest::Client::new();
         let sessions = format!("{base}/agents/sessions");
+        let workspace_root = workspace_path.to_string_lossy().into_owned();
         let hosted = json!({"agent":{"model":"mock-model"},"environment":{"type":"openai_hosted","container_size":"small",
-            "packages":{"python":["pytest"]},"env":{"MODE":"test"},"setup_commands":[{"command":"make setup"}]},
+            "packages":{"python":["pytest"]},"env":{"MODE":"test"},"setup_commands":[{"command":"make setup"}],
+            "network":{"access":"restricted","allowed_domains":["pypi.org"]},
+            "files":[{"type":"inline","path":format!("{workspace_root}/notes/hello.txt"),"data":"aGVsbG8="}]},
             "input":"where are you?","stream":true});
 
         // Without a provider, hosted environments are refused.
@@ -1290,14 +1293,33 @@ async fn managed_environments_are_provisioned_connected_and_destroyed() -> anyho
         let provider = TestProvider { workspace: workspace_path.to_string_lossy().into_owned(), ..Default::default() };
         api.configure_environment_provider(Arc::new(provider.clone()));
 
+        // A file_id file is read from the Files API, in the caller's project.
+        let uploaded: Value = super::files::upload(&client, &base, &[("purpose", "user_data")], "data.csv", b"a,b\n1,2\n").await?
+            .error_for_status()?.json().await?;
+        let file_id = uploaded["id"].as_str().context("file id")?.to_owned();
+        let mut hosted = hosted;
+        hosted["environment"]["files"].as_array_mut().context("files")?
+            .push(json!({"type":"file_id","path":format!("{workspace_root}/data.csv"),"file_id":file_id}));
+        let mut missing = hosted.clone();
+        missing["environment"]["files"][1]["file_id"] = json!("file-missing");
+        let refused = client.post(&sessions).bearer_auth(TOKEN).json(&missing).send().await?;
+        assert_eq!((refused.status(), refused.json::<Value>().await?["error"]["message"].clone()),
+            (reqwest::StatusCode::BAD_REQUEST, json!("files: file file-missing not found")));
+
         // The provider starts an executor, whose commands run in its workspace.
         let mut stream = client.post(&sessions).bearer_auth(TOKEN).json(&hosted).send().await?.error_for_status()?;
         let events = until_idle(&mut stream).await?;
         let created = events.iter().find(|event| event["type"] == "agent.session.created").context("created")?;
         let session = &created["session"];
         let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
-        assert_eq!(session["environment"], json!({"id":environment_id,"type":"openai_hosted","capability_directories":[],"files":[],
-            "network":{"access":"enabled","allowed_domains":[]},"packages":{"npm":[],"python":["pytest"],"system":[]},
+        let files = session["environment"]["files"].clone();
+        let file_ids = files.as_array().context("files")?.iter().map(|file| file["id"].as_str().map(|id| id.starts_with("envfile_")))
+            .collect::<Vec<_>>();
+        assert_eq!(file_ids, vec![Some(true), Some(true)]);
+        assert_eq!(session["environment"], json!({"id":environment_id,"type":"openai_hosted","capability_directories":[],
+            "files":[{"id":files[0]["id"],"type":"inline","path":format!("{workspace_root}/notes/hello.txt"),"size_bytes":5},
+                {"id":files[1]["id"],"type":"file_id","file_id":file_id,"path":format!("{workspace_root}/data.csv"),"size_bytes":8}],
+            "network":{"access":"restricted","allowed_domains":["pypi.org"]},"packages":{"npm":[],"python":["pytest"],"system":[]},
             "plugins":[],"skills":[],"container_size":"small","desktop":null}));
         let order = lifecycle(&events);
         let at = |kind: &str| order.iter().position(|event| event == kind).with_context(|| format!("{kind} in {order:?}"));
@@ -1310,14 +1332,17 @@ async fn managed_environments_are_provisioned_connected_and_destroyed() -> anyho
         assert_eq!(std::fs::canonicalize(reported.trim())?, workspace_path);
         let url = format!("{sessions}/{}", session["id"].as_str().context("session id")?);
         let retrieved = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?;
-        assert_eq!((&retrieved["type"], &retrieved["status"]), (&json!("openai_hosted"), &json!("connected")));
+        assert_eq!((&retrieved["type"], &retrieved["status"], &retrieved["files"]), (&json!("openai_hosted"), &json!("connected"), &files));
 
         // The provider received the configuration, including its confidential
         // values, which no response returns.
         let requests = provider.requests.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.clone();
         assert_eq!(requests, vec![json!({"environment_id":environment_id,"registry_url":format!("{origin}/registry"),"token":"redacted",
             "container_size":"small","packages":{"npm":[],"python":["pytest"],"system":[]},"env":{"MODE":"test"},
-            "setup_commands":[{"command":"make setup","cwd":null}]})]);
+            "files":[{"path":format!("{workspace_root}/notes/hello.txt"),"data":"aGVsbG8="},
+                {"path":format!("{workspace_root}/data.csv"),"data":"YSxiCjEsMgo="}],
+            "setup_commands":[{"command":"make setup","cwd":null}],
+            "network":{"access":"restricted","allowed_domains":["pypi.org"]}})]);
         let token = provider.tokens.lock().map_err(|_| anyhow::anyhow!("poisoned"))?[0].clone();
         let saved = request(&client, reqwest::Method::GET, &url, Value::Null).await?.to_string();
         assert!(!saved.contains(&token) && !saved.contains("make setup") && !saved.contains("MODE"), "{saved}");
