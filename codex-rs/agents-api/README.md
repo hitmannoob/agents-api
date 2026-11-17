@@ -570,7 +570,8 @@ only the registry endpoints under `/registry/`.
   are secrets: they need the vault passphrase, are stored encrypted, are never
   returned, and a session copies its agent's values when it is created. HTTP servers with `connection_origin: "environment"` connect
   from the executor, so the service's egress policy does not apply to them.
-  Both need a self-hosted session.
+  Both need a session with an executor: `self_hosted`, or `openai_hosted`
+  (see its MCP notes below); environment `none` returns 400.
 - **Deletion:** removes the environment from the registry and the worker. The
   caller's executor keeps running (its registration attempts get 404), and
   stopping it is the caller's job.
@@ -631,6 +632,18 @@ program that answers the JSON-lines protocol it documents.
   is `expired`, and later input returns 409. Restoring needs the
   environment's `env` values, which are kept encrypted in the secrets store
   when the operator configured a vault passphrase.
+- **MCP:** stdio and `connection_origin: "environment"` MCP servers run on
+  the sandbox's executor as on a self-hosted one. Install their programs with
+  `packages` or `setup_commands`. Stdio servers start with a core environment
+  (such as `PATH` and `HOME`) plus the names in `env_vars`, read from the
+  executor's environment (which holds the environment's `env` values), and
+  their literal `env` secrets, which go to the executor and never to the
+  provider. `env_vars` naming `CODEX_API_KEY` or `AGENTS_API_*` returns 400,
+  so no server is handed the connect token. An environment-origin HTTP server
+  connects from the sandbox under its network access: with `restricted`, its
+  host must be listed in `allowed_domains`; with `disabled`, only loopback
+  servers inside the sandbox work. Others return 400 when the session is
+  created.
 - **Cleanup:** deleting the session destroys its sandbox; one still
   provisioning is destroyed when it comes up. A sandbox whose deletion a crash
   interrupts runs until its provider lifetime ends (24 hours on Modal).

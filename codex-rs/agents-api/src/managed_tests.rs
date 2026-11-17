@@ -185,6 +185,102 @@ fn unsupported_or_unsafe_hosted_configuration_is_refused() {
     }
 }
 
+/// Whether `tools` may run on a sandbox with `network`; the refusal otherwise.
+fn mcp_refusal(network: Value, tools: Value) -> Option<String> {
+    let hosted = accepted(json!({"type":"openai_hosted","network":network}));
+    let config = crate::configuration::configure(
+        crate::resources::AgentConfig::default(),
+        json!({"model":"m","tools":tools}),
+    )
+    .unwrap_or_else(|error| panic!("{tools} was refused: {}", error.1));
+    check_mcp(&hosted, &config).err().map(|error| error.1)
+}
+
+#[test]
+fn sandbox_mcp_servers_respect_reserved_variables_and_network_access() {
+    let stdio = |env_vars: Value| {
+        json!([{"type":"mcp","server_label":"collab","transport":{"type":"stdio","command":"gitea-mcp",
+            "cwd":"/workspace","env_vars":env_vars}}])
+    };
+    let http = |url: &str, origin: &str| {
+        json!([{"type":"mcp","server_label":"board","connection_origin":origin,
+            "transport":{"type":"http","server_url":url}}])
+    };
+    let enabled = json!({"access":"enabled"});
+    let disabled = json!({"access":"disabled"});
+    let restricted = json!({"access":"restricted","allowed_domains":["gitea.internal.example"]});
+    assert_eq!(
+        mcp_refusal(enabled.clone(), stdio(json!(["GITEA_TOKEN"]))),
+        None
+    );
+    // Stdio servers are local processes, whatever the network access.
+    assert_eq!(mcp_refusal(disabled.clone(), stdio(json!([]))), None);
+    for reserved in ["CODEX_API_KEY", "AGENTS_API_ENVIRONMENT_TOKEN"] {
+        let error = mcp_refusal(enabled.clone(), stdio(json!([reserved]))).unwrap_or_default();
+        assert!(
+            error.contains(&format!("cannot read {reserved}")),
+            "{error}"
+        );
+    }
+    for (network, url, origin, allowed) in [
+        (
+            &enabled,
+            "https://board.example.com/mcp",
+            "environment",
+            true,
+        ),
+        (
+            &restricted,
+            "https://gitea.internal.example/mcp",
+            "environment",
+            true,
+        ),
+        (
+            &restricted,
+            "http://localhost:8080/mcp",
+            "environment",
+            true,
+        ),
+        (&disabled, "http://127.0.0.1:8080/mcp", "environment", true),
+        (&disabled, "http://[::1]:8080/mcp", "environment", true),
+        // Service-origin servers connect from the service, not the sandbox.
+        (&disabled, "https://board.example.com/mcp", "service", true),
+        (
+            &restricted,
+            "https://board.example.com/mcp",
+            "environment",
+            false,
+        ),
+        // Only listed hosts, not their subdomains or parents.
+        (
+            &restricted,
+            "https://api.gitea.internal.example/mcp",
+            "environment",
+            false,
+        ),
+        (&restricted, "http://10.0.0.5/mcp", "environment", false),
+        (
+            &disabled,
+            "https://board.example.com/mcp",
+            "environment",
+            false,
+        ),
+    ] {
+        let refusal = mcp_refusal(network.clone(), http(url, origin));
+        assert_eq!(
+            refusal.is_none(),
+            allowed,
+            "{network} {url} {origin}: {refusal:?}"
+        );
+        if let Some(error) = refusal {
+            assert!(
+                error.contains("list it in network.allowed_domains"),
+                "{error}"
+            );
+        }
+    }
+}
+
 fn provision_request(environment_id: &str) -> ProvisionRequest {
     ProvisionRequest {
         environment_id: environment_id.to_owned(),

@@ -575,8 +575,73 @@ fn env_name(name: &str) -> bool {
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && name != "CODEX_API_KEY"
-        && !name.starts_with("AGENTS_API_")
+        && !reserved(name)
+}
+
+/// Variables the provider sets for the executor: the connect token and the
+/// registry it opens.
+fn reserved(name: &str) -> bool {
+    name == "CODEX_API_KEY" || name.starts_with("AGENTS_API_")
+}
+
+/// Check the MCP servers that run on the sandbox against this environment:
+/// stdio servers may not read the executor's reserved variables, and
+/// environment-origin HTTP servers must be reachable under its network
+/// access. Servers on the sandbox's loopback interface are always reachable.
+pub(crate) fn check_mcp(
+    hosted: &Hosted,
+    config: &crate::resources::AgentConfig,
+) -> Result<(), ApiError> {
+    use crate::agent_tools::CapabilityTool;
+    use crate::agent_tools::ConnectionOrigin;
+    use crate::agent_tools::McpTransport;
+    use crate::agent_tools::Tool;
+    for tool in &config.tools {
+        let Tool::Capability(CapabilityTool::Mcp {
+            server_label,
+            transport,
+            connection_origin,
+            ..
+        }) = tool
+        else {
+            continue;
+        };
+        match (transport, connection_origin) {
+            (McpTransport::Stdio { env_vars, .. }, _) => {
+                if let Some(name) = env_vars.iter().find(|name| reserved(name)) {
+                    return Err(invalid(format!(
+                        "MCP server {server_label} cannot read {name}; CODEX_API_KEY and AGENTS_API_* are reserved on openai_hosted environments"
+                    )));
+                }
+            }
+            (McpTransport::Http { server_url, .. }, ConnectionOrigin::Environment) => {
+                let host = server_url
+                    .parse::<axum::http::Uri>()
+                    .ok()
+                    .and_then(|uri| uri.host().map(str::to_ascii_lowercase))
+                    .unwrap_or_default();
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                let loopback = host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|address| address.is_loopback());
+                let reachable = loopback
+                    || match hosted.network.access.as_str() {
+                        "restricted" => hosted.network.allowed_domains.iter().any(|d| d == host),
+                        "disabled" => false,
+                        _ => true,
+                    };
+                if !reachable {
+                    return Err(invalid(format!(
+                        "MCP server {server_label} connects from the environment to {host}, which network access {} does not allow; list it in network.allowed_domains",
+                        hosted.network.access
+                    )));
+                }
+            }
+            (McpTransport::Http { .. }, ConnectionOrigin::Service) => {}
+        }
+    }
+    Ok(())
 }
 
 /// Parse an `openai_hosted` environment whose commands run in `workspace`.

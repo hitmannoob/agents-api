@@ -4,8 +4,10 @@
 //! Service-origin HTTP servers are reached from the worker host, so their URL
 //! must use https and resolve only to public addresses unless the operator
 //! allows the host. Stdio servers and environment-origin HTTP connections run on
-//! a self-hosted session's executor, on the caller's compute and network, so
-//! the service's egress policy does not apply to them. Credentials come from
+//! the session's executor: on the caller's compute and network for a
+//! self-hosted session, or in the sandbox of an `openai_hosted` one, under its
+//! network access ([`crate::managed::check_mcp`]). The service's egress policy
+//! does not apply to them. Credentials come from
 //! vaults (G11) or encrypted inline authorization snapshots.
 use crate::ApiError;
 use crate::State;
@@ -115,7 +117,7 @@ fn servers(config: &AgentConfig) -> impl Iterator<Item = Server<'_>> {
 }
 
 /// Whether an MCP tool runs on the session's executor, which needs a
-/// self-hosted environment.
+/// self-hosted or `openai_hosted` environment.
 pub(crate) fn needs_environment(tool: &CapabilityTool) -> bool {
     matches!(
         tool,

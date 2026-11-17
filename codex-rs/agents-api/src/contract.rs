@@ -255,6 +255,9 @@ async fn create(
         return Err(crate::stdio_env::disabled(&mcp_secrets));
     }
     crate::configuration::validate_execution(&saved.config, &environment)?;
+    if let Some(hosted) = &hosted {
+        crate::managed::check_mcp(hosted, &saved.config)?;
+    }
     // Resolve worker configuration now so an unreachable MCP server or an
     // unsupported tier is rejected before a session is created.
     crate::capabilities::overrides(

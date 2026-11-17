@@ -749,11 +749,11 @@ async fn mcp_servers_run_on_the_executor() -> anyhow::Result<()> {
         let read: Value = beta(client.get(format!("{agents}/{}", saved["id"].as_str().context("agent id")?))).send().await?.error_for_status()?.json().await?;
         assert!(!read.to_string().contains("s3cret-value") && !saved.to_string().contains("s3cret-value"), "{read}");
 
-        // Executor-run servers need a self-hosted environment.
+        // Executor-run servers need an environment with an executor.
         let refused = client.post(&sessions).bearer_auth(TOKEN).header("OpenAI-Beta", "agents=v1")
             .json(&json!({"agent":agent,"environment":{"type":"none"},"input":"x"})).send().await?;
         assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
-        assert_eq!(refused.json::<Value>().await?["error"]["message"], "stdio and environment-origin MCP servers need a self_hosted environment");
+        assert_eq!(refused.json::<Value>().await?["error"]["message"], "stdio and environment-origin MCP servers need a self_hosted or openai_hosted environment");
 
         let session = request(&client, reqwest::Method::POST, &sessions, json!({"agent_id":saved["id"],
             "environment":{"type":"self_hosted","workspace_directory":workspace_directory}})).await?;
@@ -1442,6 +1442,91 @@ async fn managed_environments_are_provisioned_connected_and_destroyed() -> anyho
         while !provider.destroyed.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.contains(&sandbox) {
             tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
         }
+        for (_, executor) in provider.executors.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.drain() {
+            executor.abort();
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
+/// Stdio and environment-origin MCP servers run on a managed environment's
+/// executor, as on a self-hosted one; servers the sandbox's network access
+/// cannot reach, or that would read the executor's connect token, are refused.
+#[tokio::test]
+async fn managed_environments_run_mcp_servers_on_the_sandbox() -> anyhow::Result<()> {
+    // The stdio fixture is a POSIX shell script.
+    if cfg!(windows) {
+        return Ok(());
+    }
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 90), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let workspace_root = workspace_path.to_string_lossy().into_owned();
+        let model = create_mock_responses_server_sequence_unchecked(vec![
+            capabilities::call("mcp__board.lookup", "http-call"),
+            capabilities::call("mcp__collab.where", "stdio-call"),
+            create_final_assistant_message_sse_response("done")?,
+        ]).await;
+        MockResponsesConfig::new(&model.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let (mcp_url, calls, _mcp) = mcp::mcp_server().await?;
+        std::fs::write(workspace_path.join("server.sh"), STDIO_MCP)?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        api.configure_vault("test-vault-passphrase-for-stdio-env-values".into()).await?;
+        let provider = TestProvider { workspace: workspace_root.clone(), ..Default::default() };
+        api.configure_environment_provider(Arc::new(provider.clone()));
+        let client = reqwest::Client::new();
+        let sessions = format!("{base}/agents/sessions");
+        let stdio = |env_vars: Value| json!({"type":"mcp","server_label":"collab","allowed_tools":["where"],
+            "transport":{"type":"stdio","command":"/bin/sh","args":["server.sh"],"cwd":workspace_root,
+                "env_vars":env_vars,"env":{"FIXTURE_SECRET":"s3cret-value"}}});
+        let board = |url: &str| json!({"type":"mcp","server_label":"board","connection_origin":"environment",
+            "allowed_tools":["lookup"],"transport":{"type":"http","server_url":url,"headers":{"x-tenant":"acme"}}});
+        let hosted = |tools: Value| json!({"agent":{"model":"mock-model","tools":tools},
+            "environment":{"type":"openai_hosted","container_size":"small","network":{"access":"restricted","allowed_domains":["pypi.org"]}},
+            "input":"use the tools","stream":true});
+
+        for (tools, message) in [
+            (json!([stdio(json!(["AGENTS_API_ENVIRONMENT_TOKEN"]))]),
+                "MCP server collab cannot read AGENTS_API_ENVIRONMENT_TOKEN; CODEX_API_KEY and AGENTS_API_* are reserved on openai_hosted environments"),
+            (json!([board("https://board.example.com/mcp")]),
+                "MCP server board connects from the environment to board.example.com, which network access restricted does not allow; list it in network.allowed_domains"),
+        ] {
+            let refused = client.post(&sessions).bearer_auth(TOKEN).json(&hosted(tools)).send().await?;
+            assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert_eq!(refused.json::<Value>().await?["error"]["message"], json!(message));
+        }
+        assert!(provider.requests()?.is_empty());
+
+        // The loopback HTTP server is the sandbox's own, so restricted access
+        // does not cut it off.
+        let mut stream = client.post(&sessions).bearer_auth(TOKEN).json(&hosted(json!([board(&mcp_url), stdio(json!([]))])))
+            .send().await?.error_for_status()?;
+        let events = until_idle(&mut stream).await?;
+        let session = &events.iter().find(|event| event["type"] == "agent.session.created").context("created")?["session"];
+        assert!(!session.to_string().contains("s3cret-value"), "{session}");
+        let recorded = calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        assert_eq!(recorded.iter().map(|call| (call["tool"].clone(), call["tenant"].clone())).collect::<Vec<_>>(),
+            vec![(json!("lookup"), json!("acme"))]);
+        let outputs: Vec<(String, String)> = model.received_requests().await.context("requests")?.iter()
+            .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+            .flat_map(|body| body["input"].as_array().cloned().unwrap_or_default())
+            .filter(|item| item["type"] == "function_call_output")
+            .map(|item| (item["call_id"].as_str().unwrap_or_default().to_owned(), item["output"].to_string()))
+            .collect();
+        let output = |call: &str| outputs.iter().find(|(id, _)| id == call).map(|(_, output)| output.clone()).unwrap_or_default();
+        assert!(output("http-call").contains("mcp-result-731"), "{outputs:?}");
+        assert!(output("stdio-call").contains(&format!("stdio-in-{workspace_root}-with-s3cret-value")), "{outputs:?}");
+        // Literal env values reach the server through the executor, never the
+        // provider.
+        assert!(!provider.requests()?.iter().any(|request| request.to_string().contains("s3cret-value")));
+
+        let url = format!("{sessions}/{}", session["id"].as_str().context("session id")?);
+        request(&client, reqwest::Method::DELETE, &url, Value::Null).await?;
         for (_, executor) in provider.executors.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.drain() {
             executor.abort();
         }

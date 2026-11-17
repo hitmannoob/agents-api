@@ -226,7 +226,7 @@ pub(crate) fn validate_execution(
                     ) =>
             {
                 return Err(invalid(
-                    "stdio and environment-origin MCP servers need a self_hosted environment",
+                    "stdio and environment-origin MCP servers need a self_hosted or openai_hosted environment",
                 ));
             }
             Tool::Capability(CapabilityTool::Mcp { .. }) => None,
