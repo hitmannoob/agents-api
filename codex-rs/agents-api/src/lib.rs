@@ -12,6 +12,7 @@ mod files;
 mod gates;
 mod images;
 mod input;
+pub mod managed;
 mod mcp;
 mod otlp;
 pub mod projects;
@@ -99,6 +100,8 @@ struct State {
     public_url: Mutex<Option<reqwest::Url>>,
     /// Input waiting for a self-hosted executor to connect.
     waits: environments::Waits,
+    /// Provisions managed (`openai_hosted`) environments, when configured.
+    provider: Mutex<Option<Arc<dyn managed::EnvironmentProvider>>>,
     /// Public IDs of turns that were queued before Codex started them.
     turn_aliases: turn_aliases::TurnAliases,
     /// Each session's most recently started turn, as (thread ID, turn ID),
@@ -126,6 +129,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl State {
+    fn provider(&self) -> Option<Arc<dyn managed::EnvironmentProvider>> {
+        lock(&self.provider).clone()
+    }
+
     async fn rpc(&self, method: &str, params: Value) -> Result<Value, ApiError> {
         // Clone the handle out of the lock; backend I/O must not hold it.
         let handle = lock(&self.backend)
@@ -260,6 +267,7 @@ impl AgentsApi {
             registry: registry::Registry::default(),
             public_url: Mutex::default(),
             waits: environments::Waits::default(),
+            provider: Mutex::default(),
             started_turns: Mutex::default(),
             pending_cancels: Mutex::default(),
             files: files::Files(directory.join("files").to_path_buf()),
@@ -407,6 +415,13 @@ impl AgentsApi {
         );
         self.state.registry.configure(environment_key, registry_url);
         Ok(())
+    }
+
+    /// Provision `openai_hosted` environments with `provider`. They also need
+    /// the environment registry ([`Self::configure_environments`]), which the
+    /// provisioned executors dial; set a public URL they can reach.
+    pub fn configure_environment_provider(&self, provider: Arc<dyn managed::EnvironmentProvider>) {
+        *lock(&self.state.provider) = Some(provider);
     }
 
     /// How long input waits for a self-hosted executor to connect before it is

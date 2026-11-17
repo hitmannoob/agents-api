@@ -146,6 +146,7 @@ async fn create(
     // environment types instead of the prototype's.
     let mut environment = Environment::None;
     let mut skill_references = Vec::new();
+    let mut hosted = None;
     match params.environment["type"].as_str() {
         Some("none")
             if params
@@ -154,9 +155,25 @@ async fn create(
                 .is_some_and(|fields| fields.len() == 1) => {}
         Some("none") => return Err(invalid("environment none takes no other fields")),
         Some("openai_hosted") => {
-            return Err(invalid(
-                "environment type openai_hosted is not supported by this service; use none",
-            ));
+            let Some(provider) = state.provider() else {
+                return Err(ApiError(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "openai_hosted environments are disabled; the operator must configure an environment provider".into(),
+                ));
+            };
+            if state.registry.harness_url().is_none() {
+                return Err(ApiError(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "openai_hosted environments need the environment registry; the operator must configure an environment key".into(),
+                ));
+            }
+            hosted = Some(crate::managed::parse(&params.environment)?);
+            // The provisioned executor runs commands exactly as a self-hosted one.
+            environment = Environment::SelfHosted {
+                id: format!("env_{}", Uuid::new_v4().simple()),
+                cwd: provider.workspace(),
+                capability_directories: Vec::new(),
+            };
         }
         Some("self_hosted") => {
             environment = crate::environments::parse(&params.environment)?;
@@ -264,12 +281,23 @@ async fn create(
             },
         )
         .await?;
-    let public_environment = match &environment {
-        Environment::SelfHosted {
-            id,
-            cwd,
-            capability_directories,
-        } => {
+    let mut provision = None;
+    let public_environment = match (&environment, hosted) {
+        (Environment::SelfHosted { id, .. }, Some(hosted)) => {
+            let remote_url = crate::registry::remote_url(&state, &headers);
+            let (public, request) =
+                crate::managed::create(&state, &session.id, id, hosted, remote_url).await?;
+            provision = Some(request);
+            public
+        }
+        (
+            Environment::SelfHosted {
+                id,
+                cwd,
+                capability_directories,
+            },
+            None,
+        ) => {
             let remote_url = crate::registry::remote_url(&state, &headers);
             crate::environments::create(
                 &state,
@@ -281,7 +309,7 @@ async fn create(
             )
             .await?
         }
-        Environment::None | Environment::Local { .. } => json!({"type":"none"}),
+        (Environment::None | Environment::Local { .. }, _) => json!({"type":"none"}),
     };
     // Input to a self-hosted session sets the status once it is submitted.
     let status = if self_hosted { "idle" } else { "in_progress" };
@@ -305,7 +333,19 @@ async fn create(
         json!({"type":"agent.session.created","session":public}),
     );
     if let Environment::SelfHosted { id, .. } = &environment {
-        crate::environments::emit(&state, &session.id, id, "pending", /*error*/ None);
+        let kind = if provision.is_some() {
+            "openai_hosted"
+        } else {
+            "self_hosted"
+        };
+        crate::environments::emit(
+            &state,
+            &session.id,
+            id,
+            kind,
+            "pending",
+            /*error*/ None,
+        );
         crate::environments::watch(&state, session.id.clone(), id.clone());
     }
     if let Some(input) = input
@@ -313,6 +353,10 @@ async fn create(
     {
         crate::records::session_status(&state, &session.id, "failed", Some(&error.1)).await?;
         return Err(error);
+    }
+    // Initial input is already waiting, so a failed provisioning fails it.
+    if let Some(request) = provision {
+        crate::managed::start(&state, session.id.clone(), request);
     }
     if params.stream {
         Ok(sse(receiver, session.id))

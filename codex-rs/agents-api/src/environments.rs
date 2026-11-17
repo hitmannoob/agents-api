@@ -211,44 +211,106 @@ pub(crate) async fn retrieve(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     crate::projects::require(&state, &principal.project_id, &id, Resource::Environment).await?;
-    let row: Option<(String, bool, bool)> =
-        sqlx::query_as("SELECT session_id, connected_once, failed FROM environments WHERE id = ?")
-            .bind(&id)
-            .fetch_optional(&state.store.0)
-            .await
-            .map_err(anyhow::Error::from)?;
-    let (session_id, connected_once, failed) =
+    let row: Option<(String, bool, bool, bool, bool)> = sqlx::query_as(
+        "SELECT session_id, connected_once, failed, provider IS NOT NULL, provisioned FROM environments WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.store.0)
+    .await
+    .map_err(anyhow::Error::from)?;
+    let (session_id, connected_once, failed, managed, provisioned) =
         row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "environment not found".into()))?;
-    // A connected executor wins; input that timed out waiting for one leaves
-    // the environment failed until one connects. Self-hosted environments have
-    // no lifetime of their own, so they never expire.
+    // A connected executor wins; input that timed out waiting for one, or a
+    // sandbox that could not be provisioned, leaves the environment failed
+    // until one connects. A provisioned managed environment is ready before
+    // its executor connects. Environments have no lifetime of their own yet,
+    // so they never expire.
     let status = match state.registry.status(&id) {
         "connected" => "connected",
         _ if failed => "failed",
         "disconnected" => "disconnected",
         _ if connected_once => "disconnected",
+        _ if provisioned => "ready",
         _ => "pending",
+    };
+    let kind = if managed {
+        "openai_hosted"
+    } else {
+        "self_hosted"
     };
     let skills = crate::session_skills::installed(&state, &session_id).await?;
     Ok(Json(
-        json!({"id": id, "object": "agent.environment", "type": "self_hosted",
+        json!({"id": id, "object": "agent.environment", "type": kind,
             "status": status, "files": [], "plugins": [], "skills": skills}),
     ))
 }
 
-/// Broadcast an environment state change on the session's stream.
+/// Broadcast an environment state change on the session's stream. `kind` is
+/// the environment's public type.
 pub(crate) fn emit(
     state: &State,
     session_id: &str,
     environment_id: &str,
+    kind: &str,
     status: &str,
     error: Option<Value>,
 ) {
     crate::records::emit(
         state,
         json!({"type": format!("agent.session.environment.{status}"), "session_id": session_id, "turn_id": null,
-            "environment": {"id": environment_id, "type": "self_hosted", "status": status, "error": error}}),
+            "environment": {"id": environment_id, "type": kind, "status": status, "error": error}}),
     );
+}
+
+/// An environment's public type: `openai_hosted` when the service provisions
+/// its executor, otherwise `self_hosted`.
+pub(crate) async fn kind(state: &State, environment_id: &str) -> &'static str {
+    let managed: Option<bool> =
+        sqlx::query_scalar("SELECT provider IS NOT NULL FROM environments WHERE id = ?")
+            .bind(environment_id)
+            .fetch_optional(&state.store.0)
+            .await
+            .ok()
+            .flatten();
+    if managed == Some(true) {
+        "openai_hosted"
+    } else {
+        "self_hosted"
+    }
+}
+
+/// Fail an environment that no executor will reach, such as one whose
+/// provisioning failed, with the input waiting for it.
+pub(crate) async fn fail(
+    state: &Arc<State>,
+    session_id: &str,
+    environment_id: &str,
+    code: &str,
+    message: &str,
+) -> anyhow::Result<()> {
+    let admission = state.input_gates.lock(session_id).await;
+    sqlx::query("UPDATE environments SET failed = 1 WHERE id = ?")
+        .bind(environment_id)
+        .execute(&state.store.0)
+        .await?;
+    let waited = crate::lock(&state.waits.inputs)
+        .remove(session_id)
+        .is_some();
+    if waited {
+        settle(state, session_id, Some(("failed", Some(message)))).await?;
+    }
+    drop(admission);
+    let error = json!({"type": "environment_error", "code": code, "message": message});
+    let kind = kind(state, environment_id).await;
+    emit(
+        state,
+        session_id,
+        environment_id,
+        kind,
+        "failed",
+        Some(error),
+    );
+    Ok(())
 }
 
 /// Report the executor connecting and disconnecting until the environment is
@@ -278,10 +340,12 @@ pub(crate) fn watch(state: &Arc<State>, session_id: String, environment_id: Stri
                     }
                 }
                 let status = if now { "connected" } else { "disconnected" };
+                let kind = kind(&state, &environment_id).await;
                 emit(
                     &state,
                     &session_id,
                     &environment_id,
+                    kind,
                     status,
                     /*error*/ None,
                 );
@@ -293,6 +357,7 @@ pub(crate) fn watch(state: &Arc<State>, session_id: String, environment_id: Stri
 /// Watch every stored environment again, and fail input that waited for an
 /// executor when the service stopped: it was never dispatched.
 pub(crate) async fn recover(state: &Arc<State>) -> anyhow::Result<()> {
+    crate::managed::recover(state).await?;
     let rows: Vec<(String, String, bool)> =
         sqlx::query_as("SELECT id, session_id, waiting FROM environments")
             .fetch_all(&state.store.0)
@@ -355,6 +420,21 @@ pub(crate) async fn submit(
         crate::routes::start_turn(state, session_id, items).await?;
         return Ok(());
     };
+    // No executor will ever reach a managed environment that failed to
+    // provision, so its input is refused instead of waiting.
+    let unprovisionable: bool = sqlx::query_scalar(
+        "SELECT provider IS NOT NULL AND failed AND NOT connected_once FROM environments WHERE id = ?",
+    )
+    .bind(&environment_id)
+    .fetch_one(&state.store.0)
+    .await
+    .map_err(anyhow::Error::from)?;
+    if unprovisionable {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this session's environment could not be provisioned; create a new session".into(),
+        ));
+    }
     let admission = state.input_gates.lock(session_id).await;
     let connected = *state.registry.watch(&environment_id).borrow() == ExecutorState::Connected;
     let generation = state.registry.next_connection();
@@ -466,7 +546,15 @@ async fn wait(state: Weak<State>, session_id: String, environment_id: String, ge
             tracing::warn!(error = %error, "environment failure not recorded");
         }
         let error = json!({"type": "environment_error", "code": "environment_connection_timeout", "message": TIMED_OUT});
-        emit(&state, &session_id, &environment_id, "failed", Some(error));
+        let kind = kind(&state, &environment_id).await;
+        emit(
+            &state,
+            &session_id,
+            &environment_id,
+            kind,
+            "failed",
+            Some(error),
+        );
         return;
     }
     // Input arriving meanwhile joins the queue, so it starts after this.

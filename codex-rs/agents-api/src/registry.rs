@@ -298,6 +298,16 @@ pub(crate) async fn authorize_executor(
     if constant_time_eq(presented, key) {
         return owner.map(|_| ()).ok_or_else(not_found);
     }
+    // A managed environment's executor presents that environment's own
+    // connect token, which no other environment accepts.
+    if owner.is_some()
+        && let Some(expected) = crate::managed::token_digest(state, environment_id)
+            .await
+            .map_err(internal)?
+        && constant_time_eq(&crate::managed::digest(presented), &expected)
+    {
+        return Ok(());
+    }
     let principal = crate::projects::resolve(state, presented)
         .await
         .map_err(internal)?

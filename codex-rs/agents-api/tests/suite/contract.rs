@@ -204,7 +204,8 @@ async fn public_sessions_save_normalized_history_and_validate_inputs() -> anyhow
         // Unsupported environments name the public types, never the prototype's.
         let bad = reqwest::StatusCode::BAD_REQUEST;
         for (environment, status, message) in [
-            (json!({"type":"openai_hosted"}), bad, "environment type openai_hosted is not supported by this service; use none"),
+            (json!({"type":"openai_hosted"}), reqwest::StatusCode::NOT_IMPLEMENTED,
+                "openai_hosted environments are disabled; the operator must configure an environment provider"),
             (json!({"type":"self_hosted","workspace_directory":"/tmp"}), reqwest::StatusCode::NOT_IMPLEMENTED,
                 "self-hosted environments are disabled; the operator must configure an environment key"),
             (json!({"type":"self_hosted","workspace_directory":"tmp"}), bad, "workspace_directory must be an absolute path of at most 4096 bytes"),

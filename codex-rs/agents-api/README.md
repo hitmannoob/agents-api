@@ -234,7 +234,7 @@ original payloads moved to `/v1/prototype/agents`. New session routes are:
 | --- | --- | --- |
 | POST / GET | `/v1/agents` | Create saved agents / list in creation order |
 | GET / POST / DELETE | `/v1/agents/{id}` | Retrieve, update, or delete a saved agent |
-| POST | `/v1/agents/sessions` | Inline agent or saved `agent_id` plus overrides, environment `none` or `self_hosted` (`openai_hosted` is not supported), initial input (required for `none`, optional for `self_hosted`), optional SSE |
+| POST | `/v1/agents/sessions` | Inline agent or saved `agent_id` plus overrides, environment `none`, `self_hosted`, or `openai_hosted` (when the operator configures a provider), initial input (required for `none`, optional otherwise), optional SSE |
 | GET | `/v1/agents/sessions` | List in creation order, optionally filtered by `agent_id` |
 | GET | `/v1/agents/sessions/{id}` | Configuration snapshot, status, metadata and current `required_actions` |
 | POST | `/v1/agents/sessions/{id}` | Replace metadata; change model, reasoning effort, or service tier for later turns |
@@ -574,6 +574,39 @@ only the registry endpoints under `/registry/`.
 - **Deletion:** removes the environment from the registry and the worker. The
   caller's executor keeps running (its registration attempts get 404), and
   stopping it is the caller's job.
+
+`openai_hosted` environments are provisioned by the service, which runs the
+stock `codex exec-server` for the session in a sandbox it starts through an
+environment provider. They are available when the operator passes
+`--environment-provider <program>` (with `--environment-provider-arg` for
+each argument) as well as the environment key, and a `--public-url` the
+sandboxes can reach; otherwise such sessions return 501.
+`deploy/modal/provider.py` provisions Modal Sandboxes; a provider is any
+program that answers the JSON-lines protocol it documents.
+- **Configuration:** `container_size` (`small`, `medium`, `large`; default
+  `medium`), `packages` (`npm`, `python`, and `system` lists, one installer
+  argument each), `env`, and `setup_commands` (`{command, cwd}`, run in order
+  before the executor starts, in `/workspace` by default). `env` and
+  `setup_commands` are confidential: they reach only the provider, and are
+  never stored or returned. Network access is `enabled`. Templates,
+  `environment_id`, `files`, `skills`, `plugins`, `capability_directories`,
+  `desktop`, and other network policies return 400 for now.
+- **Lifecycle:** the session is created at once with its environment
+  `pending`; `agent.session.environment.ready` follows when the sandbox runs,
+  then `connected` when its executor dials in. Input meanwhile waits as it
+  does for a self-hosted executor. Commands run in `/workspace` and behave as
+  on a self-hosted executor. Provisioning that fails reports
+  `agent.session.environment.failed` (`environment_provisioning_failed`),
+  fails the input waiting for it, and later input returns 409.
+- **Credentials:** each environment's executor presents a connect token
+  generated for that environment and accepted for no other, and for nothing
+  but the registry. Only its SHA-256 is kept.
+- **Cleanup:** deleting the session destroys its sandbox; one still
+  provisioning is destroyed when it comes up. A sandbox whose deletion a crash
+  interrupts runs until its provider lifetime ends (24 hours on Modal).
+  Provisioning that a restart interrupts fails the environment, since its
+  confidential setup was never stored. Environments do not suspend, expire, or
+  reset yet.
 
 Vaults hold MCP credentials. They are available only when the operator
 supplies a passphrase of at least 32 bytes with `--vault-passphrase` (or

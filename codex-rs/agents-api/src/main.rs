@@ -70,6 +70,15 @@ struct Args {
     /// the API. Self-hosted environments are unavailable without it.
     #[arg(long, env = "CODEX_AGENTS_API_ENVIRONMENT_KEY", hide_env_values = true)]
     environment_key: Option<String>,
+    /// Program that provisions `openai_hosted` environments, speaking JSON
+    /// lines on stdin and stdout (such as `deploy/modal/provider.py`). Hosted
+    /// environments are unavailable without it; they also need the
+    /// environment key and a public URL the provisioned executors can reach.
+    #[arg(long, requires = "environment_key")]
+    environment_provider: Option<String>,
+    /// An argument for the environment provider. Repeat for each argument.
+    #[arg(long = "environment-provider-arg", requires = "environment_provider")]
+    environment_provider_args: Vec<String>,
     /// Seconds that input waits for a disconnected self-hosted executor before
     /// it is dropped and the session fails.
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86_400))]
@@ -303,6 +312,14 @@ async fn main() -> anyhow::Result<()> {
             api.configure_environments(environment_key, format!("http://{local}/registry"))?;
             api.set_environment_connection_wait(std::time::Duration::from_secs(
                 args.environment_connection_wait_secs,
+            ));
+        }
+        if let Some(program) = args.environment_provider {
+            api.configure_environment_provider(std::sync::Arc::new(
+                codex_agents_api::managed::SidecarProvider::new(
+                    program,
+                    args.environment_provider_args,
+                ),
             ));
         }
         eprintln!("agents-api listening on {}", listener.local_addr()?);

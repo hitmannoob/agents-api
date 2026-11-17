@@ -227,8 +227,8 @@ pub(crate) async fn delete(
             .fetch_all(&state.store.0)
             .await
             .map_err(anyhow::Error::from)?;
-    let environment_id: Option<String> =
-        sqlx::query_scalar("SELECT id FROM environments WHERE session_id = ?")
+    let environment: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, sandbox_id FROM environments WHERE session_id = ?")
             .bind(&id)
             .fetch_optional(&state.store.0)
             .await
@@ -279,8 +279,13 @@ pub(crate) async fn delete(
         .secrets
         .discard(vec![crate::stdio_env::session_name(&id)])
         .await;
-    if let Some(environment_id) = &environment_id {
-        crate::environments::forget(&state, environment_id).await;
+    if let Some((environment_id, sandbox_id)) = environment {
+        crate::environments::forget(&state, &environment_id).await;
+        // A managed environment's sandbox goes with its session. One still
+        // provisioning is destroyed when it comes up.
+        if let Some(sandbox_id) = sandbox_id {
+            crate::managed::destroy(&state, sandbox_id);
+        }
     }
     let _ = state
         .public_events

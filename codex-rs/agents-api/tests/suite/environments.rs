@@ -1190,3 +1190,174 @@ async fn skills_and_plugins_stay_isolated_between_sessions_across_cold_resume() 
     })
     .await?
 }
+
+/// Provisions a managed environment the way a sandbox would: an executor in
+/// this process, presenting the environment's own connect token. An `env`
+/// value `FAIL` makes provisioning fail.
+#[derive(Clone, Default)]
+struct TestProvider {
+    workspace: String,
+    requests: Arc<std::sync::Mutex<Vec<Value>>>,
+    tokens: Arc<std::sync::Mutex<Vec<String>>>,
+    destroyed: Arc<std::sync::Mutex<Vec<String>>>,
+    executors: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl codex_agents_api::managed::EnvironmentProvider for TestProvider {
+    fn workspace(&self) -> String {
+        self.workspace.clone()
+    }
+
+    fn provision(
+        &self,
+        request: codex_agents_api::managed::ProvisionRequest,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<String>> {
+        let provider = self.clone();
+        Box::pin(async move {
+            let mut recorded = serde_json::to_value(&request)?;
+            recorded["token"] = json!("redacted");
+            provider
+                .requests
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .push(recorded);
+            provider
+                .tokens
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .push(request.token.clone());
+            anyhow::ensure!(!request.env.contains_key("FAIL"), "sandbox quota exceeded");
+            let executor = executor_with(
+                &request.registry_url,
+                &request.environment_id,
+                Arc::new(ProjectKey(request.token)),
+            )?;
+            provider
+                .executors
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .push(executor);
+            Ok(format!("sb-{}", request.environment_id))
+        })
+    }
+
+    fn destroy(
+        &self,
+        sandbox_id: String,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+        let provider = self.clone();
+        Box::pin(async move {
+            provider
+                .destroyed
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .push(sandbox_id);
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn managed_environments_are_provisioned_connected_and_destroyed() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let command = if cfg!(windows) {
+            vec!["cmd.exe".to_owned(), "/d".to_owned(), "/c".to_owned(), "cd > where.txt & echo written".to_owned()]
+        } else {
+            vec!["/bin/sh".to_owned(), "-c".to_owned(), "pwd > where.txt; echo written".to_owned()]
+        };
+        let model = create_mock_responses_server_sequence_unchecked(vec![
+            create_command_execution_sse_response(command, /*workdir*/ None, Some(/*timeout_ms*/ 10_000), "hosted-call")?,
+            create_final_assistant_message_sse_response("done")?,
+        ]).await;
+        MockResponsesConfig::new(&model.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        let client = reqwest::Client::new();
+        let sessions = format!("{base}/agents/sessions");
+        let hosted = json!({"agent":{"model":"mock-model"},"environment":{"type":"openai_hosted","container_size":"small",
+            "packages":{"python":["pytest"]},"env":{"MODE":"test"},"setup_commands":[{"command":"make setup"}]},
+            "input":"where are you?","stream":true});
+
+        // Without a provider, hosted environments are refused.
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        let disabled = client.post(&sessions).bearer_auth(TOKEN).json(&hosted).send().await?;
+        assert_eq!(disabled.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+        let provider = TestProvider { workspace: workspace_path.to_string_lossy().into_owned(), ..Default::default() };
+        api.configure_environment_provider(Arc::new(provider.clone()));
+
+        // The provider starts an executor, whose commands run in its workspace.
+        let mut stream = client.post(&sessions).bearer_auth(TOKEN).json(&hosted).send().await?.error_for_status()?;
+        let events = until_idle(&mut stream).await?;
+        let created = events.iter().find(|event| event["type"] == "agent.session.created").context("created")?;
+        let session = &created["session"];
+        let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
+        assert_eq!(session["environment"], json!({"id":environment_id,"type":"openai_hosted","capability_directories":[],"files":[],
+            "network":{"access":"enabled","allowed_domains":[]},"packages":{"npm":[],"python":["pytest"],"system":[]},
+            "plugins":[],"skills":[],"container_size":"small","desktop":null}));
+        let order = lifecycle(&events);
+        let at = |kind: &str| order.iter().position(|event| event == kind).with_context(|| format!("{kind} in {order:?}"));
+        assert!(at("agent.session.environment.pending")? < at("agent.session.environment.ready")?, "{order:?}");
+        assert!(at("agent.session.environment.ready")? < at("agent.session.environment.connected")?, "{order:?}");
+        assert!(at("agent.session.environment.connected")? < at("agent.session.in_progress")?, "{order:?}");
+        assert!(events.iter().filter(|event| event["type"].as_str().is_some_and(|kind| kind.starts_with("agent.session.environment.")))
+            .all(|event| event["environment"]["type"] == "openai_hosted"), "{events:?}");
+        let reported = std::fs::read_to_string(workspace_path.join("where.txt"))?;
+        assert_eq!(std::fs::canonicalize(reported.trim())?, workspace_path);
+        let url = format!("{sessions}/{}", session["id"].as_str().context("session id")?);
+        let retrieved = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?;
+        assert_eq!((&retrieved["type"], &retrieved["status"]), (&json!("openai_hosted"), &json!("connected")));
+
+        // The provider received the configuration, including its confidential
+        // values, which no response returns.
+        let requests = provider.requests.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.clone();
+        assert_eq!(requests, vec![json!({"environment_id":environment_id,"registry_url":format!("{origin}/registry"),"token":"redacted",
+            "container_size":"small","packages":{"npm":[],"python":["pytest"],"system":[]},"env":{"MODE":"test"},
+            "setup_commands":[{"command":"make setup","cwd":null}]})]);
+        let token = provider.tokens.lock().map_err(|_| anyhow::anyhow!("poisoned"))?[0].clone();
+        let saved = request(&client, reqwest::Method::GET, &url, Value::Null).await?.to_string();
+        assert!(!saved.contains(&token) && !saved.contains("make setup") && !saved.contains("MODE"), "{saved}");
+
+        // Provisioning that fails fails the environment and the input waiting
+        // for it; later input is refused.
+        let mut failing = hosted.clone();
+        failing["environment"]["env"] = json!({"FAIL":"1"});
+        let mut stream = client.post(&sessions).bearer_auth(TOKEN).json(&failing).send().await?.error_for_status()?;
+        let events = until_event(&mut stream, "agent.session.environment.failed").await?;
+        let failed = events.last().context("failed event")?;
+        assert_eq!(failed["environment"]["error"]["code"], json!("environment_provisioning_failed"));
+        let failed_session = events.iter().find(|event| event["type"] == "agent.session.created").context("created")?["session"].clone();
+        let failed_url = format!("{sessions}/{}", failed_session["id"].as_str().context("failed session id")?);
+        let failed_environment = failed_session["environment"]["id"].as_str().context("failed environment")?.to_owned();
+        assert_eq!(request(&client, reqwest::Method::GET, &failed_url, Value::Null).await?["status"], json!("failed"));
+        assert_eq!(send(&client, &failed_url, message("again?")).await?, reqwest::StatusCode::CONFLICT);
+        let status = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{failed_environment}"), Value::Null).await?;
+        assert_eq!(status["status"], json!("failed"));
+
+        // Each connect token reaches only its own environment.
+        let register = |environment: &str, secret: &str| {
+            let request = client.post(format!("{origin}/registry/cloud/environment/{environment}/register")).bearer_auth(secret)
+                .json(&json!({"security_profile":"unsupported","executor_public_key":{"suite":"x","x25519_public_key":"x","mlkem768_public_key":"x"}}));
+            async move { anyhow::Ok(request.send().await?.status().as_u16()) }
+        };
+        assert_eq!(register(&environment_id, &token).await?, 400);
+        assert_eq!(register(&failed_environment, &token).await?, 401);
+        // A connect token grants nothing else.
+        assert_eq!(client.get(format!("{base}/agents")).bearer_auth(&token).send().await?.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // Deleting the session destroys its sandbox.
+        request(&client, reqwest::Method::DELETE, &url, Value::Null).await?;
+        let sandbox = format!("sb-{environment_id}");
+        while !provider.destroyed.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.contains(&sandbox) {
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
+        }
+        for executor in provider.executors.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.drain(..) {
+            executor.abort();
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}

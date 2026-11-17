@@ -145,11 +145,24 @@ while [ ! -s /data/public-url ]; do
   fi
   sleep 1
 done
+# Managed environments: the service runs provider.py, which provisions
+# Sandboxes from this same image (it carries the codex CLI).
+managed=()
+if [ -s /data/provider.py ]; then
+  python3 -m pip install -q modal
+  managed=(--environment-provider python3 --environment-provider-arg /data/provider.py
+    --environment-provider-arg --image-id --environment-provider-arg "$(cat /data/image-id)")
+fi
 /opt/agents-api/bin/codex-agents-api --listen 127.0.0.1:4501 --data-directory /data \
   --codex-home /data/codex-home --app-server-bin /opt/agents-api/bin/codex-app-server \
-  --public-url "$(cat /data/public-url)" \
+  --public-url "$(cat /data/public-url)" "${{managed[@]}}" \
   2>&1 | tee /data/logs/agents-api.log
 """
+
+# The Modal secret holding a token (MODAL_TOKEN_ID, MODAL_TOKEN_SECRET) the
+# service uses to provision managed environments. Sandboxes carry no Modal
+# credentials of their own.
+MODAL_TOKEN_SECRET = "agents-api-modal"
 
 
 def build():
@@ -195,7 +208,7 @@ def image(source):
     )
 
 
-def start(state, hours, auto_compact_tokens=None, provider="openrouter", model=None):
+def start(state, hours, auto_compact_tokens=None, provider="openrouter", model=None, managed=False):
     secret, default_model = PROVIDERS[provider]
     config = CONFIG.format(
         model=model or default_model,
@@ -214,14 +227,16 @@ def start(state, hours, auto_compact_tokens=None, provider="openrouter", model=N
     for name, value in values.items():
         with open(os.path.join(state, name), "w", encoding="utf-8") as handle:
             handle.write(value)
+    service_image = image(archive(state))
     sandbox = modal.Sandbox.create(
         "bash",
         "-lc",
         SCRIPT.format(config=config, forward=FORWARD),
         app=modal.App.lookup(APP, create_if_missing=True),
-        image=image(archive(state)),
+        image=service_image,
         secrets=[
             modal.Secret.from_name(secret),
+            *([modal.Secret.from_name(MODAL_TOKEN_SECRET)] if managed else []),
             modal.Secret.from_dict(
                 {
                     "CODEX_AGENTS_API_TOKEN": values["token"],
@@ -236,6 +251,13 @@ def start(state, hours, auto_compact_tokens=None, provider="openrouter", model=N
         timeout=int(hours * 3600),
     )
     url = sandbox.tunnels()[8080].url.rstrip("/")
+    if managed:
+        # Written before the public URL, which is what the script waits for.
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "provider.py"), encoding="utf-8") as handle:
+            provider_source = handle.read()
+        sandbox.exec("mkdir", "-p", "/data").wait()
+        sandbox.filesystem.write_text(provider_source, "/data/provider.py")
+        sandbox.filesystem.write_text(service_image.object_id, "/data/image-id")
     process = sandbox.exec(
         "bash",
         "-c",
@@ -299,6 +321,11 @@ def main():
         help="model provider (default openrouter)",
     )
     parser.add_argument("--model", help="worker model (default: the provider's)")
+    parser.add_argument(
+        "--managed-environments",
+        action="store_true",
+        help=f"provision openai_hosted environments as Modal Sandboxes (needs the {MODAL_TOKEN_SECRET} secret)",
+    )
     args = parser.parse_args()
     os.makedirs(args.state, exist_ok=True)
     if args.command == "build":
@@ -308,7 +335,14 @@ def main():
             )
         print("image built")
     elif args.command == "start":
-        start(args.state, args.hours, args.auto_compact_tokens, args.provider, args.model)
+        start(
+            args.state,
+            args.hours,
+            args.auto_compact_tokens,
+            args.provider,
+            args.model,
+            args.managed_environments,
+        )
     elif args.command == "logs":
         process = sandbox_for(args.state).exec(
             "tail", "-n", "60", "/data/logs/agents-api.log"

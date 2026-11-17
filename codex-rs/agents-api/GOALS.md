@@ -2616,6 +2616,22 @@ service; setup, network policy, and lifecycle transitions are tested against
 a real provider, including suspend/resume across a service restart; and a
 side-by-side run against the official service matches events and items.
 
+Progress (2026-11-17): slice 1 is complete locally. `openai_hosted` sessions
+accept `container_size`, `packages`, `env`, and `setup_commands` (other fields
+return 400). The service records the environment with a per-environment
+connect token (SHA-256 kept), starts provisioning after the initial input
+queues, reports `pending`, `ready`, and `connected`, fails waiting input when
+provisioning fails (later input returns 409), and destroys the sandbox when
+the session is deleted. Providers implement `managed::EnvironmentProvider`;
+`SidecarProvider` speaks JSON lines to a program such as
+`deploy/modal/provider.py` (`--environment-provider`), and
+`serve.py --managed-environments` wires it on Modal. Evidence:
+`environments::managed_environments_are_provisioned_connected_and_destroyed`
+(in-process provider), `managed::tests::*` (parsing and the sidecar protocol);
+full crate 110/110 twice on Linux. Open: a real Modal run, which needs a Modal
+token secret for the service (Sandboxes carry no Modal credentials; running the
+service as a Modal Function would avoid the secret).
+
 ## G16 — Scale and operate as a managed service (planned 2026-11-17)
 
 **Outcome:** the service runs across several nodes, survives the loss of any
