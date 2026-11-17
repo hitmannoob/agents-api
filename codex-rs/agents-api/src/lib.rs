@@ -80,6 +80,9 @@ struct Backend {
     environments: Arc<Mutex<HashSet<String>>>,
 }
 
+/// How long a request to the worker may take before the API gives up on it.
+const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 struct State {
     store: store::Store,
     backend: Mutex<Option<Backend>>,
@@ -147,9 +150,19 @@ impl State {
         // disconnection (503) rather than an internal error, so a request that
         // races a worker crash sees the documented recovery response. A
         // server-side JSON-RPC error is a genuine upstream failure (502).
-        handle
-            .request(request)
+        // A worker that never answers (a crashed request handler, a stuck
+        // thread) must not hold the caller's request forever.
+        tokio::time::timeout(RPC_TIMEOUT, handle.request(request))
             .await
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!(
+                        "app-server did not answer {method} within {} seconds",
+                        RPC_TIMEOUT.as_secs()
+                    ),
+                )
+            })?
             .map_err(|_| disconnected_error())?
             .map_err(|error| ApiError(StatusCode::BAD_GATEWAY, error.message))
     }

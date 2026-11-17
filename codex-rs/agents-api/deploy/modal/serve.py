@@ -92,10 +92,12 @@ fi
 (cd "${binding_dir}" && tr -d '\\r' < "${checksums_name}" | sha256sum --check -)
 export RUSTY_V8_ARCHIVE="${binding_dir}/${archive_name}" RUSTY_V8_SRC_BINDING_PATH="${binding_dir}/${binding_name}"
 cd codex-rs
-cargo build -p codex-agents-api -p codex-app-server -p codex-cli -p codex-code-mode-host \
+# Release builds: faster, and debug-only assertions (some panic where release
+# logs and carries on) stay out of the deployed service.
+cargo build --release -p codex-agents-api -p codex-app-server -p codex-cli -p codex-code-mode-host \
   --bin codex-agents-api --bin codex-app-server --bin codex --bin codex-code-mode-host
 mkdir -p /opt/agents-api/bin
-cp target/debug/codex-agents-api target/debug/codex-app-server target/debug/codex target/debug/codex-code-mode-host /opt/agents-api/bin/
+cp target/release/codex-agents-api target/release/codex-app-server target/release/codex target/release/codex-code-mode-host /opt/agents-api/bin/
 cd / && rm -rf /build /src/codex.tar /usr/local/cargo/registry
 """
 
