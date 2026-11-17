@@ -150,8 +150,8 @@ done
 managed=()
 if [ -s /data/provider.py ]; then
   python3 -m pip install -q modal
-  managed=(--environment-provider python3 --environment-provider-arg /data/provider.py
-    --environment-provider-arg --image-id --environment-provider-arg "$(cat /data/image-id)")
+  managed=(--environment-provider python3 --environment-provider-arg=/data/provider.py
+    --environment-provider-arg=--image-id "--environment-provider-arg=$(cat /data/image-id)")
 fi
 /opt/agents-api/bin/codex-agents-api --listen 127.0.0.1:4501 --data-directory /data \
   --codex-home /data/codex-home --app-server-bin /opt/agents-api/bin/codex-app-server \

@@ -77,7 +77,11 @@ struct Args {
     #[arg(long, requires = "environment_key")]
     environment_provider: Option<String>,
     /// An argument for the environment provider. Repeat for each argument.
-    #[arg(long = "environment-provider-arg", requires = "environment_provider")]
+    #[arg(
+        long = "environment-provider-arg",
+        requires = "environment_provider",
+        allow_hyphen_values = true
+    )]
     environment_provider_args: Vec<String>,
     /// Seconds that input waits for a disconnected self-hosted executor before
     /// it is dropped and the session fails.

@@ -2628,9 +2628,15 @@ the session is deleted. Providers implement `managed::EnvironmentProvider`;
 `serve.py --managed-environments` wires it on Modal. Evidence:
 `environments::managed_environments_are_provisioned_connected_and_destroyed`
 (in-process provider), `managed::tests::*` (parsing and the sidecar protocol);
-full crate 110/110 twice on Linux. Open: a real Modal run, which needs a Modal
-token secret for the service (Sandboxes carry no Modal credentials; running the
-service as a Modal Function would avoid the secret).
+full crate 110/110 twice on Linux. Real Modal run (2026-11-17): the service
+started by `serve.py --managed-environments` (image `im-VxZ763OKMaPLyl5ITGbTpl`,
+worker `openai/gpt-5.4-mini` via OpenRouter) provisioned a `small` Sandbox with
+`pytest` from `packages`, an `env` value, and three `setup_commands` that wrote
+a failing project; `ready` came at 12.7 s, `connected` at 13.6 s, and the agent
+fixed the bug with `apply_patch` and ran `python -m pytest -q` (2 passed) by
+23.7 s. Deleting the session destroyed the Sandbox. The service needs a Modal
+token secret (`agents-api-modal`), since Sandboxes carry no Modal credentials;
+running the service as a Modal Function would avoid it.
 
 ## G16 — Scale and operate as a managed service (planned 2026-11-17)
 
