@@ -326,9 +326,13 @@ pub(crate) async fn cleanup(state: &State) -> anyhow::Result<()> {
                 if error.0 == StatusCode::BAD_GATEWAY
                     && (error.1.starts_with("thread not found")
                         || error.1.starts_with("no rollout found for thread id")) => {}
-            // The worker did not answer; the next connection retries without
-            // counting this.
-            Err(error) if error.0 != StatusCode::BAD_GATEWAY => return Ok(()),
+            // The worker did not answer, or is shutting down; the next
+            // connection retries without counting this.
+            Err(error)
+                if error.0 != StatusCode::BAD_GATEWAY || error.1.contains("shutting down") =>
+            {
+                return Ok(());
+            }
             Err(error) => {
                 let attempts = attempts + 1;
                 if attempts >= CLEANUP_ATTEMPTS {
