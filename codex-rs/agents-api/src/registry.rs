@@ -9,7 +9,7 @@
 //!   key was authorized by `connect` before completing a Noise handshake.
 //!
 //! Executors authenticate with an environment key: a project API key holding
-//! `api.environments.connect`, valid only for its project's environments, or
+//! `api.agents.environments.connect`, valid only for its project's environments, or
 //! the operator's environment key, valid for every environment. The harness
 //! authenticates with a token only the worker holds. Traffic itself flows
 //! through [`crate::rendezvous`], encrypted end to end.
@@ -252,7 +252,7 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 /// Check the executor's environment key and that the environment belongs to a
 /// session the key may reach. The operator's key reaches every environment; a
-/// project key needs `api.environments.connect` and reaches only its own
+/// project key needs `api.agents.environments.connect` and reaches only its own
 /// project's environments, another project's reading as not found. The
 /// operator-key comparison runs in constant time.
 async fn executor_allowed(
@@ -265,7 +265,7 @@ async fn executor_allowed(
 
 /// Whether `presented` (the environment key or a project API key) may act as
 /// this environment's executor right now: the key is current, holds
-/// `api.environments.connect`, and belongs to the environment's project.
+/// `api.agents.environments.connect`, and belongs to the environment's project.
 pub(crate) async fn authorize_executor(
     state: &State,
     presented: &str,
@@ -308,7 +308,7 @@ pub(crate) async fn authorize_executor(
                 "invalid environment key",
             )
         })?;
-    if let Some(permission) = principal.missing(&["api.environments.connect"]) {
+    if let Some(permission) = principal.missing(&["api.agents.environments.connect"]) {
         return Err(error(
             StatusCode::FORBIDDEN,
             "permission_denied",

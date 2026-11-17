@@ -218,6 +218,7 @@ async fn migrations_record_a_ledger_and_adopt_a_legacy_database() -> anyhow::Res
         "DROP TABLE webhook_endpoints",
         "DROP TABLE webhook_deliveries",
         "DROP TABLE generations",
+        "DROP TABLE response_calls",
         "DROP TABLE environments",
         "DROP TABLE files",
         "DROP TABLE skills",

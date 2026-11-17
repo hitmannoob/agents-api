@@ -111,7 +111,7 @@ pub(crate) async fn session(state: &State, id: &str) -> Result<Value, ApiError> 
     Ok(decorate(&state.store.0, id, data).await?)
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
@@ -194,6 +194,37 @@ pub(crate) async fn running_turns(
         .bind(id).fetch_all(&state.store.0).await.map_err(anyhow::Error::from).map_err(Into::into)
 }
 
+/// A Codex file change as the `apply_patch` command that made it. The output
+/// lists each file as `apply_patch` reports it (A added, D deleted, M
+/// modified), followed by its diff.
+fn file_change(item: &Value, done: bool) -> Value {
+    let output = item["changes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|change| {
+            let path = change["path"].as_str().unwrap_or_default();
+            let kind = &change["kind"];
+            let line = match kind["type"].as_str() {
+                Some("add") => format!("A {path}"),
+                Some("delete") => format!("D {path}"),
+                _ => match kind["move_path"].as_str() {
+                    Some(to) => format!("M {path} -> {to}"),
+                    None => format!("M {path}"),
+                },
+            };
+            match change["diff"].as_str().filter(|diff| !diff.is_empty()) {
+                Some(diff) => format!("{line}\n{}", diff.trim_end()),
+                None => line,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let exit_code = done.then(|| i64::from(item["status"] != "completed"));
+    json!({"type":"command_execution","command":"apply_patch","cwd":null,"duration_ms":null,
+        "exit_code":exit_code,"output":output})
+}
+
 /// A Codex web search action in the public shape, which names action types
 /// in snake_case and keeps only their documented fields.
 fn web_search_action(action: &Value) -> Value {
@@ -265,7 +296,7 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
                 .bind(&id).bind(turn_id).fetch_optional(&mut *tx).await.map_err(anyhow::Error::from)?;
             let turn = json!({"id":turn_id,"object":"agent.session.turn","session_id":id,"agent_id":owner.agent_id,"created_at":earlier.map_or_else(|| json!(source["startedAt"].as_u64().unwrap_or_else(crate::contract::now)), |created| json!(created)),
                 "started_at":source["startedAt"],"completed_at":source["completedAt"],"status":status,"usage":crate::usage::usage(&mut tx, &id, Some(turn_id)).await?,"subagent_id":subagent,
-                "error":if status == "failed" {crate::turns::turn_error(&source["error"])} else {Value::Null}});
+                "error":if status == "failed" {crate::turns::turn_error(&source["error"])} else {Value::Null},"prompt_cache_options":null});
             if status != "in_progress" {
                 events.extend(close_items(&mut tx, &id, turn_id).await?);
                 state.streams.end_turn(&id, turn_id);
@@ -326,6 +357,22 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
             let Some(turn_id) = params["turnId"].as_str() else {
                 return Ok(());
             };
+            // A tool call the model just made belongs to the response in
+            // progress: the one after every response already reported.
+            let raw = &params["item"];
+            let call_id = match raw["type"].as_str() {
+                Some(
+                    "function_call" | "custom_tool_call" | "local_shell_call" | "tool_search_call",
+                ) => raw["call_id"].as_str(),
+                Some("web_search_call") => raw["id"].as_str(),
+                _ => None,
+            };
+            if let Some(call_id) = call_id {
+                sqlx::query("INSERT OR IGNORE INTO response_calls (session_id, turn_id, call_id, response) VALUES (?1, ?2, ?3, (SELECT count(*) FROM generations WHERE session_id = ?1 AND turn_id = ?2))")
+                    .bind(&id).bind(turn_id).bind(call_id).execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+                tx.commit().await.map_err(anyhow::Error::from)?;
+                return Ok(());
+            }
             let Some(mut public) =
                 crate::subagents::agent_message(&mut tx, &owner, &params["item"]).await?
             else {
@@ -406,6 +453,9 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
                     json!({"type":"command_execution","command":item["command"],"cwd":item["cwd"],"duration_ms":item["durationMs"],
                         "exit_code":item["exitCode"],"output":item["aggregatedOutput"]})
                 }
+                // The pinned contract has no file-change item, and the model
+                // asked for the edit as an `apply_patch` command.
+                Some("fileChange") => file_change(item, done),
                 Some("webSearch") => {
                     json!({"type":"web_search_call","action":web_search_action(&item["action"])})
                 }
@@ -439,7 +489,12 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
             }
             // A command that could not run, or was declined, failed; one still
             // running when its item closed did not finish.
-            if done && item["type"] == "commandExecution" {
+            if done
+                && matches!(
+                    item["type"].as_str(),
+                    Some("commandExecution" | "fileChange")
+                )
+            {
                 public["status"] = json!(match item["status"].as_str() {
                     Some("completed") => "completed",
                     Some("inProgress") => "incomplete",

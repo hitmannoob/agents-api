@@ -1,4 +1,5 @@
 use super::*;
+use app_test_support::create_apply_patch_sse_response;
 use app_test_support::create_command_execution_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
@@ -348,8 +349,9 @@ async fn self_hosted_input_waits_for_the_executor_and_runs_in_its_workspace() ->
             vec!["/bin/sh".to_owned(), "-c".to_owned(), "pwd > where.txt; echo written".to_owned()]
         };
         let provider = create_mock_responses_server_sequence_unchecked(vec![
-            create_command_execution_sse_response(command, /*workdir*/ None, Some(/*timeout_ms*/ 10_000), "where-call")?,
-            create_final_assistant_message_sse_response("done")?,
+            with_usage(create_command_execution_sse_response(command, /*workdir*/ None, Some(/*timeout_ms*/ 10_000), "where-call")?),
+            with_usage(create_apply_patch_sse_response("*** Begin Patch\n*** Add File: notes.txt\n+patched\n*** End Patch", "patch-call")?),
+            with_usage(create_final_assistant_message_sse_response("done")?),
         ]).await;
         MockResponsesConfig::new(&provider.uri()).with_root_config("features.plugins = false").write(home.path())?;
         let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
@@ -423,9 +425,28 @@ async fn self_hosted_input_waits_for_the_executor_and_runs_in_its_workspace() ->
             (&command["status"], &command["exit_code"], &command["cwd"], command["output"].as_str().map(str::trim)),
             (&json!("completed"), &json!(0), &json!(workspace_directory), Some("written"))
         );
+        // The pinned contract has no file-change item, so an edit is the
+        // apply_patch command that made it, listing each file and its diff.
+        assert_eq!(std::fs::read_to_string(workspace_path.join("notes.txt"))?, "patched\n");
+        let patch = command_item(&client, &url, "patch-call").await?;
+        let listed = patch["output"].as_str().and_then(|output| output.lines().next()).unwrap_or_default().to_owned();
+        assert_eq!((&patch["command"], &patch["status"], &patch["exit_code"], listed.starts_with("A ") && listed.ends_with("notes.txt")),
+            (&json!("apply_patch"), &json!("completed"), &json!(0), true), "{patch}");
         let turns = request(&client, reqwest::Method::GET, &format!("{url}/turns"), Value::Null).await?;
         assert_eq!((turns["data"].as_array().map(Vec::len), &turns["data"][0]["id"], &turns["data"][0]["status"], &command["turn_id"]),
             (Some(1), &queued_id, &json!("completed"), &queued_id));
+        // Each model response is its own span, holding the calls it made.
+        let traces = request(&client, reqwest::Method::GET, &format!("{url}/traces"), Value::Null).await?;
+        let spans = super::traces::spans(&traces["data"][0]);
+        let names = spans.iter().map(|span| span["name"].as_str().unwrap_or_default().to_owned()).collect::<Vec<_>>();
+        assert_eq!(names, ["invoke_agent", "chat mock-model", "chat mock-model", "chat mock-model",
+            "execute_tool command_execution", "execute_tool command_execution"], "{traces}");
+        let outputs = spans[1..4].iter().map(|span| serde_json::from_str::<Value>(super::traces::attribute(span, "gen_ai.output.messages").as_str().unwrap_or("null")))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(outputs.iter().map(|messages| messages[0]["parts"][0]["type"].clone()).collect::<Vec<_>>(),
+            vec![json!("tool_call"), json!("tool_call"), json!("text")]);
+        let completeness: Value = serde_json::from_str(super::traces::attribute(&spans[0], "openai.managed_agents.trace.completeness").as_str().context("completeness")?)?;
+        assert_eq!(completeness, json!({"status":"complete","missing_outputs":[],"ordering_issues":[]}));
         assert!(turns["data"][0]["started_at"].is_u64(), "{turns}");
 
         // Losing the executor is reported; later input waits again and can be
@@ -460,6 +481,15 @@ async fn self_hosted_input_waits_for_the_executor_and_runs_in_its_workspace() ->
         Ok::<_, anyhow::Error>(())
     })
     .await?
+}
+
+/// A mock response that reports usage, so the service records it as a model
+/// response of its own; the mocks otherwise report none.
+fn with_usage(response: String) -> String {
+    response
+        .replace("\"input_tokens\":0", "\"input_tokens\":10")
+        .replace("\"output_tokens\":0", "\"output_tokens\":2")
+        .replace("\"total_tokens\":0", "\"total_tokens\":12")
 }
 
 fn shell(script: &str) -> Vec<String> {
@@ -874,7 +904,7 @@ async fn official_sdk_self_hosted_environment() -> anyhow::Result<()> {
 }
 
 /// An executor may present a project API key holding
-/// `api.environments.connect`, which reaches only its own project's
+/// `api.agents.environments.connect`, which reaches only its own project's
 /// environments; the operator's environment key reaches every environment.
 #[tokio::test]
 async fn project_environment_keys_connect_only_their_projects_environments() -> anyhow::Result<()> {
@@ -898,10 +928,13 @@ async fn project_environment_keys_connect_only_their_projects_environments() -> 
             let project = project.to_owned();
             async move { anyhow::Ok(admin.create_key(&project, "", &permissions).await?.value) }
         };
+        // The permission's earlier local name is still accepted, and stored
+        // under the official one.
         let created = admin.create_key(codex_agents_api::projects::DEFAULT_PROJECT, "", &["api.environments.connect".to_owned()]).await?;
+        assert_eq!(created.key.permissions, vec!["api.agents.environments.connect".to_owned()]);
         let (connect, connect_id) = (created.value, created.key.id);
         let agents_only = key(codex_agents_api::projects::DEFAULT_PROJECT, &["api.agents.read", "api.agents.write"]).await?;
-        let other_connect = key(&other.id, &["api.environments.connect"]).await?;
+        let other_connect = key(&other.id, &["api.agents.environments.connect"]).await?;
         let client = reqwest::Client::new();
         let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), json!({"agent":{"model":"mock-model"},
             "environment":{"type":"self_hosted","workspace_directory":workspace_directory}})).await?;

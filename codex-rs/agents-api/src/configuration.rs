@@ -47,7 +47,10 @@ pub(crate) fn agent(agent: &Agent) -> Value {
         "tools":config.tools.iter().map(|tool| match tool {
             Tool::Function(t) => json!({"type":"function","name":t.name,"description":t.description,"parameters":t.parameters,"defer_loading":t.defer_loading}),
             Tool::Capability(t) => json!(t),
-        }).collect::<Vec<_>>()})
+        }).collect::<Vec<_>>(),
+        // Settings the official service reports and this one fixes: Codex
+        // compacts inline, and adds no time awareness.
+        "compaction":{"async":false},"experimental":{"time_awareness":false}})
 }
 
 /// Parse replacement metadata: null clears it, and a supplied map replaces it.

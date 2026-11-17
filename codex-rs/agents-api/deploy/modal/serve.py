@@ -28,10 +28,15 @@ import urllib.request
 import modal
 
 APP = "agents-api-eval"
-PROVIDER_SECRET = "agents-api-openrouter"
 
-CONFIG = """model = "openai/gpt-5-mini"
-model_provider = "openrouter"
+# The Modal secret holding each provider's key, and its default model.
+PROVIDERS = {
+    "openrouter": ("agents-api-openrouter", "openai/gpt-5-mini"),
+    "openai": ("agents-api-openai", "gpt-5-mini"),
+}
+
+CONFIG = """model = "{model}"
+model_provider = "{provider}"
 approval_policy = "never"
 sandbox_mode = "read-only"
 
@@ -42,6 +47,12 @@ plugins = false
 name = "openrouter"
 base_url = "https://openrouter.ai/api/v1"
 env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+
+[model_providers.openai-api]
+name = "openai-api"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
 wire_api = "responses"
 """
 
@@ -184,8 +195,12 @@ def image(source):
     )
 
 
-def start(state, hours, auto_compact_tokens=None):
-    config = CONFIG
+def start(state, hours, auto_compact_tokens=None, provider="openrouter", model=None):
+    secret, default_model = PROVIDERS[provider]
+    config = CONFIG.format(
+        model=model or default_model,
+        provider="openai-api" if provider == "openai" else provider,
+    )
     if auto_compact_tokens is not None:
         config = config.replace(
             "\n[features]",
@@ -206,7 +221,7 @@ def start(state, hours, auto_compact_tokens=None):
         app=modal.App.lookup(APP, create_if_missing=True),
         image=image(archive(state)),
         secrets=[
-            modal.Secret.from_name(PROVIDER_SECRET),
+            modal.Secret.from_name(secret),
             modal.Secret.from_dict(
                 {
                     "CODEX_AGENTS_API_TOKEN": values["token"],
@@ -277,6 +292,13 @@ def main():
     parser.add_argument(
         "--auto-compact-tokens", type=int, help="worker automatic compaction token limit"
     )
+    parser.add_argument(
+        "--provider",
+        choices=sorted(PROVIDERS),
+        default="openrouter",
+        help="model provider (default openrouter)",
+    )
+    parser.add_argument("--model", help="worker model (default: the provider's)")
     args = parser.parse_args()
     os.makedirs(args.state, exist_ok=True)
     if args.command == "build":
@@ -286,7 +308,7 @@ def main():
             )
         print("image built")
     elif args.command == "start":
-        start(args.state, args.hours, args.auto_compact_tokens)
+        start(args.state, args.hours, args.auto_compact_tokens, args.provider, args.model)
     elif args.command == "logs":
         process = sandbox_for(args.state).exec(
             "tail", "-n", "60", "/data/logs/agents-api.log"

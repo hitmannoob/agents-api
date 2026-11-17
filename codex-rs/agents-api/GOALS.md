@@ -106,7 +106,7 @@ Current boundaries:
   out of scope by decision (2026-10-06).
 - Resources are project-scoped and API keys carry permissions (G13); projects
   and keys are managed by CLI, and executors authenticate with a project key
-  holding `api.environments.connect` (or the operator's environment key).
+  holding `api.agents.environments.connect` (or the operator's environment key).
 - Event streams are live-only. Recovery reads saved state/history; it must not
   promise replay of missed events.
 - Decision (2026-10-13): lost function waiters stay unresolved/unavailable.
@@ -2129,7 +2129,7 @@ Checklist:
   sweeps the 13 inventoried operations that name them. Environment IDs are
   always server-generated, so they cannot collide across projects.
   Follow-up (done 2026-10-12): executors may present a project key holding
-  `api.environments.connect`, which reaches only that project's
+  `api.agents.environments.connect`, which reaches only that project's
   environments (another project's read as `environment_not_found`, a
   missing permission is 403). The operator's environment key still reaches
   every environment. Covered by

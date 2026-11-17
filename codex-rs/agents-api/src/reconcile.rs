@@ -65,11 +65,14 @@ async fn reconcile_session(state: &State, session_id: &str) -> anyhow::Result<()
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.1))?;
-    let authoritative: HashMap<&str, &Value> = response["data"]
+    // History names turns by Codex's IDs; records by public ones, which are
+    // bare for turns recorded before public IDs had a prefix.
+    let authoritative: HashMap<String, &Value> = response["data"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|turn| turn["id"].as_str().map(|id| (id, turn)))
+        .flat_map(|(id, turn)| [(state.turn_aliases.public(id), turn), (id.to_owned(), turn)])
         .collect();
 
     // Correct provisionally-failed turns: a turn the rollout records completed

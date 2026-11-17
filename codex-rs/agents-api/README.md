@@ -144,7 +144,7 @@ stored. Permissions are `api.agents.read`, `api.agents.write`,
 `api.responses.write` (also required to create sessions and post session
 events), `api.vaults.read`, `api.vaults.write`, `api.files.read`,
 `api.files.write`, `api.webhooks.read`, `api.webhooks.write`,
-`api.skills.read`, `api.skills.write`, and `api.environments.connect` (for
+`api.skills.read`, `api.skills.write`, and `api.agents.environments.connect` (for
 executor keys; see below). The guides name no strings for webhooks, skills, or
 connecting environments, so those are local choices. An unknown
 or revoked key gets 401, and a key missing an operation's permission gets 403.
@@ -258,6 +258,13 @@ Lists accept `after`, `order=asc|desc`, and `limit=1..100`; item lists also acce
 `turn_id`. Records persist before their events are emitted. Disconnecting an HTTP
 stream does not cancel work. Streams do not replay; reconnect, read current state
 and history, and merge buffered updates by item ID. A lagged stream closes.
+
+IDs carry the official prefixes: `agent_`, `sess_`, and `turn_` (Codex's turn
+ID behind the prefix); agents, sessions, and turns created before 2026-11-17
+keep their bare UUIDs. Like the official service, agents report
+`compaction: {async: false}` and `experimental: {time_awareness: false}`,
+sessions `review: "none"`, and turns `prompt_cache_options: null`; these are
+fixed here and not accepted as input.
 
 Assistant messages stream as `item.added`, `content_part.added`, one or more
 `output_text.delta`, `output_text.done`, `content_part.done`, and `item.done`.
@@ -416,8 +423,9 @@ root agent can spawn subagents, each a Codex child thread, up to
 - **Messages between agents:** each task or message an agent sends another,
   and each subagent result, is an `agent_message` item in the recipient's
   history, naming its sender and recipient by ID. Codex reports these only as
-  raw Responses items, so threads of agents with `multi_agent` opt into
-  Codex's experimental raw events. Plaintext loses Codex's `Message Type …
+  raw Responses items, so every thread opts into Codex's experimental raw
+  events (traces also use them to tell which response made each tool call).
+  Plaintext loses Codex's `Message Type …
   Payload:` envelope and becomes `output_text`; encrypted task text passes
   through as `encrypted_content`. A result delivered while its recipient is
   idle is recorded in the recipient's next turn. Like user messages, these are
@@ -488,9 +496,9 @@ They are available only when the operator supplies an environment key of at
 least 32 bytes, different from the API token, with `--environment-key` (or
 `CODEX_AGENTS_API_ENVIRONMENT_KEY`); otherwise such sessions return 501. That
 operator key reaches every environment. For callers, create a project key
-holding only `api.environments.connect`, as the guide's environment key holds
+holding only `api.agents.environments.connect`, as the guide's environment key holds
 only permission to connect environments:
-`codex-agents-api keys create --data-directory DATA --project proj_... --name executor --permission api.environments.connect`.
+`codex-agents-api keys create --data-directory DATA --project proj_... --name executor --permission api.agents.environments.connect`.
 It connects only that project's environments (another project's read as
 `environment_not_found`) and grants no API operation. Both kinds of key reach
 only the registry endpoints under `/registry/`.
@@ -529,7 +537,10 @@ only the registry endpoints under `/registry/`.
 - **Execution:** commands run unsandboxed in the workspace directory; the
   caller's compute is the isolation boundary, and code there can read the
   environment key. Each command is a `command_execution` item with its exit
-  code and output. If the executor goes away mid-command, Codex tries for 25
+  code and output. The pinned contract has no file-change item, so a file
+  edit is a `command_execution` item whose `command` is `apply_patch` (as the
+  model asked for it) and whose `output` lists each file (`A`, `D`, or `M`
+  path) followed by its diff; `exit_code` is 1 when the patch failed. If the executor goes away mid-command, Codex tries for 25
   seconds to resume, then reports the command failed to the model; it is never
   re-run. A new executor, or a replaced worker, continues the session in the
   same workspace.
@@ -601,26 +612,44 @@ secrets directory.
 OpenTelemetry (OTLP JSON) trace, paged with `limit` (default 20, at most 100),
 `order` (default `desc`), and `after`. The pinned SDK has no method for it, so
 call it over HTTP. Each page item is
-`{id: "trace_<turn>", object: "agent.session.trace", session_id, turn_id, created_at, otlp: {resourceSpans}}`,
+`{id: <turn ID>, object: "agent.session.trace", session_id, created_at, otlp: {resourceSpans}}`,
 so `jq '{resourceSpans: [.data[].otlp.resourceSpans[]]}'` makes one payload
-for an OTLP/HTTP collector, as the tracing guide shows.
-- **Spans:** the root agent's span holds the turn's model responses (`chat`)
-  and tool calls (`execute_tool <name>`). Each subagent that ran during the
-  turn gets its own agent span beneath the root, holding its own work.
-  Attributes use the OpenTelemetry GenAI names (`gen_ai.*`), with
-  `openai.agents.*` for the agent type, status, and tool call and result.
-  Each `chat` span names its model in `gen_ai.response.model`: the model the
-  turn requested, or the one the provider rerouted it to. OpenAI publishes no
-  reference trace schema, so this format is the service's contract.
-  String attributes are cut at 32 KiB.
-- **Timing:** times are when the service observed each turn and item.
-  Responses are split by item order: a response starts when its input is ready
-  and ends at its last output. Usage is attached per response when every
-  response in the turn reported it. Turns recorded before this version export
-  with turn-level timing only.
-- **Not recorded:** the model (a session update can change it between turns)
-  and subagent instructions. Span IDs are derived from the records, so a
-  repeated export returns the same trace.
+for an OTLP/HTTP collector, as the tracing guide shows. `after` takes a turn
+ID; `trace_<turn>` cursors from earlier versions still work. Traces are
+available as soon as a turn ends; the official service exports them later.
+- **Format:** follows the traces the official service exported on
+  2026-11-17: an `invoke_agent` span per agent, a `chat <model>` span (kind
+  CLIENT) per model response, and an `execute_tool <name>` span per tool call,
+  with OpenTelemetry GenAI attributes. Messages use the GenAI
+  `{role, parts}` shape (`text`, `tool_call`, `tool_call_response`,
+  `reasoning`, and image `uri` parts). Every span carries
+  `gen_ai.conversation.id`, `openai.managed_agents.session.id`, and
+  `openai.managed_agents.turn.id`.
+- **Agent spans:** the turn's input and final answer, the requested model,
+  and usage (`gen_ai.usage.input_tokens`, `cache_read.input_tokens`,
+  `output_tokens`, `reasoning.output_tokens`). The root span adds
+  `openai.managed_agents.usage.total.*`, subagents included, and
+  `openai.managed_agents.trace.completeness`: `complete`, or `incomplete`
+  with the tool calls that never reported an outcome (`missing_outputs`) and
+  turns whose responses had to be inferred (`ordering_issues`).
+  `openai.agents.agent_type` and `openai.agents.status` are this service's.
+- **Response spans:** one per model request Codex reported usage for, with
+  that request's usage and `gen_ai.response.model` (the model the turn
+  requested, or the one the provider rerouted it to). A tool call belongs to
+  the response that issued it; other items to the first response that
+  finished after they started. A response that never finished (a cancelled
+  turn) is a final span without usage.
+- **Tool spans:** `gen_ai.tool.type` is `function` for the agent's functions
+  and `extension` otherwise, with `gen_ai.tool.call.arguments` and, on
+  success, `gen_ai.tool.call.result`. A failed call has an error status,
+  `error.type`, and `openai.managed_agents.error.data`.
+- **Status:** a span that ended well leaves its status unset, as the official
+  service does; a failed one has status 2 and a message.
+- **Earlier turns:** responses recorded before 2026-11-17 have no timing; their
+  spans are inferred from item order, usage is attached only when the counts
+  match, and the trace says it is incomplete. String attributes are cut at
+  32 KiB. Span IDs are derived from the records, so a repeated export returns
+  the same trace.
 
 Webhook endpoints are managed with the SDK's `client.webhooks` API
 (`/v1/webhook_endpoints`, plus `/v1/webhook_event_types`). They need the vault

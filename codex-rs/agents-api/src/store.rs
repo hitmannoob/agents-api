@@ -63,7 +63,7 @@ impl Store {
     ) -> anyhow::Result<Agent> {
         let now = crate::contract::now();
         let agent = Agent {
-            id: Uuid::new_v4().to_string(),
+            id: format!("agent_{}", Uuid::new_v4().simple()),
             config,
             created_at: now,
             updated_at: now,
@@ -193,7 +193,7 @@ impl Store {
         params: SessionCreateParams,
     ) -> anyhow::Result<Session> {
         let session = Session {
-            id: Uuid::new_v4().to_string(),
+            id: format!("sess_{}", Uuid::new_v4().simple()),
             agent,
             environment: params.environment,
             thread_id: None,

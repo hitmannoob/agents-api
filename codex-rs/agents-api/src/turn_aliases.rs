@@ -1,16 +1,28 @@
-//! Public IDs for turns that were queued before Codex started them.
+//! Public turn IDs.
 //!
-//! A turn whose input waits for a self-hosted executor is reported as
-//! `queued` under an ID the service picks, but Codex picks its own ID when it
-//! starts the turn. The first turn Codex starts on the session's thread after
-//! the wait takes the queued ID: every notification and tool call request is
-//! translated as it arrives, so records, streams, webhooks, traces, and usage
-//! only ever see public IDs, and requests that name a turn to Codex are
-//! translated back. Every other turn keeps the ID Codex gave it.
+//! A turn's public ID is Codex's with a `turn_` prefix, like the official
+//! service's turn IDs. A turn whose input waits for a self-hosted executor is
+//! reported as `queued` under an ID the service picks, but Codex picks its own
+//! ID when it starts the turn. The first turn Codex starts on the session's
+//! thread after the wait takes the queued ID. Every notification and tool call
+//! request is translated as it arrives, so records, streams, webhooks, traces,
+//! and usage only ever see public IDs, and requests that name a turn to Codex
+//! are translated back. Turns recorded before the prefix keep their bare IDs.
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+const PREFIX: &str = "turn_";
+
+/// Codex's turn ID as a public one.
+pub(crate) fn prefixed(codex_id: &str) -> String {
+    if codex_id.starts_with(PREFIX) {
+        codex_id.to_owned()
+    } else {
+        format!("{PREFIX}{codex_id}")
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct TurnAliases {
@@ -81,15 +93,21 @@ impl TurnAliases {
         crate::lock(&self.public)
             .get(codex_id)
             .cloned()
-            .unwrap_or_else(|| codex_id.to_owned())
+            .unwrap_or_else(|| prefixed(codex_id))
     }
 
-    /// The ID Codex knows a public turn by.
+    /// The ID Codex knows a public turn by. A bare ID is a turn recorded
+    /// before public IDs had a prefix, which Codex knows by the same ID.
     pub(crate) fn codex(&self, public_id: &str) -> String {
         crate::lock(&self.codex)
             .get(public_id)
             .cloned()
-            .unwrap_or_else(|| public_id.to_owned())
+            .unwrap_or_else(|| {
+                public_id
+                    .strip_prefix(PREFIX)
+                    .unwrap_or(public_id)
+                    .to_owned()
+            })
     }
 
     /// Translate the turn IDs in a Codex notification to public ones,

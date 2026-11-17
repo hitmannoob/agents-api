@@ -615,9 +615,9 @@ pub(crate) async fn start_turn(
                     "thread/resume",
                     json!({"threadId": thread_id, "excludeTurns": true, "config": config,
                         "approvalPolicy": "never", "sandbox": sandbox,
-                        // As at thread/start, so messages between agents keep
-                        // arriving after a resume.
-                        "experimentalRawEvents": session.agent.config.multi_agent.as_ref().is_some_and(|settings| settings.enabled),
+                        // As at thread/start, so raw items keep arriving
+                        // after a resume.
+                        "experimentalRawEvents": true,
                         "serviceTier": null,
                         "model": session.agent.config.model, "developerInstructions": session.agent.config.instructions.as_deref().unwrap_or_default()}),
                 )
@@ -656,8 +656,10 @@ pub(crate) async fn start_turn(
                     "dynamicTools": crate::capabilities::dynamic_tools(state, &session.agent.config).await?,
                     "approvalPolicy": "never", "sandbox": sandbox, "ephemeral": false,
                     // Messages between agents reach the service only as raw
-                    // Responses items; subagent threads inherit the opt-in.
-                    "experimentalRawEvents": session.agent.config.multi_agent.as_ref().is_some_and(|settings| settings.enabled),
+                    // Responses items, and raw tool calls tell traces which
+                    // response made each call; subagent threads inherit the
+                    // opt-in.
+                    "experimentalRawEvents": true,
                 }),
             )
             .await?;
@@ -790,7 +792,14 @@ async fn turns(
             json!({"data": [], "nextCursor": null, "backwardsCursor": null}),
         ));
     };
-    Ok(Json(state.rpc("thread/turns/list", json!({"threadId": thread_id, "cursor": page.cursor, "limit": page.limit.unwrap_or(/*default*/ 20).clamp(/*min*/ 1, /*max*/ 100), "itemsView": "summary"})).await?))
+    let mut turns = state.rpc("thread/turns/list", json!({"threadId": thread_id, "cursor": page.cursor, "limit": page.limit.unwrap_or(/*default*/ 20).clamp(/*min*/ 1, /*max*/ 100), "itemsView": "summary"})).await?;
+    // Codex names turns by its own IDs; every other route uses public ones.
+    for turn in turns["data"].as_array_mut().into_iter().flatten() {
+        if let Some(codex_id) = turn["id"].as_str() {
+            turn["id"] = json!(state.turn_aliases.public(codex_id));
+        }
+    }
+    Ok(Json(turns))
 }
 
 pub(crate) async fn cancel(

@@ -26,10 +26,10 @@ use uuid::Uuid;
 pub const DEFAULT_PROJECT: &str = "proj_default";
 
 /// Every permission a key can hold. Agents, Responses, Vaults, and Files names
-/// follow the official guides. The guides name no string for webhooks, skills,
-/// or the environment key's "connect environments" permission, so
-/// `api.webhooks.*`, `api.skills.*`, and `api.environments.connect` are local
-/// choices.
+/// follow the official guides, and `api.agents.environments.connect` is the
+/// name the official service reports when an executor's key lacks it. The
+/// guides name no string for webhooks or skills, so `api.webhooks.*` and
+/// `api.skills.*` are local choices.
 pub const PERMISSIONS: [&str; 12] = [
     "api.agents.read",
     "api.agents.write",
@@ -42,8 +42,12 @@ pub const PERMISSIONS: [&str; 12] = [
     "api.webhooks.write",
     "api.skills.read",
     "api.skills.write",
-    "api.environments.connect",
+    "api.agents.environments.connect",
 ];
+
+/// The connect permission's earlier local name, still accepted when creating
+/// a key. Stored keys were migrated to the official name.
+const LEGACY_CONNECT: &str = "api.environments.connect";
 
 /// The authenticated caller of one request, stored in the request extensions.
 #[derive(Clone, Debug)]
@@ -383,14 +387,20 @@ impl Admin {
             !permissions.is_empty(),
             "a key needs at least one permission"
         );
-        for permission in permissions {
+        let mut permissions: Vec<String> = permissions
+            .iter()
+            .map(|permission| match permission.as_str() {
+                LEGACY_CONNECT => "api.agents.environments.connect".to_owned(),
+                _ => permission.clone(),
+            })
+            .collect();
+        for permission in &permissions {
             anyhow::ensure!(
                 PERMISSIONS.contains(&permission.as_str()),
                 "unknown permission {permission}; expected one of {}",
                 PERMISSIONS.join(", ")
             );
         }
-        let mut permissions = permissions.to_vec();
         permissions
             .sort_by_key(|permission| PERMISSIONS.iter().position(|known| known == permission));
         permissions.dedup();

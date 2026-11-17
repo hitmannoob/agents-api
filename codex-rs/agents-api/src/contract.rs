@@ -203,7 +203,7 @@ async fn create(
             .await?
             .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "agent not found".into()))?,
         None => Agent {
-            id: Uuid::new_v4().to_string(),
+            id: format!("agent_{}", Uuid::new_v4().simple()),
             config: AgentConfig::default(),
             created_at: now(),
             updated_at: now(),
@@ -287,7 +287,7 @@ async fn create(
     let status = if self_hosted { "idle" } else { "in_progress" };
     let public = json!({"id":session.id,"object":"agent.session","agent":agent(&session.agent),
         "created_at":now(),"last_active_at":now(),"environment":public_environment,"metadata":metadata,
-        "vault_ids":vault_ids,"required_actions":[],"status":status,"error":null,"usage":null});
+        "vault_ids":vault_ids,"required_actions":[],"status":status,"error":null,"usage":null,"review":"none"});
     crate::records::create_session(&state.store.0, &principal.project_id, &public).await?;
     let snapshot = async {
         crate::credentials::snapshot(&state, &session.id, credentials).await?;

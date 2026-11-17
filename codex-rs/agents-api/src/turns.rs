@@ -146,7 +146,7 @@ fn provider_error(message: &str) -> Option<ProviderError> {
 /// A turn record that has not started.
 fn queued_record(id: &str, agent_id: &str, turn_id: &str) -> Value {
     json!({"id":turn_id,"object":"agent.session.turn","session_id":id,"agent_id":agent_id,"created_at":crate::contract::now(),
-        "started_at":null,"completed_at":null,"status":"queued","usage":null,"subagent_id":null,"error":null})
+        "started_at":null,"completed_at":null,"status":"queued","usage":null,"subagent_id":null,"error":null,"prompt_cache_options":null})
 }
 
 /// The session's queued turn: the one its waiting input will start.
