@@ -2656,6 +2656,22 @@ fixed the bug, and passed the tests. Modal refuses to restrict a Sandbox
 created with open networking, so a restricted one starts with an explicit
 allow-all policy (`*`, `0.0.0.0/0`) that setup runs under.
 
+Load test (2026-11-17, test server from `serve.py --managed-environments`,
+4 CPU / 8 GB): four rounds of 20 concurrent `small` hosted sessions on a
+ledger task (three bugs, two features, ten tests), graded by a recorded test
+run and a hash of the provided test file. `gpt-5.4-mini`: 20/20 in 89 s.
+`gpt-6-luna` with three follow-up turns each (budgets, export, type hints):
+19/20 in 204 s, 7.7 M tokens; the one failure edited the forbidden test file.
+Two more single-turn `gpt-6-luna` rounds: 40/40. Sandboxes connected in
+6–21 s with 20 provisioning at once; API latency held at about 0.55–0.8 s;
+the API's and worker's file descriptors and threads returned to baseline
+after each round, and no Sandbox outlived its session. Found and fixed: the
+provider kept one socket per Sandbox it ever handled (13 → 66 over 61
+Sandboxes); it now detaches each handle, and stayed at 7–8 over the next 40.
+To investigate: resident memory still rises after each round once idle (worker
+506 → 786 MB, API 159 → 181 MB over about 80 deleted sessions), slowing but
+not yet flat; a longer soak should separate allocator growth from a leak.
+
 ## G16 — Scale and operate as a managed service (planned 2026-11-17)
 
 **Outcome:** the service runs across several nodes, survives the loss of any

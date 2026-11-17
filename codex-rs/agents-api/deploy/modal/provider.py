@@ -113,6 +113,7 @@ class Provider:
             workdir=WORKSPACE,
             tags={"agents-api-environment": request["environment_id"]},
         )
+        sandbox_id = sandbox.object_id
         try:
             sandbox.exec("mkdir", "-p", WORKSPACE).wait()
             for file in request.get("files") or []:
@@ -142,14 +143,26 @@ class Provider:
         except Exception:
             sandbox.terminate()
             raise
-        return {"sandbox_id": sandbox.object_id}
+        finally:
+            # Each handle holds a connection until detached; this process
+            # outlives many Sandboxes.
+            sandbox.detach()
+        return {"sandbox_id": sandbox_id}
 
     def destroy(self, request):
-        modal.Sandbox.from_id(request["sandbox_id"]).terminate()
+        sandbox = modal.Sandbox.from_id(request["sandbox_id"])
+        try:
+            sandbox.terminate()
+        finally:
+            sandbox.detach()
         return {}
 
     def status(self, request):
-        return {"running": modal.Sandbox.from_id(request["sandbox_id"]).poll() is None}
+        sandbox = modal.Sandbox.from_id(request["sandbox_id"])
+        try:
+            return {"running": sandbox.poll() is None}
+        finally:
+            sandbox.detach()
 
 
 def main():
