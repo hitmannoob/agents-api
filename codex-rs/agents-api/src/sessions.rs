@@ -281,6 +281,10 @@ pub(crate) async fn delete(
         .await;
     if let Some((environment_id, sandbox_id)) = environment {
         crate::environments::forget(&state, &environment_id).await;
+        state
+            .secrets
+            .discard(vec![crate::managed::env_secret(&environment_id)])
+            .await;
         // A managed environment's sandbox goes with its session. One still
         // provisioning is destroyed when it comes up.
         if let Some(sandbox_id) = sandbox_id {

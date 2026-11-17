@@ -2681,6 +2681,29 @@ Worker memory peaked at 837 MB and fell back to 813 MB idle (774 MB before
 the soak); the API ended at 189 MB (180 before, about 45 KB per session).
 Memory has plateaued; no leak was found. API latency median 0.58 s, max 1.2 s.
 
+Progress (2026-11-17, slice 3): lifecycle. A loop snapshots connected managed
+environments (on connect, after busy spells, every 5 minutes while busy),
+replaces a sandbox whose executor stays away and whose provider reports it
+gone (`reset`, same environment ID, new connect token, `reset_count`),
+suspends idle environments (snapshot, stop) and resumes them on input, and
+expires them with their snapshot (input then 409). Providers gain `snapshot`
+and `running`; provisioning can restore a snapshot instead of running setup.
+Confidential `env` values are kept in the secrets store for restores.
+Evidence: `environments::managed_environments_snapshot_reset_suspend_resume_and_expire`;
+full crate 111/111 twice on Linux.
+
+Failure-injection soak (2026-11-17, before the lifecycle): 102 sessions of an
+issue-report task (planted more-itertools bugs, catching tests removed,
+graded by the restored suite plus hidden tests). Without injection 68/68
+passed; with the provider killed mid-run 10/10 passed (it restarts on the
+next call); the 3 sessions whose Sandboxes were killed failed cleanly (409,
+lost exec-server), which reset now covers. Killing the Codex worker failed 5
+of 9 overlapping sessions: one with `backend connection lost`, and three whose
+requests hung until the client gave up. The deployed worker was a debug
+build, where resuming a thread with an unanswered tool call panics
+(`error_or_panic`); `serve.py` now builds release binaries, and API calls to
+the worker give up after 60 seconds with 504. No Sandbox outlived its session.
+
 ## G16 — Scale and operate as a managed service (planned 2026-11-17)
 
 **Outcome:** the service runs across several nodes, survives the loss of any

@@ -613,12 +613,24 @@ program that answers the JSON-lines protocol it documents.
 - **Credentials:** each environment's executor presents a connect token
   generated for that environment and accepted for no other, and for nothing
   but the registry. Only its SHA-256 is kept.
+- **Lifecycle:** a connected environment is snapshotted (the provider's
+  filesystem snapshot) when it connects, after each busy spell, and every
+  5 minutes while busy. An executor that stays disconnected for 30 seconds
+  has its sandbox checked; if the sandbox is gone, a new one is provisioned
+  from the latest snapshot under the same environment ID and
+  `agent.session.environment.reset` reports the new `reset_count`
+  (conversation history survives; work since the snapshot does not). An
+  environment idle for `--environment-idle-suspend-secs` (default 600) is
+  snapshotted and stopped (`suspended`); the session's next input restores
+  it. One suspended past `--environment-snapshot-ttl-secs` (default 7 days)
+  is `expired`, and later input returns 409. Restoring needs the
+  environment's `env` values, which are kept encrypted in the secrets store
+  when the operator configured a vault passphrase.
 - **Cleanup:** deleting the session destroys its sandbox; one still
   provisioning is destroyed when it comes up. A sandbox whose deletion a crash
   interrupts runs until its provider lifetime ends (24 hours on Modal).
   Provisioning that a restart interrupts fails the environment, since its
-  confidential setup was never stored. Environments do not suspend, expire, or
-  reset yet.
+  confidential setup was never stored.
 
 Vaults hold MCP credentials. They are available only when the operator
 supplies a passphrase of at least 32 bytes with `--vault-passphrase` (or

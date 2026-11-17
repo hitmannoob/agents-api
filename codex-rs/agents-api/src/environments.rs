@@ -202,6 +202,10 @@ pub(crate) async fn create(
     Ok(public)
 }
 
+/// Session, connected once, failed, managed, provisioned, public data,
+/// suspended, and expired.
+type EnvironmentRow = (String, bool, bool, bool, bool, String, bool, bool);
+
 /// An environment's safe metadata and connection status. Installed files and
 /// plugins describe hosted environments, so a self-hosted one has none; its
 /// skills are the Skills API versions pinned to its session.
@@ -211,14 +215,14 @@ pub(crate) async fn retrieve(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     crate::projects::require(&state, &principal.project_id, &id, Resource::Environment).await?;
-    let row: Option<(String, bool, bool, bool, bool, String)> = sqlx::query_as(
-        "SELECT session_id, connected_once, failed, provider IS NOT NULL, provisioned, data FROM environments WHERE id = ?",
+    let row: Option<EnvironmentRow> = sqlx::query_as(
+        "SELECT session_id, connected_once, failed, provider IS NOT NULL, provisioned, data, suspended_ms IS NOT NULL, expired FROM environments WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.store.0)
     .await
     .map_err(anyhow::Error::from)?;
-    let (session_id, connected_once, failed, managed, provisioned, data) =
+    let (session_id, connected_once, failed, managed, provisioned, data, suspended, expired) =
         row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "environment not found".into()))?;
     // A connected executor wins; input that timed out waiting for one, or a
     // sandbox that could not be provisioned, leaves the environment failed
@@ -226,6 +230,8 @@ pub(crate) async fn retrieve(
     // its executor connects. Environments have no lifetime of their own yet,
     // so they never expire.
     let status = match state.registry.status(&id) {
+        _ if expired => "expired",
+        _ if suspended => "suspended",
         "connected" => "connected",
         _ if failed => "failed",
         "disconnected" => "disconnected",
@@ -335,16 +341,30 @@ pub(crate) fn watch(state: &Arc<State>, session_id: String, environment_id: Stri
             };
             if now != connected {
                 connected = now;
-                if now {
-                    let recorded = sqlx::query(
-                        "UPDATE environments SET connected_once = 1, failed = 0 WHERE id = ?",
+                // The lifecycle loop replaces a managed sandbox whose executor
+                // stays away; a suspended one dropped its executor on purpose.
+                let recorded = if now {
+                    sqlx::query(
+                        "UPDATE environments SET connected_once = 1, failed = 0, disconnected_ms = NULL WHERE id = ?",
                     )
                     .bind(&environment_id)
                     .execute(&state.store.0)
-                    .await;
-                    if let Err(error) = recorded {
+                    .await
+                } else {
+                    sqlx::query(
+                        "UPDATE environments SET disconnected_ms = ? WHERE id = ? AND suspended_ms IS NULL",
+                    )
+                    .bind(crate::records::now_ms())
+                    .bind(&environment_id)
+                    .execute(&state.store.0)
+                    .await
+                };
+                match recorded {
+                    Err(error) => {
                         tracing::warn!(error = %error, "environment connection not recorded");
                     }
+                    Ok(done) if !now && done.rows_affected() == 0 => continue,
+                    Ok(_) => {}
                 }
                 let status = if now { "connected" } else { "disconnected" };
                 let kind = kind(&state, &environment_id).await;
@@ -428,9 +448,10 @@ pub(crate) async fn submit(
         return Ok(());
     };
     // No executor will ever reach a managed environment that failed to
-    // provision, so its input is refused instead of waiting.
-    let unprovisionable: bool = sqlx::query_scalar(
-        "SELECT provider IS NOT NULL AND failed AND NOT connected_once FROM environments WHERE id = ?",
+    // provision or expired, so its input is refused instead of waiting; a
+    // suspended one is restored for it.
+    let (unprovisionable, expired, suspended): (bool, bool, bool) = sqlx::query_as(
+        "SELECT provider IS NOT NULL AND failed AND NOT connected_once, expired, suspended_ms IS NOT NULL FROM environments WHERE id = ?",
     )
     .bind(&environment_id)
     .fetch_one(&state.store.0)
@@ -441,6 +462,15 @@ pub(crate) async fn submit(
             StatusCode::CONFLICT,
             "this session's environment could not be provisioned; create a new session".into(),
         ));
+    }
+    if expired {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this session's environment has expired; create a new session".into(),
+        ));
+    }
+    if suspended {
+        crate::lifecycle::resume(state, session_id.to_owned(), environment_id.clone());
     }
     let admission = state.input_gates.lock(session_id).await;
     let connected = *state.registry.watch(&environment_id).borrow() == ExecutorState::Connected;

@@ -1193,14 +1193,37 @@ async fn skills_and_plugins_stay_isolated_between_sessions_across_cold_resume() 
 
 /// Provisions a managed environment the way a sandbox would: an executor in
 /// this process, presenting the environment's own connect token. An `env`
-/// value `FAIL` makes provisioning fail.
+/// value `FAIL` makes provisioning fail. Destroying a sandbox stops its
+/// executor; snapshots are recorded; `kill` makes a sandbox die.
 #[derive(Clone, Default)]
 struct TestProvider {
     workspace: String,
     requests: Arc<std::sync::Mutex<Vec<Value>>>,
     tokens: Arc<std::sync::Mutex<Vec<String>>>,
     destroyed: Arc<std::sync::Mutex<Vec<String>>>,
-    executors: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    snapshots: Arc<std::sync::Mutex<Vec<String>>>,
+    dead: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    executors:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+}
+
+impl TestProvider {
+    fn lock<T>(mutex: &std::sync::Mutex<T>) -> anyhow::Result<std::sync::MutexGuard<'_, T>> {
+        mutex.lock().map_err(|_| anyhow::anyhow!("poisoned"))
+    }
+
+    /// The sandbox dies, taking its executor with it.
+    fn kill(&self, sandbox_id: &str) -> anyhow::Result<()> {
+        if let Some(executor) = Self::lock(&self.executors)?.remove(sandbox_id) {
+            executor.abort();
+        }
+        Self::lock(&self.dead)?.insert(sandbox_id.to_owned());
+        Ok(())
+    }
+
+    fn requests(&self) -> anyhow::Result<Vec<Value>> {
+        Ok(Self::lock(&self.requests)?.clone())
+    }
 }
 
 impl codex_agents_api::managed::EnvironmentProvider for TestProvider {
@@ -1216,28 +1239,29 @@ impl codex_agents_api::managed::EnvironmentProvider for TestProvider {
         Box::pin(async move {
             let mut recorded = serde_json::to_value(&request)?;
             recorded["token"] = json!("redacted");
-            provider
-                .requests
-                .lock()
-                .map_err(|_| anyhow::anyhow!("poisoned"))?
-                .push(recorded);
-            provider
-                .tokens
-                .lock()
-                .map_err(|_| anyhow::anyhow!("poisoned"))?
-                .push(request.token.clone());
+            let earlier = {
+                let mut requests = Self::lock(&provider.requests)?;
+                let earlier = requests
+                    .iter()
+                    .filter(|r| r["environment_id"] == recorded["environment_id"])
+                    .count();
+                requests.push(recorded);
+                earlier
+            };
+            Self::lock(&provider.tokens)?.push(request.token.clone());
             anyhow::ensure!(!request.env.contains_key("FAIL"), "sandbox quota exceeded");
+            let sandbox_id = if earlier == 0 {
+                format!("sb-{}", request.environment_id)
+            } else {
+                format!("sb-{}-{earlier}", request.environment_id)
+            };
             let executor = executor_with(
                 &request.registry_url,
                 &request.environment_id,
                 Arc::new(ProjectKey(request.token)),
             )?;
-            provider
-                .executors
-                .lock()
-                .map_err(|_| anyhow::anyhow!("poisoned"))?
-                .push(executor);
-            Ok(format!("sb-{}", request.environment_id))
+            Self::lock(&provider.executors)?.insert(sandbox_id.clone(), executor);
+            Ok(sandbox_id)
         })
     }
 
@@ -1247,13 +1271,37 @@ impl codex_agents_api::managed::EnvironmentProvider for TestProvider {
     ) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
         let provider = self.clone();
         Box::pin(async move {
-            provider
-                .destroyed
-                .lock()
-                .map_err(|_| anyhow::anyhow!("poisoned"))?
-                .push(sandbox_id);
+            if let Some(executor) = Self::lock(&provider.executors)?.remove(&sandbox_id) {
+                executor.abort();
+            }
+            Self::lock(&provider.destroyed)?.push(sandbox_id);
             Ok(())
         })
+    }
+
+    fn snapshot(
+        &self,
+        sandbox_id: String,
+        _ttl: Duration,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<String>> {
+        let provider = self.clone();
+        Box::pin(async move {
+            anyhow::ensure!(
+                !Self::lock(&provider.dead)?.contains(&sandbox_id),
+                "sandbox {sandbox_id} is gone"
+            );
+            let mut snapshots = Self::lock(&provider.snapshots)?;
+            snapshots.push(sandbox_id);
+            Ok(format!("snap-{}", snapshots.len()))
+        })
+    }
+
+    fn running(
+        &self,
+        sandbox_id: String,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<bool>> {
+        let provider = self.clone();
+        Box::pin(async move { Ok(!Self::lock(&provider.dead)?.contains(&sandbox_id)) })
     }
 }
 
@@ -1342,13 +1390,13 @@ async fn managed_environments_are_provisioned_connected_and_destroyed() -> anyho
 
         // The provider received the configuration, including its confidential
         // values, which no response returns.
-        let requests = provider.requests.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.clone();
+        let requests = provider.requests()?;
         assert_eq!(requests, vec![json!({"environment_id":environment_id,"registry_url":format!("{origin}/registry"),"token":"redacted",
             "container_size":"small","packages":{"npm":[],"python":["pytest"],"system":[]},"env":{"MODE":"test"},
             "files":[{"path":format!("{workspace_root}/notes/hello.txt"),"data":"aGVsbG8="},
                 {"path":format!("{workspace_root}/data.csv"),"data":"YSxiCjEsMgo="}],
             "setup_commands":[{"command":"make setup","cwd":null}],
-            "network":{"access":"restricted","allowed_domains":["pypi.org"]}})]);
+            "network":{"access":"restricted","allowed_domains":["pypi.org"]},"snapshot_id":null})]);
         let token = provider.tokens.lock().map_err(|_| anyhow::anyhow!("poisoned"))?[0].clone();
         let saved = request(&client, reqwest::Method::GET, &url, Value::Null).await?.to_string();
         assert!(!saved.contains(&token) && !saved.contains("make setup") && !saved.contains("MODE"), "{saved}");
@@ -1386,7 +1434,93 @@ async fn managed_environments_are_provisioned_connected_and_destroyed() -> anyho
         while !provider.destroyed.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.contains(&sandbox) {
             tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
         }
-        for executor in provider.executors.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.drain(..) {
+        for (_, executor) in provider.executors.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.drain() {
+            executor.abort();
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
+#[tokio::test]
+async fn managed_environments_snapshot_reset_suspend_resume_and_expire() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let model = create_mock_responses_server_repeating_assistant("finished").await;
+        MockResponsesConfig::new(&model.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        let client = reqwest::Client::new();
+        api.configure_vault("test-vault-passphrase-for-managed-env-values".into()).await?;
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        api.set_managed_lifecycle(codex_agents_api::managed::Lifecycle {
+            tick: Duration::from_millis(/*millis*/ 100),
+            idle_suspend: Duration::from_millis(/*millis*/ 1500),
+            snapshot_interval: Duration::from_secs(/*secs*/ 60),
+            snapshot_ttl: Duration::from_secs(/*secs*/ 600),
+            death_grace: Duration::from_millis(/*millis*/ 300),
+        });
+        let provider = TestProvider { workspace: workspace_path.to_string_lossy().into_owned(), ..Default::default() };
+        api.configure_environment_provider(Arc::new(provider.clone()));
+        let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), json!({
+            "agent":{"model":"mock-model"},"environment":{"type":"openai_hosted","env":{"MODE":"kept"}},"input":"first"})).await?;
+        let url = format!("{base}/agents/sessions/{}", session["id"].as_str().context("session id")?);
+        let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
+        let environment_url = format!("{base}/agents/environments/{environment_id}");
+        let status = || request(&client, reqwest::Method::GET, &environment_url, Value::Null);
+        let mut stream = client.get(format!("{url}/events")).bearer_auth(TOKEN).send().await?.error_for_status()?;
+        idle(&client, &url, /*expected_turns*/ 1).await?;
+
+        // The environment is snapshotted once it connects and after its turn.
+        while TestProvider::lock(&provider.snapshots)?.is_empty() {
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
+        }
+
+        // A sandbox that dies is replaced from the latest snapshot under the
+        // same environment, which keeps its variables; the session goes on.
+        let first_sandbox = format!("sb-{environment_id}");
+        provider.kill(&first_sandbox)?;
+        let events = until_event(&mut stream, "agent.session.environment.reset").await?;
+        let reset = events.last().context("reset event")?;
+        assert_eq!((&reset["environment_id"], &reset["reset_count"]), (&json!(environment_id), &json!(1)));
+        until_event(&mut stream, "agent.session.environment.connected").await?;
+        let restored = provider.requests()?.last().cloned().context("restore request")?;
+        assert_eq!((restored["snapshot_id"].as_str().map(|id| id.starts_with("snap-")), &restored["env"], &restored["setup_commands"]),
+            (Some(true), &json!({"MODE":"kept"}), &json!([])));
+        assert_eq!(send(&client, &url, message("second")).await?, reqwest::StatusCode::ACCEPTED);
+        idle(&client, &url, /*expected_turns*/ 2).await?;
+
+        // Idle, it is snapshotted and suspended, its sandbox stopped.
+        until_event(&mut stream, "agent.session.environment.suspended").await?;
+        assert_eq!(status().await?["status"], json!("suspended"));
+        let second_sandbox = format!("sb-{environment_id}-1");
+        assert!(TestProvider::lock(&provider.destroyed)?.contains(&second_sandbox));
+
+        // Input resumes it from the snapshot; resuming is not a reset.
+        assert_eq!(send(&client, &url, message("third")).await?, reqwest::StatusCode::ACCEPTED);
+        idle(&client, &url, /*expected_turns*/ 3).await?;
+        assert_eq!(status().await?["status"], json!("connected"));
+        let resumed = provider.requests()?.last().cloned().context("resume request")?;
+        assert_eq!((resumed["snapshot_id"].as_str().map(|id| id.starts_with("snap-")), &resumed["env"]), (Some(true), &json!({"MODE":"kept"})));
+        let resets = until_event(&mut stream, "agent.session.environment.suspended").await?;
+        assert!(!resets.iter().any(|event| event["type"] == "agent.session.environment.reset"), "{resets:?}");
+
+        // Suspended past its snapshot's lifetime, it expires; input is refused.
+        api.set_managed_lifecycle(codex_agents_api::managed::Lifecycle {
+            tick: Duration::from_millis(/*millis*/ 100),
+            idle_suspend: Duration::from_millis(/*millis*/ 1500),
+            snapshot_interval: Duration::from_secs(/*secs*/ 60),
+            snapshot_ttl: Duration::from_millis(/*millis*/ 200),
+            death_grace: Duration::from_millis(/*millis*/ 300),
+        });
+        until_event(&mut stream, "agent.session.environment.expired").await?;
+        assert_eq!(status().await?["status"], json!("expired"));
+        let refused = client.post(format!("{url}/events")).bearer_auth(TOKEN).json(&json!({"events":[message("fourth")]})).send().await?;
+        assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+        for (_, executor) in TestProvider::lock(&provider.executors)?.drain() {
             executor.abort();
         }
         Ok::<_, anyhow::Error>(())

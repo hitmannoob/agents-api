@@ -13,6 +13,12 @@ requests run concurrently, so responses may arrive out of order.
 
   {"id": 2, "op": "destroy", "sandbox_id": "sb-…"}   → {"id": 2, "ok": true}
   {"id": 3, "op": "status", "sandbox_id": "sb-…"}    → {"id": 3, "ok": true, "running": true}
+  {"id": 4, "op": "snapshot", "sandbox_id": "sb-…", "ttl_seconds": 604800}
+  → {"id": 4, "ok": true, "snapshot_id": "im-…"}
+
+A provision request with a "snapshot_id" restores that snapshot instead of
+installing packages, writing files, and running setup; it still applies the
+network policy and starts the executor.
 
 A failure answers {"id": n, "ok": false, "error": "…"}. A provisioned Sandbox
 installs the requested packages, writes the files, runs the setup commands in
@@ -102,10 +108,12 @@ class Provider:
             if restricted
             else {}
         )
+        snapshot = request.get("snapshot_id")
+        image = modal.Image.from_id(snapshot) if snapshot else packaged(self.base, request.get("packages") or {})
         sandbox = modal.Sandbox.create(
             **policy,
             app=self.app,
-            image=packaged(self.base, request.get("packages") or {}),
+            image=image,
             secrets=[secret],
             cpu=cpu,
             memory=memory,
@@ -116,10 +124,10 @@ class Provider:
         sandbox_id = sandbox.object_id
         try:
             sandbox.exec("mkdir", "-p", WORKSPACE).wait()
-            for file in request.get("files") or []:
+            for file in [] if snapshot else request.get("files") or []:
                 sandbox.exec("mkdir", "-p", posixpath.dirname(file["path"])).wait()
                 sandbox.filesystem.write_bytes(base64.b64decode(file["data"]), file["path"])
-            for step in request.get("setup_commands") or []:
+            for step in [] if snapshot else request.get("setup_commands") or []:
                 process = sandbox.exec(
                     "bash", "-lc", step["command"], workdir=step.get("cwd") or WORKSPACE
                 )
@@ -157,6 +165,14 @@ class Provider:
             sandbox.detach()
         return {}
 
+    def snapshot(self, request):
+        sandbox = modal.Sandbox.from_id(request["sandbox_id"])
+        try:
+            image = sandbox.snapshot_filesystem(ttl=int(request.get("ttl_seconds") or 7 * 24 * 3600))
+            return {"snapshot_id": image.object_id}
+        finally:
+            sandbox.detach()
+
     def status(self, request):
         sandbox = modal.Sandbox.from_id(request["sandbox_id"])
         try:
@@ -189,7 +205,7 @@ def main():
 
     def handle(request):
         try:
-            if request.get("op") not in ("provision", "destroy", "status"):
+            if request.get("op") not in ("provision", "destroy", "status", "snapshot"):
                 raise ValueError(f"unknown op {request.get('op')!r}")
             result = getattr(provider, request["op"])(request)
             answer({"id": request["id"], "ok": True, **result})

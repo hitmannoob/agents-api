@@ -108,6 +108,40 @@ pub struct ProvisionRequest {
     pub files: Vec<ProvisionFile>,
     pub setup_commands: Vec<SetupCommand>,
     pub network: Network,
+    /// A filesystem snapshot to restore. The snapshot already holds the
+    /// packages, files, and setup's results, so the provider only applies the
+    /// network policy and starts the executor.
+    pub snapshot_id: Option<String>,
+}
+
+/// Timing for managed environments' lifecycle: snapshots, reset, suspension,
+/// and expiry.
+#[derive(Clone, Copy, Debug)]
+pub struct Lifecycle {
+    /// How often environments are checked.
+    pub tick: Duration,
+    /// How long an environment may sit idle before it is snapshotted and
+    /// stopped.
+    pub idle_suspend: Duration,
+    /// How often a busy environment is snapshotted.
+    pub snapshot_interval: Duration,
+    /// How long snapshots are kept; a suspended environment expires with them.
+    pub snapshot_ttl: Duration,
+    /// How long an executor may stay disconnected before its sandbox is
+    /// checked and, if gone, replaced.
+    pub death_grace: Duration,
+}
+
+impl Default for Lifecycle {
+    fn default() -> Self {
+        Self {
+            tick: Duration::from_secs(15),
+            idle_suspend: Duration::from_secs(10 * 60),
+            snapshot_interval: Duration::from_secs(5 * 60),
+            snapshot_ttl: Duration::from_secs(7 * 24 * 60 * 60),
+            death_grace: Duration::from_secs(30),
+        }
+    }
 }
 
 /// Starts and removes the sandboxes managed environments run in.
@@ -122,6 +156,22 @@ pub trait EnvironmentProvider: Send + Sync {
 
     /// Stop and remove a sandbox.
     fn destroy(&self, sandbox_id: String) -> BoxFuture<'static, anyhow::Result<()>>;
+
+    /// Snapshot a running sandbox's filesystem, kept for `ttl`; returns the
+    /// snapshot's ID. Without snapshots, environments cannot be reset,
+    /// suspended, or resumed.
+    fn snapshot(
+        &self,
+        _sandbox_id: String,
+        _ttl: Duration,
+    ) -> BoxFuture<'static, anyhow::Result<String>> {
+        Box::pin(async { anyhow::bail!("this environment provider cannot snapshot sandboxes") })
+    }
+
+    /// Whether a sandbox is still running.
+    fn running(&self, _sandbox_id: String) -> BoxFuture<'static, anyhow::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
 }
 
 /// A provider in another process that answers JSON lines on stdin and stdout,
@@ -285,6 +335,35 @@ impl EnvironmentProvider for SidecarProvider {
                 .call(json!({"op": "destroy", "sandbox_id": sandbox_id}))
                 .await
                 .map(|_| ())
+        })
+    }
+
+    fn snapshot(
+        &self,
+        sandbox_id: String,
+        ttl: Duration,
+    ) -> BoxFuture<'static, anyhow::Result<String>> {
+        let sidecar = Arc::clone(&self.0);
+        Box::pin(async move {
+            let answer = sidecar
+                .call(json!({"op": "snapshot", "sandbox_id": sandbox_id, "ttl_seconds": ttl.as_secs()}))
+                .await?;
+            answer["snapshot_id"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::anyhow!("the environment provider returned no snapshot"))
+        })
+    }
+
+    fn running(&self, sandbox_id: String) -> BoxFuture<'static, anyhow::Result<bool>> {
+        let sidecar = Arc::clone(&self.0);
+        Box::pin(async move {
+            let answer = sidecar
+                .call(json!({"op": "status", "sandbox_id": sandbox_id}))
+                .await?;
+            answer["running"]
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("the environment provider returned no status"))
         })
     }
 }
@@ -587,6 +666,24 @@ pub(crate) fn parse(value: &Value, workspace: &str) -> Result<Hosted, ApiError> 
     })
 }
 
+/// The secrets-store name of a managed environment's confidential variables.
+pub(crate) fn env_secret(environment_id: &str) -> String {
+    let hex: String = environment_id
+        .bytes()
+        .map(|byte| format!("{byte:02X}"))
+        .collect();
+    format!("MANAGED_ENV_{hex}")
+}
+
+/// A fresh connect token for an environment's executor.
+pub(crate) fn new_token() -> String {
+    format!(
+        "envtok_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    )
+}
+
 pub(crate) fn digest(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
@@ -634,17 +731,24 @@ pub(crate) async fn create(
         "network": {"access": hosted.network.access, "allowed_domains": hosted.network.allowed_domains},
         "packages": hosted.packages, "plugins": [], "skills": [], "container_size": hosted.container_size,
         "desktop": null});
-    let token = format!(
-        "envtok_{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    );
-    sqlx::query("INSERT INTO environments (id, session_id, data, provider, token_sha256, workspace_directory) VALUES (?, ?, ?, 'managed', ?, ?)")
+    let token = new_token();
+    // A reset or resume needs the confidential variables again; they are kept
+    // encrypted, which needs the operator's vault passphrase.
+    if !hosted.env.is_empty() && state.secrets.configured() {
+        state
+            .secrets
+            .set(env_secret(environment_id), json!(hosted.env))
+            .await
+            .map_err(|error| anyhow::anyhow!(error.1))?;
+    }
+    sqlx::query("INSERT INTO environments (id, session_id, data, provider, token_sha256, workspace_directory, registry_url, env_count) VALUES (?, ?, ?, 'managed', ?, ?, ?, ?)")
         .bind(environment_id)
         .bind(session_id)
         .bind(public.to_string())
         .bind(digest(&token))
         .bind(workspace)
+        .bind(&registry_url)
+        .bind(hosted.env.len() as i64)
         .execute(&state.store.0)
         .await?;
     let request = ProvisionRequest {
@@ -667,6 +771,7 @@ pub(crate) async fn create(
             .collect(),
         setup_commands: hosted.setup_commands,
         network: hosted.network,
+        snapshot_id: None,
     };
     Ok((public, request))
 }
@@ -683,9 +788,10 @@ pub(crate) fn start(state: &Arc<State>, session_id: String, request: ProvisionRe
         match provider.provision(request).await {
             Ok(sandbox_id) => {
                 let recorded = sqlx::query(
-                    "UPDATE environments SET sandbox_id = ?, provisioned = 1 WHERE id = ?",
+                    "UPDATE environments SET sandbox_id = ?, provisioned = 1, activity_ms = ? WHERE id = ?",
                 )
                 .bind(&sandbox_id)
+                .bind(crate::records::now_ms())
                 .bind(&environment_id)
                 .execute(&state.store.0)
                 .await;

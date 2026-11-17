@@ -83,6 +83,14 @@ struct Args {
         allow_hyphen_values = true
     )]
     environment_provider_args: Vec<String>,
+    /// Seconds an idle `openai_hosted` environment keeps its sandbox before it
+    /// is snapshotted and suspended; the session's next input resumes it.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..))]
+    environment_idle_suspend_secs: u64,
+    /// Seconds `openai_hosted` snapshots are kept; a suspended environment
+    /// expires with its snapshot.
+    #[arg(long, default_value_t = 7 * 24 * 60 * 60, value_parser = clap::value_parser!(u64).range(60..))]
+    environment_snapshot_ttl_secs: u64,
     /// Seconds that input waits for a disconnected self-hosted executor before
     /// it is dropped and the session fails.
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86_400))]
@@ -319,6 +327,11 @@ async fn main() -> anyhow::Result<()> {
             ));
         }
         if let Some(program) = args.environment_provider {
+            api.set_managed_lifecycle(codex_agents_api::managed::Lifecycle {
+                idle_suspend: std::time::Duration::from_secs(args.environment_idle_suspend_secs),
+                snapshot_ttl: std::time::Duration::from_secs(args.environment_snapshot_ttl_secs),
+                ..Default::default()
+            });
             api.configure_environment_provider(std::sync::Arc::new(
                 codex_agents_api::managed::SidecarProvider::new(
                     program,

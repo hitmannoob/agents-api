@@ -199,6 +199,7 @@ fn provision_request(environment_id: &str) -> ProvisionRequest {
             access: "enabled".to_owned(),
             allowed_domains: Vec::new(),
         },
+        snapshot_id: None,
     }
 }
 

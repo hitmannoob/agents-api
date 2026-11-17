@@ -12,6 +12,7 @@ mod files;
 mod gates;
 mod images;
 mod input;
+mod lifecycle;
 pub mod managed;
 mod mcp;
 mod otlp;
@@ -105,6 +106,11 @@ struct State {
     waits: environments::Waits,
     /// Provisions managed (`openai_hosted`) environments, when configured.
     provider: Mutex<Option<Arc<dyn managed::EnvironmentProvider>>>,
+    /// Managed environments' snapshot, reset, suspension, and expiry timing.
+    lifecycle: Mutex<managed::Lifecycle>,
+    lifecycle_started: std::sync::atomic::AtomicBool,
+    /// Managed environments a new sandbox is being provisioned for.
+    reprovisioning: Mutex<HashSet<String>>,
     /// Public IDs of turns that were queued before Codex started them.
     turn_aliases: turn_aliases::TurnAliases,
     /// Each session's most recently started turn, as (thread ID, turn ID),
@@ -281,6 +287,9 @@ impl AgentsApi {
             public_url: Mutex::default(),
             waits: environments::Waits::default(),
             provider: Mutex::default(),
+            lifecycle: Mutex::default(),
+            lifecycle_started: std::sync::atomic::AtomicBool::new(false),
+            reprovisioning: Mutex::default(),
             started_turns: Mutex::default(),
             pending_cancels: Mutex::default(),
             files: files::Files(directory.join("files").to_path_buf()),
@@ -435,6 +444,13 @@ impl AgentsApi {
     /// provisioned executors dial; set a public URL they can reach.
     pub fn configure_environment_provider(&self, provider: Arc<dyn managed::EnvironmentProvider>) {
         *lock(&self.state.provider) = Some(provider);
+        lifecycle::spawn(&self.state);
+    }
+
+    /// Set managed environments' snapshot, reset, suspension, and expiry
+    /// timing; [`managed::Lifecycle::default`] applies otherwise.
+    pub fn set_managed_lifecycle(&self, lifecycle: managed::Lifecycle) {
+        *lock(&self.state.lifecycle) = lifecycle;
     }
 
     /// How long input waits for a self-hosted executor to connect before it is
