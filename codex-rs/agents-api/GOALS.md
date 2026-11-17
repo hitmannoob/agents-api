@@ -153,6 +153,9 @@ fixture design may start earlier.
 | G11 | Implement credentials and service integrations (complete locally except environment-variable credentials, OAuth refresh) | G00, G02, G05 | Vaults, webhooks, observability |
 | G12 | Prove end-to-end parity (complete 2026-11-13: SDK operation coverage and provider interoperability verified) | All applicable goals | Contract suite, real providers, failure matrix |
 | G13 | Projects, API keys, and permissions (complete locally 2026-10-12; Admin API out of scope) | G02, G11 | Keys and auth, agents/sessions, vaults/files/environments, webhooks, permission sweep, inventory |
+| G14 | Catch up to the `openai==3.52.0` contract (open, planned 2026-11-17) | G00 rebaseline | Baseline and small fields, settings Codex already has, MCP approvals and review, spend control, automations, computer use and browser (after G15) |
+| G15 | Managed (`openai_hosted`) environments (open, planned 2026-11-17; reverses the 2026-10-06 scope decision) | G09, G10, G14 baseline; G16 before production | Provider interface, provisioning MVP, setup and network policy, lifecycle, templates and prewarming, artifacts, desktop |
+| G16 | Scale and operate as a managed service (open, planned 2026-11-17) | G02, G01; needed by G15 in production | Worker pool, shared storage, multi-node ownership and fan-out, failover, operations |
 
 Ship bounded changes within each goal. Do not combine a supervisor rewrite,
 public-schema expansion, and sandbox provider integration into one change.
@@ -2465,6 +2468,215 @@ These runs add real-provider evidence for MCP, subagents, and compaction to
 the earlier mock evidence. Statuses and counts are unchanged: 62 verified,
 0 implemented, 0 partial, 5 missing operations (out of scope); 17 verified,
 0 implemented, 0 partial, 1 missing behavior (BEH-011 out of scope).
+
+## G14 — Catch up to the `openai==3.52.0` contract (planned 2026-11-17)
+
+**Outcome:** the parity target moves from `openai==3.17.0` (reviewed
+2026-09-22) to `openai==3.52.0`, and every addition in between is implemented,
+explicitly refused, or recorded as out of scope with a reason.
+
+Source: a diff of the two SDKs' `types/beta` and `resources/beta` (2026-11-17),
+and the official service's responses in that day's comparison run (a
+`gpt-5.4-mini` session in an `openai_hosted` environment). Docstrings define
+the contract; where they are silent, probe the official service with the
+project's key before choosing behavior, and record each probe here.
+
+Slices, in order:
+
+1. **Rebaseline (S).** Pin `openai==3.52.0` in the SDK tests and
+   `tests/sdk_inventory.py`; add the new operations to the inventory as
+   `missing` (automations 7, invocations 3, environment create/list 2, turn
+   items 1, vault update 1; traces gains an SDK method); run the existing SDK
+   scenarios against 3.52 to catch drift. The denominator changes, so record
+   an amendment.
+2. **Small additions (S, one slice):**
+   - `GET /agents/sessions/{id}/turns/{turn_id}/items`, including the turn's
+     subagent interactions, with the documented cursor rule.
+   - Metadata filters on session, vault, and credential lists; vault update
+     (`POST /vaults/{id}`); credential `metadata`, with `auth` optional on
+     update.
+   - `obfuscation` padding on every event, `stream_options.include_obfuscation`
+     on create, and `include_obfuscation` on `GET .../events` (default true).
+   - Session update accepts `tools` (functions and MCP on the next model call,
+     built-ins on the next turn); check whether Codex can change a thread's
+     dynamic tools mid-thread first.
+   - `service_tier: ultrafast` (map to Codex's tier if it exists, otherwise
+     refuse), the 3 MiB compact-JSON tools limit, list `limit` defaults, and the
+     new turn error codes where Codex reports the condition
+     (`max_output_tokens` at least).
+   - SDK traces method: keep the format; add the 16 MiB per-request limit.
+3. **Settings Codex already supports (S–M):**
+   - `experimental.time_awareness` → Codex `features.current_time_reminder`.
+   - `review: auto_review` → Codex `approvals_reviewer = auto_review`
+     (guardian). Sessions run with `approval_policy = "never"`, so first decide
+     which actions become reviewable; the docstring says auto review denies
+     manual approval fallbacks.
+   - `prompt_cache_options.ttl` (`30m`, `12h`) on sessions, recorded on each
+     turn. Codex sends no cache retention today, so this needs a request field
+     in `codex-api` and a provider check.
+   - Replace the fixed `compaction`, `experimental`, `review`, and
+     `prompt_cache_options` values added on 2026-11-17 with stored settings,
+     accepted on create and update.
+4. **`compaction.async` (M–L).** Codex compacts inline only. Accept
+   `false`/null, refuse `true` until Codex gains background compaction; decide
+   with an engine estimate.
+5. **MCP approvals (M).** The `mcp_approval_request` required action and
+   `agent.session.input.mcp_approval_request_result`
+   (approve/deny/cancel), mapped onto Codex's MCP tool approval (elicitation
+   and `mcp_tool_approval_templates`). No MCP config field enables it; probe
+   when the official service asks.
+6. **Spend control (M).** `spend_control.limit` in USD cents, with
+   best-effort `consumed`. Needs a per-model price table (per provider;
+   OpenRouter reports cost), enforcement at turn boundaries and between
+   responses, and `session_budget_exceeded`.
+7. **Async functions (open question).** The only semantics are "whether the
+   agent continues without waiting for the function result"; delivery is
+   undocumented. Probe the official service; until then refuse `async: true`.
+8. **Automations (L).** `/agents/automations` and invocations: one-time
+   (`run_at`) and periodic (five-field cron and IANA timezone) schedules;
+   `new_session` and `existing_session` targets; pause/resume; manual
+   invocations; `pause_reason: target_session_failed`; and the agent-side
+   `{type: "automations"}` tool. Needs a durable scheduler with at-most-once
+   delivery per occurrence. A single node can run it; G16's leader lease makes
+   it highly available.
+9. **Computer use and browser (L, after G15 desktop).** The `computer_use` tool,
+   `computer_use_call`/screenshot items, and the
+   `computer_use_approval_request` required action for
+   `browser_authentication` (form fields, sign-in options, sensitive values up
+   to 120 KiB) and `browser_origin_access`. Codex has no computer-use tool, so
+   this needs a hosted desktop with a browser and its proxy (G15) plus a tool
+   implementation.
+
+Acceptance: the 3.52 SDK scenarios pass with strict validation; every new
+operation and field is implemented or explicitly refused with a recorded
+reason; and each behavior chosen from a probe cites that probe.
+
+## G15 — Managed (`openai_hosted`) environments (planned 2026-11-17)
+
+**Outcome:** sessions can ask the service for an environment, as with
+`openai_hosted`, instead of bringing their own executor. This reverses the
+2026-10-06 scope decision and covers TPL-001..005, BEH-011, the artifact
+operations, and `environment_variable` credentials.
+
+Design. A managed environment is a sandbox the service provisions that runs
+the stock `codex exec-server --remote <registry> --environment-id <id>` and
+connects through the existing rendezvous relay, as BEH-018 verified from a
+separate Modal Sandbox on 2026-11-13. Everything after connection is already
+built: commands, files, skills, plugins, executor loss, and reconnection. New
+work is provisioning, setup, policy, and lifecycle:
+
+- **Provider interface.** `provision`, `suspend` (checkpoint and stop),
+  `resume`, `reset`, `destroy`, and `status`. Decision (2026-11-17): Modal
+  Sandboxes are the provider (gVisor isolation, filesystem snapshots, network
+  blocking). The interface stays provider-neutral so a Docker/Kubernetes
+  implementation can follow for self-hosted operators. The
+  service never puts its own secrets in a sandbox: each environment gets a
+  connect-only token scoped to its ID.
+- **Configuration**, matching the 3.52 `openai_hosted` shape:
+  `container_size` (small/medium/large, default medium); `packages`
+  (npm global, python, system); ordered `setup_commands` (confidential, never
+  returned, run before the agent starts, `cwd` default `/workspace`); `env`
+  (confidential); `files` (inline or `file_id`, under `/workspace`); `skills`,
+  `plugins`, and `capability_directories`; and `vault_ids` with
+  `environment_variable` credentials. Images are layered by a hash of the
+  package set and cached; packages install before the runtime network policy
+  applies.
+- **Network policy.** `access: enabled | disabled | restricted`, with
+  `allowed_domains` or `blocked_domains` (not both, no wildcards). Domain
+  rules need an egress proxy in the sandbox; evaluate Codex's
+  `network-proxy` crate. A template's policy can be narrowed, never broadened.
+- **Lifecycle.** `pending` → `ready` → `connected`; idle → `suspended`
+  (checkpointed and stopped), resumed on the next input; `expired` once the
+  checkpoint's lifetime ends; `reset` (new sandbox, history kept, with a
+  monotonic `reset_count`). Emit every `agent.session.environment.*` event.
+  The docstrings state no durations; choose them, make them configurable, and
+  probe the official service's.
+- **Templates and prewarming.** `/agents/environments/templates` CRUD
+  (confidential values never returned; skill references resolved per session),
+  `POST/GET /agents/environments` to prewarm, and sessions attaching by
+  `environment_id`.
+- **Artifacts.** Publish immutable files from completed turns, readable after
+  the environment expires. Which files a turn publishes is not documented;
+  probe the official service before implementing.
+- **Desktop (`desktop.enabled`).** A desktop and browser proxy in the sandbox:
+  the prerequisite for G14's computer use.
+
+Slices: provider interface and Modal provisioning with `container_size`
+(MVP, single node); setup (packages, files, setup commands, env, vaults);
+network policy; lifecycle (suspend, resume, expire, reset); templates and
+prewarming; artifacts; desktop.
+
+Security: sandboxes run untrusted code. Isolation is the provider's sandbox
+(Codex's own sandbox cannot run under gVisor), egress is policy-controlled,
+tokens are per environment, and projects get resource quotas and cost
+attribution. A security review gates production.
+
+Acceptance: the official SDK's hosted-environment examples run against the
+service; setup, network policy, and lifecycle transitions are tested against
+a real provider, including suspend/resume across a service restart; and a
+side-by-side run against the official service matches events and items.
+
+## G16 — Scale and operate as a managed service (planned 2026-11-17)
+
+**Outcome:** the service runs across several nodes, survives the loss of any
+one, and can be upgraded and backed up without downtime. G15 needs this before
+production, because managed environments make the service responsible for
+customers' compute.
+
+Today: one API process drives one managed Codex worker; state is SQLite under
+an exclusive data-directory lock; events fan out in memory; secrets are a
+local encrypted file; Codex rollouts live on local disk (the `ThreadStore`
+trait has only local and in-memory implementations); and the rendezvous relay
+is in-process. Event streams do not replay missed events, as in the official
+contract; replay is an optional extension, not a parity gap.
+
+Stages:
+
+1. **Worker pool on one node (M).** N app-server workers per API process,
+   with each session assigned to one worker and the assignment persisted. G01's
+   supervision, fencing, and reconciliation apply per worker. Gains: CPU
+   parallelism, and a crash affects only its own sessions.
+2. **Shared state (L).** Postgres replaces SQLite: port the migrations and the
+   SQLite JSON functions (`json_extract`, `json_each`) and replace the
+   data-directory lock with leases. Secrets move into the database, encrypted
+   under a KMS or the operator passphrase. A shared `ThreadStore`
+   implementation (Postgres or object storage) lets any node resume any
+   thread. File, skill, and artifact bytes move to object storage.
+3. **Multi-node (L).** Sessions are owned through database leases with fencing
+   tokens; requests reach the owner by forwarding or session-affinity routing.
+   Events fan out across nodes for streams and webhooks (Postgres
+   LISTEN/NOTIFY, or a broker). Executor connections are relayed to the owning
+   node. Singleton work (automation scheduling, cleanup, webhook delivery, G15
+   lifecycle timers) runs under leader leases.
+4. **Failover (M).** When a node dies, its leases expire and other nodes resume
+   its sessions from shared state. Turns in flight end as worker loss already
+   does (unresolved actions, no replay of side effects).
+5. **Operations (M, alongside 2–4):**
+   - Rolling upgrades: drain a node by refusing new turns and handing sessions
+     off at turn boundaries.
+   - Expand/contract migrations.
+   - Backups: Postgres point-in-time recovery, and versioning on the object store.
+   - Per-project rate limits and quotas.
+   - SLOs and alerts from the existing OTLP metrics.
+   - Readiness endpoints and runbooks.
+   - Load tests, and chaos tests that kill a node mid-turn.
+
+Acceptance: three nodes serve the SDK suite behind one URL; killing any node
+during turns keeps every session readable and resumable on another node; a
+rolling upgrade under load completes without failed requests beyond the
+documented in-flight turn loss; a backup restores to a consistent state.
+
+## Sequencing (2026-11-17)
+
+1. G14 slices 1–3: rebaseline, small additions, settings Codex already has.
+2. G15 MVP on a single node (Modal provisioning, setup, network policy),
+   probing the official service for undocumented behavior.
+3. G16 stages 1–2: worker pool and shared state.
+4. G15 lifecycle, templates, prewarming, and artifacts, alongside G16 stages
+   3–5.
+5. G14 slices 5–8: MCP approvals, spend control, async functions once
+   documented, automations.
+6. G15 desktop, then G14 slice 9: computer use and browser.
 
 ## Immediate next implementation slices
 
