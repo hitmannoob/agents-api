@@ -611,6 +611,7 @@ pub(crate) async fn create(
     state: &State,
     session_id: &str,
     environment_id: &str,
+    workspace: &str,
     hosted: Hosted,
     registry_url: String,
 ) -> anyhow::Result<(Value, ProvisionRequest)> {
@@ -638,11 +639,12 @@ pub(crate) async fn create(
         Uuid::new_v4().simple(),
         Uuid::new_v4().simple()
     );
-    sqlx::query("INSERT INTO environments (id, session_id, data, provider, token_sha256) VALUES (?, ?, ?, 'managed', ?)")
+    sqlx::query("INSERT INTO environments (id, session_id, data, provider, token_sha256, workspace_directory) VALUES (?, ?, ?, 'managed', ?, ?)")
         .bind(environment_id)
         .bind(session_id)
         .bind(public.to_string())
         .bind(digest(&token))
+        .bind(workspace)
         .execute(&state.store.0)
         .await?;
     let request = ProvisionRequest {

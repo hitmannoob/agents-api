@@ -1334,6 +1334,12 @@ async fn managed_environments_are_provisioned_connected_and_destroyed() -> anyho
         let retrieved = request(&client, reqwest::Method::GET, &format!("{base}/agents/environments/{environment_id}"), Value::Null).await?;
         assert_eq!((&retrieved["type"], &retrieved["status"], &retrieved["files"]), (&json!("openai_hosted"), &json!("connected"), &files));
 
+        // Files can be written into a managed environment after it connects,
+        // like a self-hosted one.
+        let written = request(&client, reqwest::Method::POST, &format!("{base}/agents/environments/{environment_id}/files"),
+            json!({"type":"inline","path":format!("{workspace_root}/later.txt"),"data":"bGF0ZXI="})).await?;
+        assert_eq!((&written["size_bytes"], std::fs::read_to_string(workspace_path.join("later.txt"))?.as_str()), (&json!(5), "later"));
+
         // The provider received the configuration, including its confidential
         // values, which no response returns.
         let requests = provider.requests.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.clone();

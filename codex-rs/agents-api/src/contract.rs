@@ -284,10 +284,10 @@ async fn create(
         .await?;
     let mut provision = None;
     let public_environment = match (&environment, hosted) {
-        (Environment::SelfHosted { id, .. }, Some(hosted)) => {
+        (Environment::SelfHosted { id, cwd, .. }, Some(hosted)) => {
             let remote_url = crate::registry::remote_url(&state, &headers);
             let (public, request) =
-                crate::managed::create(&state, &session.id, id, hosted, remote_url).await?;
+                crate::managed::create(&state, &session.id, id, cwd, hosted, remote_url).await?;
             provision = Some(request);
             public
         }

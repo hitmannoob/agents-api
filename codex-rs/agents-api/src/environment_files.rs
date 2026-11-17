@@ -50,16 +50,20 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) async fn open(state: &State, environment_id: &str) -> Result<Self, ApiError> {
-        let data: Option<String> = sqlx::query_scalar("SELECT data FROM environments WHERE id = ?")
-            .bind(environment_id)
-            .fetch_optional(&state.store.0)
-            .await
-            .map_err(anyhow::Error::from)?;
-        let data: Value = serde_json::from_str(
-            &data.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "environment not found".into()))?,
-        )
-        .map_err(anyhow::Error::from)?;
-        let root = path_uri(data["workspace_directory"].as_str().unwrap_or_default())
+        // A managed environment keeps its workspace in its own column; a
+        // self-hosted one in its public object.
+        let row: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT data, workspace_directory FROM environments WHERE id = ?")
+                .bind(environment_id)
+                .fetch_optional(&state.store.0)
+                .await
+                .map_err(anyhow::Error::from)?;
+        let (data, workspace) =
+            row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "environment not found".into()))?;
+        let data: Value = serde_json::from_str(&data).map_err(anyhow::Error::from)?;
+        let workspace =
+            workspace.or_else(|| data["workspace_directory"].as_str().map(str::to_owned));
+        let root = path_uri(workspace.as_deref().unwrap_or_default())
             .ok_or_else(|| anyhow::anyhow!("stored workspace directory is not absolute"))?;
         if state.registry.state(environment_id) != Some(ExecutorState::Connected) {
             return Err(ApiError(
