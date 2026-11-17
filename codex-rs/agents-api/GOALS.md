@@ -2668,9 +2668,18 @@ the API's and worker's file descriptors and threads returned to baseline
 after each round, and no Sandbox outlived its session. Found and fixed: the
 provider kept one socket per Sandbox it ever handled (13 → 66 over 61
 Sandboxes); it now detaches each handle, and stayed at 7–8 over the next 40.
-To investigate: resident memory still rises after each round once idle (worker
-506 → 786 MB, API 159 → 181 MB over about 80 deleted sessions), slowing but
-not yet flat; a longer soak should separate allocator growth from a leak.
+Resident memory rose after each of those rounds once idle (worker 506 → 786 MB,
+API 159 → 181 MB over about 80 deleted sessions), slowing. A soak on a real
+codebase then settled it: 10 concurrent `gpt-6-luna` sessions, each cloning
+more-itertools v10.5.0 (13k lines, 663 tests) with one of four planted
+three-bug variants, graded by a recorded full-suite run and an unchanged
+`tests/`: 207/207 passed (solve median 49 s, p90 82 s; median 162k tokens,
+42 M total) in 25 minutes. After it idled, the API's and worker's descriptors
+and threads were back at baseline (28/26 and 63/40), the provider at 7
+descriptors, the database the same size, and no rollouts or Sandboxes left.
+Worker memory peaked at 837 MB and fell back to 813 MB idle (774 MB before
+the soak); the API ended at 189 MB (180 before, about 45 KB per session).
+Memory has plateaued; no leak was found. API latency median 0.58 s, max 1.2 s.
 
 ## G16 — Scale and operate as a managed service (planned 2026-11-17)
 
