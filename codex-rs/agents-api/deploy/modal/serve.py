@@ -208,7 +208,15 @@ def image(source):
     )
 
 
-def start(state, hours, auto_compact_tokens=None, provider="openrouter", model=None, managed=False):
+def start(
+    state,
+    hours,
+    auto_compact_tokens=None,
+    provider="openrouter",
+    model=None,
+    managed=False,
+    image_id=None,
+):
     secret, default_model = PROVIDERS[provider]
     config = CONFIG.format(
         model=model or default_model,
@@ -227,7 +235,9 @@ def start(state, hours, auto_compact_tokens=None, provider="openrouter", model=N
     for name, value in values.items():
         with open(os.path.join(state, name), "w", encoding="utf-8") as handle:
             handle.write(value)
-    service_image = image(archive(state))
+    # A built image can be reused when only files copied in at start (such as
+    # provider.py) changed since.
+    service_image = modal.Image.from_id(image_id) if image_id else image(archive(state))
     sandbox = modal.Sandbox.create(
         "bash",
         "-lc",
@@ -322,6 +332,10 @@ def main():
     )
     parser.add_argument("--model", help="worker model (default: the provider's)")
     parser.add_argument(
+        "--image-id",
+        help="start from this built image instead of building HEAD (the ID `build` prints)",
+    )
+    parser.add_argument(
         "--managed-environments",
         action="store_true",
         help=f"provision openai_hosted environments as Modal Sandboxes (needs the {MODAL_TOKEN_SECRET} secret)",
@@ -342,6 +356,7 @@ def main():
             args.provider,
             args.model,
             args.managed_environments,
+            args.image_id,
         )
     elif args.command == "logs":
         process = sandbox_for(args.state).exec(
