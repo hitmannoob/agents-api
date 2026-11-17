@@ -2690,7 +2690,14 @@ expires them with their snapshot (input then 409). Providers gain `snapshot`
 and `running`; provisioning can restore a snapshot instead of running setup.
 Confidential `env` values are kept in the secrets store for restores.
 Evidence: `environments::managed_environments_snapshot_reset_suspend_resume_and_expire`;
-full crate 111/111 twice on Linux.
+full crate 111/111 twice on Linux. Real Modal run (release build, 90-second
+idle suspension): the agent wrote `/workspace/progress.txt`; killing its
+Sandbox brought `reset` (`reset_count` 1) 33 s later and the file and an
+`env` value were back; idle, the environment was suspended with no Sandbox
+left running; input resumed it within 5 s with the file intact. The first
+run restored an empty workspace: activity was only noticed when a check saw
+the session busy, so a turn shorter than a check left no after-turn
+snapshot; turns starting and ending now record activity.
 
 Failure-injection soak (2026-11-17, before the lifecycle): 102 sessions of an
 issue-report task (planted more-itertools bugs, catching tests removed,
