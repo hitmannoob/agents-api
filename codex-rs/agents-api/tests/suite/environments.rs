@@ -1808,6 +1808,105 @@ async fn input_during_a_suspension_decision_keeps_the_sandbox() -> anyhow::Resul
     }).await?
 }
 
+/// The first `stall` model requests never answer, so their turns are running
+/// when the worker is replaced; later ones answer at once.
+struct StallFirst {
+    seen: std::sync::atomic::AtomicUsize,
+    stall: usize,
+    body: String,
+}
+
+impl wiremock::Respond for StallFirst {
+    fn respond(&self, _: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let number = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let answer = wiremock::ResponseTemplate::new(200).set_body_raw(self.body.clone(), "text/event-stream");
+        if number <= self.stall { answer.set_delay(Duration::from_secs(/*secs*/ 600)) } else { answer }
+    }
+}
+
+/// A replaced worker continuing interrupted sessions while some of them are
+/// deleted does not hold up new sessions.
+#[tokio::test]
+async fn new_sessions_are_not_held_up_while_interrupted_ones_continue_or_are_deleted() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let model = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex(".*/responses$"))
+            .respond_with(StallFirst { seen: Default::default(), stall: 6,
+                body: create_final_assistant_message_sse_response("done")? })
+            .mount(&model)
+            .await;
+        MockResponsesConfig::new(&model.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        let client = reqwest::Client::new();
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        let provider = TestProvider { workspace: workspace_path.to_string_lossy().into_owned(), ..Default::default() };
+        api.configure_environment_provider(Arc::new(provider.clone()));
+        let sessions = format!("{base}/agents/sessions");
+        let create = |input: &str| request(&client, reqwest::Method::POST, &sessions,
+            json!({"agent":{"model":"mock-model"},"environment":{"type":"openai_hosted"},"input":input}));
+        let mut running = Vec::new();
+        for index in 0..6 {
+            running.push(create(&format!("long task {index}")).await?["id"].as_str().context("session id")?.to_owned());
+        }
+        while model.received_requests().await.map_or(0, |requests| requests.len()) < 6 {
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
+        }
+
+        // The worker is replaced while all six run; they are continued, and
+        // half of them are deleted meanwhile, as a client would.
+        api.reconnect(backend(home.path()).await?).await?;
+        let started = std::time::Instant::now();
+        let deletes = running[..3].iter().map(|id| {
+            let url = format!("{sessions}/{id}");
+            let client = &client;
+            async move {
+                // A running session is cancelled before it can be deleted.
+                loop {
+                    let deleted = client.delete(&url).bearer_auth(TOKEN).send().await?;
+                    if deleted.status() != reqwest::StatusCode::CONFLICT {
+                        deleted.error_for_status()?;
+                        return anyhow::Ok(());
+                    }
+                    client.post(format!("{url}/events")).bearer_auth(TOKEN)
+                        .json(&json!({"events":[{"type":"agent.session.input.cancel"}]})).send().await?;
+                    tokio::time::sleep(Duration::from_millis(/*millis*/ 100)).await;
+                }
+            }
+        });
+        let fresh = (0..4).map(|index| {
+            let create = &create;
+            let client = &client;
+            let sessions = &sessions;
+            async move {
+                let session = create(&format!("new task {index}")).await?;
+                let url = format!("{sessions}/{}", session["id"].as_str().context("session id")?);
+                idle(client, &url, /*expected_turns*/ 1).await?;
+                anyhow::Ok(started.elapsed())
+            }
+        });
+        let (deleted, fresh) = tokio::join!(futures::future::join_all(deletes), futures::future::join_all(fresh));
+        for result in deleted {
+            result?;
+        }
+        let waits: Vec<Duration> = fresh.into_iter().collect::<anyhow::Result<_>>()?;
+        assert!(waits.iter().all(|wait| *wait < Duration::from_secs(/*secs*/ 20)), "{waits:?}");
+        for id in &running[3..] {
+            idle(&client, &format!("{sessions}/{id}"), /*expected_turns*/ 2).await?;
+        }
+        for (_, executor) in TestProvider::lock(&provider.executors)?.drain() {
+            executor.abort();
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
 #[tokio::test]
 async fn managed_environments_snapshot_reset_suspend_resume_and_expire() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {

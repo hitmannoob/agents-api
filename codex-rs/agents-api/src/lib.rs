@@ -83,6 +83,8 @@ struct Backend {
 
 /// How long a request to the worker may take before the API gives up on it.
 const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Worker calls at least this slow are logged.
+const SLOW_RPC: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct State {
     store: store::Store,
@@ -174,8 +176,20 @@ impl State {
         // server-side JSON-RPC error is a genuine upstream failure (502).
         // A worker that never answers (a crashed request handler, a stuck
         // thread) must not hold the caller's request forever.
-        tokio::time::timeout(RPC_TIMEOUT, handle.request(request))
-            .await
+        let started = std::time::Instant::now();
+        let answer = tokio::time::timeout(RPC_TIMEOUT, handle.request(request)).await;
+        // Slow worker calls are logged, so a stall shows which calls queued
+        // and for how long.
+        let took = started.elapsed();
+        if took >= SLOW_RPC {
+            tracing::warn!(
+                method,
+                took_ms = took.as_millis() as u64,
+                answered = answer.is_ok(),
+                "slow app-server request"
+            );
+        }
+        answer
             .map_err(|_| {
                 ApiError(
                     StatusCode::GATEWAY_TIMEOUT,
