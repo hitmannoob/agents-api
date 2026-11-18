@@ -349,6 +349,33 @@ async fn interrupted_turns_continue_on_the_replacement_worker() -> anyhow::Resul
     // continues it, and the model sees the original request and the notice.
     requests(&model, 1).await?;
     kill(current_worker(&api)?);
+    // Until the continuation starts, the session reads as running, never as
+    // failed: a client that stops at failure must not lose it.
+    let mut seen = std::collections::BTreeSet::new();
+    tokio::time::timeout(DEADLINE, async {
+        while model
+            .received_requests()
+            .await
+            .map_or(0, |requests| requests.len())
+            < 2
+        {
+            let current: Value = client
+                .get(&url)
+                .bearer_auth(TOKEN)
+                .send()
+                .await?
+                .json()
+                .await?;
+            seen.insert(current["status"].as_str().unwrap_or_default().to_owned());
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    assert_eq!(
+        seen,
+        std::collections::BTreeSet::from(["in_progress".to_owned()])
+    );
     let continued = requests(&model, 2).await?;
     let input = continued[1]["input"].to_string();
     assert!(

@@ -17,9 +17,14 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-pub(crate) async fn disconnected(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+/// Record a lost backend connection: interrupted turns fail. Their sessions
+/// fail too, except that with `continuing` a running session stays
+/// `in_progress` for [`crate::reconcile::continue_interrupted`] to continue or
+/// fail, so clients never see a failure the service is about to undo. A
+/// session awaiting function results cannot be continued and fails.
+pub(crate) async fn disconnected(pool: &sqlx::SqlitePool, continuing: bool) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
-    let failed: Vec<String> = sqlx::query_scalar("UPDATE public_sessions SET data = json_set(data, '$.status', 'failed', '$.error', 'backend connection lost') WHERE json_extract(data, '$.status') IN ('in_progress', 'requires_action') AND id NOT IN (SELECT session_id FROM environments WHERE waiting) RETURNING id").fetch_all(&mut *tx).await?;
+    let failed: Vec<String> = sqlx::query_scalar("UPDATE public_sessions SET data = json_set(data, '$.status', 'failed', '$.error', 'backend connection lost') WHERE (json_extract(data, '$.status') = 'requires_action' OR (json_extract(data, '$.status') = 'in_progress' AND NOT ?)) AND id NOT IN (SELECT session_id FROM environments WHERE waiting) RETURNING id").bind(continuing).fetch_all(&mut *tx).await?;
     for id in failed {
         crate::webhook_outbox::session_status(&mut tx, &id, "failed").await?;
     }

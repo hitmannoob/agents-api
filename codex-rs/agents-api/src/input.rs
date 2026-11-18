@@ -267,6 +267,10 @@ async fn execute(state: &Arc<State>, id: &str, events: Vec<Event>) -> Result<(),
                 if crate::environments::cancel(state, id).await? {
                     continue;
                 }
+                // Nor has a continuation the service has yet to send.
+                if crate::reconcile::cancel_pending(state, id).await? {
+                    continue;
+                }
                 let running = crate::records::running_turns(state, id).await?;
                 // A turn Codex started may not be recorded yet, for example
                 // just after the session was created with input. Stop the

@@ -52,8 +52,12 @@ Throughout the gap, saved history stays readable, mutations return 503
 and stale callbacks cannot resolve the replacement's work. Interrupted work is
 not replayed. A turn the loss cut short ends `failed` (`backend connection
 lost`), even though the replacement's history calls it interrupted; only a
-turn a caller asked to cancel ends `cancelled`. Once a worker serves again,
-each session whose latest turn was cut short is continued: the service sends
+turn a caller asked to cancel ends `cancelled`. The session itself stays
+`in_progress` meanwhile (a session awaiting function results fails), so a
+client that stops at `failed` does not lose it, and a cancel in that gap
+returns it to `idle` instead. Once a worker serves again, each session whose
+latest turn was cut short is continued, or fails when it cannot be: the
+service sends
 it an input saying the turn was interrupted, that the conversation is intact,
 and that the last action may or may not have finished, so the agent checks
 before repeating it. `--continue-interrupted-turns N` (default 1, at most

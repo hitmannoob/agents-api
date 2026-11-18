@@ -50,7 +50,9 @@ impl Store {
         sqlx::query("UPDATE input_requests SET state = 'unknown' WHERE state = 'pending'")
             .execute(&pool)
             .await?;
-        crate::records::disconnected(&pool).await?;
+        // The configured continuation applies once the service starts;
+        // until then these sessions read as failed.
+        crate::records::disconnected(&pool, /*continuing*/ false).await?;
         Ok(Self(pool, lock))
     }
 

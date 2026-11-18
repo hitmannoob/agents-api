@@ -177,13 +177,11 @@ async fn reconcile_session(state: &State, session_id: &str) -> anyhow::Result<()
 /// flight may or may not have taken effect.
 pub(crate) const CONTINUE_INPUT: &str = "The service restarted the agent's worker while your previous turn was running, so that turn was interrupted. The conversation so far is intact, but the last action you started may or may not have finished: check its effects before repeating it. Continue the task from where you left off.";
 
-/// Continue, once a backend serves again, the sessions whose latest turn a
-/// worker loss interrupted, unless the operator disabled it. Runs in the
-/// background.
+/// Decide, once a backend serves again, each session whose latest turn a
+/// worker loss interrupted: continue it, or fail it when continuation is
+/// disabled, used up, or blocked by function results the caller owes.
+/// Runs in the background.
 pub(crate) fn continue_interrupted(state: &Arc<State>) {
-    if state.continuations.load(Ordering::Relaxed) == 0 {
-        return;
-    }
     let state = Arc::clone(state);
     tokio::spawn(async move {
         if let Err(error) = continue_sessions(&state).await {
@@ -195,12 +193,18 @@ pub(crate) fn continue_interrupted(state: &Arc<State>) {
     });
 }
 
+/// Sessions that may be waiting on a continuation: running ones whose latest
+/// turn the loss interrupted, and ones that loss failed outright.
+const CANDIDATES: &str = "SELECT s.id FROM public_sessions s WHERE (\
+    (json_extract(s.data, '$.status') = 'failed' AND json_extract(s.data, '$.error') = 'backend connection lost') \
+    OR (json_extract(s.data, '$.status') = 'in_progress' AND (SELECT json_extract(t.data, '$.error.message') FROM public_records t \
+        WHERE t.session_id = s.id AND t.kind = 'turn' ORDER BY json_extract(t.data, '$.created_at') DESC, t.rowid DESC LIMIT 1) \
+        = 'backend connection lost'))";
+
 async fn continue_sessions(state: &Arc<State>) -> anyhow::Result<()> {
-    let sessions: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM public_sessions WHERE json_extract(data, '$.status') = 'failed' AND json_extract(data, '$.error') = 'backend connection lost'",
-    )
-    .fetch_all(&state.store.0)
-    .await?;
+    let sessions: Vec<String> = sqlx::query_scalar(CANDIDATES)
+        .fetch_all(&state.store.0)
+        .await?;
     for session_id in sessions {
         // Passes may overlap; one session is decided by one pass at a time,
         // and the decision re-reads its state, so it is continued once.
@@ -220,34 +224,48 @@ async fn continue_sessions(state: &Arc<State>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn continue_session(state: &Arc<State>, session_id: &str) -> anyhow::Result<()> {
-    let attempts = i64::from(state.continuations.load(Ordering::Relaxed));
-    let lost: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM public_sessions WHERE id = ? AND json_extract(data, '$.status') = 'failed' AND json_extract(data, '$.error') = 'backend connection lost')",
-    )
-    .bind(session_id)
-    .fetch_one(&state.store.0)
-    .await?;
-    if !lost {
-        return Ok(());
-    }
-    // Newest first. Only a turn the loss interrupted is continued, and only
-    // while fewer than `attempts` consecutive turns before it were
-    // interrupted too, so a turn that keeps killing its worker stops.
-    let turns: Vec<(String, Option<String>)> = sqlx::query_as(
+/// The session's newest turns, newest first, as (ID, error message).
+async fn latest_turns(
+    state: &State,
+    session_id: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<(String, Option<String>)>> {
+    Ok(sqlx::query_as(
         "SELECT id, json_extract(data, '$.error.message') FROM public_records WHERE session_id = ? AND kind = 'turn' \
          ORDER BY json_extract(data, '$.created_at') DESC, rowid DESC LIMIT ?",
     )
     .bind(session_id)
-    .bind(attempts + 1)
+    .bind(limit)
     .fetch_all(&state.store.0)
+    .await?)
+}
+
+async fn continue_session(state: &Arc<State>, session_id: &str) -> anyhow::Result<()> {
+    let attempts = i64::from(state.continuations.load(Ordering::Relaxed));
+    let status: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT json_extract(data, '$.status'), json_extract(data, '$.error') FROM public_sessions WHERE id = ?",
+    )
+    .bind(session_id)
+    .fetch_optional(&state.store.0)
     .await?;
+    let Some((Some(status), error)) = status else {
+        return Ok(());
+    };
+    let pending = status == "in_progress";
+    let lost = status == "failed" && error.as_deref() == Some("backend connection lost");
+    if !pending && !lost {
+        return Ok(());
+    }
+    // Only a turn the loss interrupted is continued, and only while fewer
+    // than `attempts` consecutive turns before it were interrupted too, so a
+    // turn that keeps killing its worker stops.
+    let turns = latest_turns(state, session_id, attempts + 1).await?;
     let interrupted = turns
         .iter()
         .take_while(|(_, message)| message.as_deref() == Some("backend connection lost"))
         .count() as i64;
-    if interrupted == 0 || interrupted > attempts {
-        return Ok(());
+    if interrupted == 0 {
+        return Ok(()); // A newer turn is running or finished.
     }
     // Function calls the caller still has to resolve cannot be continued past.
     let latest = &turns[0].0;
@@ -259,17 +277,51 @@ async fn continue_session(state: &Arc<State>, session_id: &str) -> anyhow::Resul
     .bind(state.turn_aliases.codex(latest))
     .fetch_one(&state.store.0)
     .await?;
-    if unresolved {
-        return Ok(());
+    let fail = || async {
+        if pending {
+            crate::records::session_status(
+                state,
+                session_id,
+                "failed",
+                Some("backend connection lost"),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.1))?;
+        }
+        anyhow::Ok(())
+    };
+    if attempts == 0 || interrupted > attempts || unresolved {
+        return fail().await;
     }
     let input = vec![json!({"type": "text", "text": CONTINUE_INPUT})];
-    crate::environments::submit(state, session_id, input)
-        .await
-        .map_err(|error| anyhow::anyhow!(error.1))?;
+    if let Err(error) = crate::environments::submit(state, session_id, input).await {
+        fail().await?;
+        anyhow::bail!(error.1);
+    }
     tracing::info!(
         session_id,
         interrupted_turn = latest,
         "continuing interrupted turn"
     );
     Ok(())
+}
+
+/// A cancel that arrives while a session waits for its continuation stops it:
+/// the session goes idle and is not continued. Returns whether it was waiting.
+pub(crate) async fn cancel_pending(state: &State, session_id: &str) -> anyhow::Result<bool> {
+    let pending: bool = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT json_extract(data, '$.status') FROM public_sessions WHERE id = ?1) = 'in_progress' \
+         AND (SELECT json_extract(data, '$.error.message') FROM public_records WHERE session_id = ?1 AND kind = 'turn' \
+              ORDER BY json_extract(data, '$.created_at') DESC, rowid DESC LIMIT 1) = 'backend connection lost', 0)",
+    )
+    .bind(session_id)
+    .fetch_one(&state.store.0)
+    .await?;
+    if !pending {
+        return Ok(false);
+    }
+    crate::records::session_status(state, session_id, "idle", None)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.1))?;
+    Ok(true)
 }

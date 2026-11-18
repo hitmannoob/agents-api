@@ -360,6 +360,7 @@ impl AgentsApi {
             let _ = previous.cancel.send(true);
         }
         let retired = lock(&self.pump).take();
+        let replacing = retired.is_some();
         if let Some(retired) = retired {
             retired.await??;
         }
@@ -395,7 +396,12 @@ impl AgentsApi {
         if let Err(error) = sessions::cleanup(&self.state).await {
             tracing::warn!(error = format!("{error:#}"), "session cleanup failed");
         }
-        reconcile::continue_interrupted(&self.state);
+        // A replacement worker continues the turns its predecessor's loss cut
+        // short. At startup that waits for the operator's setting
+        // ([`Self::set_interrupted_turn_continuations`]).
+        if replacing {
+            reconcile::continue_interrupted(&self.state);
+        }
         Ok(())
     }
 
@@ -473,7 +479,8 @@ impl AgentsApi {
     /// Continue a session's turn that a worker loss interrupted, by sending it
     /// [`reconcile::CONTINUE_INPUT`] once a worker serves again, for up to
     /// `attempts` consecutive interruptions (1 by default); 0 leaves such
-    /// sessions failed. Sessions already interrupted are continued now.
+    /// sessions failed. Call it at startup: sessions a previous process left
+    /// interrupted are continued (or failed) then.
     pub fn set_interrupted_turn_continuations(&self, attempts: u32) {
         self.state
             .continuations
@@ -658,7 +665,11 @@ async fn disconnect_bookkeeping(state: &State) -> anyhow::Result<()> {
     )
     .execute(&state.store.0)
     .await?;
-    records::disconnected(&state.store.0).await?;
+    let continuing = state
+        .continuations
+        .load(std::sync::atomic::Ordering::Relaxed)
+        > 0;
+    records::disconnected(&state.store.0, continuing).await?;
     state.streams.clear();
     let _ = state.events.send(json!({"method": "stream/disconnected"}));
     let _ = state.public_events.send(json!({"type":"disconnect"}));
