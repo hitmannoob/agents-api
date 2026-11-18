@@ -349,6 +349,7 @@ async fn restore(
         return Ok(());
     };
     let reset_count: i64 = sqlx::Row::try_get(&row, 0)?;
+    crate::lock(&state.stale_mcp).insert(session_id.to_owned());
     if reset {
         crate::records::emit(
             state,

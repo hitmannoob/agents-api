@@ -1534,6 +1534,72 @@ async fn managed_environments_run_mcp_servers_on_the_sandbox() -> anyhow::Result
     }).await?
 }
 
+/// A suspended session's sandbox stops, taking its stdio MCP servers with it;
+/// once input resumes it, the agent's MCP tools work again.
+#[tokio::test]
+async fn managed_mcp_servers_work_after_suspend_and_resume() -> anyhow::Result<()> {
+    // The stdio fixture is a POSIX shell script.
+    if cfg!(windows) {
+        return Ok(());
+    }
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let workspace_root = workspace_path.to_string_lossy().into_owned();
+        let model = create_mock_responses_server_sequence_unchecked(vec![
+            capabilities::call("mcp__collab.where", "before-suspend"),
+            create_final_assistant_message_sse_response("one")?,
+            capabilities::call("mcp__collab.where", "after-resume"),
+            create_final_assistant_message_sse_response("two")?,
+        ]).await;
+        MockResponsesConfig::new(&model.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        std::fs::write(workspace_path.join("server.sh"), STDIO_MCP)?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        api.configure_vault("test-vault-passphrase-for-managed-mcp-resume".into()).await?;
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        api.set_managed_lifecycle(codex_agents_api::managed::Lifecycle {
+            tick: Duration::from_millis(/*millis*/ 100),
+            idle_suspend: Duration::from_millis(/*millis*/ 1500),
+            snapshot_interval: Duration::from_secs(/*secs*/ 60),
+            snapshot_ttl: Duration::from_secs(/*secs*/ 600),
+            death_grace: Duration::from_millis(/*millis*/ 300),
+        });
+        let provider = TestProvider { workspace: workspace_root.clone(), ..Default::default() };
+        api.configure_environment_provider(Arc::new(provider.clone()));
+        let client = reqwest::Client::new();
+        let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"), json!({
+            "agent":{"model":"mock-model","tools":[{"type":"mcp","server_label":"collab","allowed_tools":["where"],
+                "transport":{"type":"stdio","command":"/bin/sh","args":["server.sh"],"cwd":workspace_root,
+                    "env":{"FIXTURE_SECRET":"kept-secret"}}}]},
+            "environment":{"type":"openai_hosted"},"input":"before"})).await?;
+        let url = format!("{base}/agents/sessions/{}", session["id"].as_str().context("session id")?);
+        let mut stream = client.get(format!("{url}/events")).bearer_auth(TOKEN).send().await?.error_for_status()?;
+        idle(&client, &url, /*expected_turns*/ 1).await?;
+        until_event(&mut stream, "agent.session.environment.suspended").await?;
+
+        assert_eq!(send(&client, &url, message("after")).await?, reqwest::StatusCode::ACCEPTED);
+        idle(&client, &url, /*expected_turns*/ 2).await?;
+        let outputs: Vec<(String, String)> = model.received_requests().await.context("requests")?.iter()
+            .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+            .flat_map(|body| body["input"].as_array().cloned().unwrap_or_default())
+            .filter(|item| item["type"] == "function_call_output")
+            .map(|item| (item["call_id"].as_str().unwrap_or_default().to_owned(), item["output"].to_string()))
+            .collect();
+        let output = |call: &str| outputs.iter().find(|(id, _)| id == call).map(|(_, output)| output.clone()).unwrap_or_default();
+        let expected = format!("stdio-in-{workspace_root}-with-kept-secret");
+        assert!(output("before-suspend").contains(&expected), "{outputs:?}");
+        assert!(output("after-resume").contains(&expected), "{outputs:?}");
+        for (_, executor) in TestProvider::lock(&provider.executors)?.drain() {
+            executor.abort();
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
 #[tokio::test]
 async fn managed_environments_snapshot_reset_suspend_resume_and_expire() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {

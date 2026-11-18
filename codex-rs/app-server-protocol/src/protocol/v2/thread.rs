@@ -743,6 +743,21 @@ pub enum ThreadUnsubscribeStatus {
     Unsubscribed,
 }
 
+/// Parameters for `thread/mcpServers/refresh`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadMcpServersRefreshParams {
+    /// Thread whose MCP servers should reconnect before its next use.
+    pub thread_id: String,
+}
+
+/// Response for `thread/mcpServers/refresh`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadMcpServersRefreshResponse {}
+
 /// Parameters for `thread/increment_elicitation`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]

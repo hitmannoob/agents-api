@@ -658,7 +658,10 @@ program that answers the JSON-lines protocol it documents.
   connects from the sandbox under its network access: with `restricted`, its
   host must be listed in `allowed_domains`; with `disabled`, only loopback
   servers inside the sandbox work. Others return 400 when the session is
-  created.
+  created. When suspension or a reset replaces the sandbox, the servers that
+  ran in it are gone; before the session's next turn the service reconnects
+  them (Codex's experimental `thread/mcpServers/refresh`), so they start
+  again in the new sandbox.
 - **Cleanup:** deleting the session destroys its sandbox; one still
   provisioning is destroyed when it comes up. A sandbox whose deletion a crash
   interrupts runs until its provider lifetime ends (24 hours on Modal).

@@ -623,6 +623,16 @@ pub(crate) async fn start_turn(
                 )
                 .await?;
             crate::lock(&loaded).insert(thread_id.clone());
+            // Resuming started its MCP servers against the current sandbox.
+            crate::lock(&state.stale_mcp).remove(id);
+        } else if crate::lock(&state.stale_mcp).remove(id)
+            && session.agent.config.tools.iter().any(|tool| matches!(tool,
+                crate::agent_tools::Tool::Capability(tool) if crate::mcp::needs_environment(tool)))
+        {
+            // Its servers ran in the sandbox that was replaced.
+            state
+                .rpc("thread/mcpServers/refresh", json!({"threadId": thread_id}))
+                .await?;
         }
         thread_id
     } else {

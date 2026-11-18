@@ -582,6 +582,14 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadUnsubscribeResponse,
     },
+    #[experimental("thread/mcpServers/refresh")]
+    /// Reconnect every MCP server of one loaded thread, for example after the
+    /// environment its stdio servers ran in was replaced.
+    ThreadMcpServersRefresh => "thread/mcpServers/refresh" {
+        params: v2::ThreadMcpServersRefreshParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadMcpServersRefreshResponse,
+    },
     #[experimental("thread/increment_elicitation")]
     /// Increment the thread-local out-of-band elicitation counter.
     ///

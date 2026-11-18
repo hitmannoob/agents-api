@@ -1340,6 +1340,11 @@ impl MessageProcessor {
                     .thread_delete(request_id.clone(), params)
                     .await
             }
+            ClientRequest::ThreadMcpServersRefresh { params, .. } => {
+                self.thread_processor
+                    .thread_mcp_servers_refresh(params)
+                    .await
+            }
             ClientRequest::ThreadIncrementElicitation { params, .. } => {
                 self.thread_processor
                     .thread_increment_elicitation(params)

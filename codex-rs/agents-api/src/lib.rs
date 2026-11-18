@@ -111,6 +111,10 @@ struct State {
     lifecycle_started: std::sync::atomic::AtomicBool,
     /// Managed environments a new sandbox is being provisioned for.
     reprovisioning: Mutex<HashSet<String>>,
+    /// Sessions whose managed environment was replaced (resumed or reset):
+    /// their stdio and environment-origin MCP servers ran in the old sandbox,
+    /// so a thread still loaded reconnects them before its next turn.
+    stale_mcp: Mutex<HashSet<String>>,
     /// How many consecutive worker-loss interruptions a session's turns are
     /// continued after (1 by default); 0 leaves interrupted sessions failed.
     continuations: std::sync::atomic::AtomicU32,
@@ -299,6 +303,7 @@ impl AgentsApi {
             lifecycle: Mutex::default(),
             lifecycle_started: std::sync::atomic::AtomicBool::new(false),
             reprovisioning: Mutex::default(),
+            stale_mcp: Mutex::default(),
             continuations: std::sync::atomic::AtomicU32::new(1),
             continuing: Mutex::default(),
             started_turns: Mutex::default(),

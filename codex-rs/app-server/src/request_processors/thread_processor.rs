@@ -645,6 +645,18 @@ impl ThreadRequestProcessor {
         }
     }
 
+    pub(crate) async fn thread_mcp_servers_refresh(
+        &self,
+        params: ThreadMcpServersRefreshParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let (_, thread) = self.load_thread(&params.thread_id).await?;
+        thread
+            .submit(Op::RefreshMcpServers)
+            .await
+            .map_err(|err| internal_error(format!("failed to refresh MCP servers: {err}")))?;
+        Ok(Some(ThreadMcpServersRefreshResponse {}.into()))
+    }
+
     pub(crate) async fn thread_increment_elicitation(
         &self,
         params: ThreadIncrementElicitationParams,
