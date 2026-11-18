@@ -283,6 +283,7 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
     // Related records commit together; events are broadcast only afterwards.
     let mut events = Vec::new();
     let mut follow_up = None;
+    let mut turn_ended = false;
     let mut cancelled = None;
     match method {
         "turn/started" | "turn/completed" => {
@@ -352,6 +353,7 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
             }
             events.push(json!({"type":format!("agent.session.turn.{status}"),"session_id":id,"turn_id":turn_id,"turn":turn}));
             if status != "in_progress" && root {
+                turn_ended = true;
                 if status == "completed" && unanswered_input(&mut tx, &id, turn_id).await? {
                     follow_up = Some(id.clone());
                 } else {
@@ -566,6 +568,10 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
     tx.commit().await.map_err(anyhow::Error::from)?;
     for event in events {
         emit(state, event);
+    }
+    if turn_ended {
+        // A managed environment is snapshotted once its session settles.
+        state.lifecycle_wake.notify_one();
     }
     if let Some(turn_id) = cancelled {
         let state = Arc::clone(state);

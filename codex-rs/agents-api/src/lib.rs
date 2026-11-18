@@ -109,6 +109,9 @@ struct State {
     /// Managed environments' snapshot, reset, suspension, and expiry timing.
     lifecycle: Mutex<managed::Lifecycle>,
     lifecycle_started: std::sync::atomic::AtomicBool,
+    /// Wakes the lifecycle loop before its next tick, when a turn ends or a
+    /// file is written, so the work is snapshotted promptly.
+    lifecycle_wake: Arc<tokio::sync::Notify>,
     /// Managed environments a new sandbox is being provisioned for.
     reprovisioning: Mutex<HashSet<String>>,
     /// Sessions whose managed environment was replaced (resumed or reset):
@@ -302,6 +305,7 @@ impl AgentsApi {
             provider: Mutex::default(),
             lifecycle: Mutex::default(),
             lifecycle_started: std::sync::atomic::AtomicBool::new(false),
+            lifecycle_wake: Arc::default(),
             reprovisioning: Mutex::default(),
             stale_mcp: Mutex::default(),
             continuations: std::sync::atomic::AtomicU32::new(1),

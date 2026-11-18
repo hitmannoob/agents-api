@@ -73,7 +73,7 @@ pub struct SetupCommand {
 }
 
 /// A file written into the workspace before the setup commands run.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct ProvisionFile {
     /// An absolute path inside the workspace.
     pub path: String,
@@ -733,11 +733,27 @@ pub(crate) fn parse(value: &Value, workspace: &str) -> Result<Hosted, ApiError> 
 
 /// The secrets-store name of a managed environment's confidential variables.
 pub(crate) fn env_secret(environment_id: &str) -> String {
-    let hex: String = environment_id
+    format!("MANAGED_ENV_{}", hex(environment_id))
+}
+
+/// The secrets-store name of a managed environment's files and setup
+/// commands, which a reset without a snapshot replays.
+pub(crate) fn setup_secret(environment_id: &str) -> String {
+    format!("MANAGED_SETUP_{}", hex(environment_id))
+}
+
+fn hex(environment_id: &str) -> String {
+    environment_id
         .bytes()
         .map(|byte| format!("{byte:02X}"))
-        .collect();
-    format!("MANAGED_ENV_{hex}")
+        .collect()
+}
+
+/// A managed environment's files and setup commands, as kept for replay.
+#[derive(Deserialize, Serialize)]
+pub(crate) struct Setup {
+    pub files: Vec<ProvisionFile>,
+    pub setup_commands: Vec<SetupCommand>,
 }
 
 /// A fresh connect token for an environment's executor.
@@ -831,16 +847,39 @@ pub(crate) async fn create(
         "packages": hosted.packages, "plugins": [], "skills": [], "container_size": hosted.container_size,
         "desktop": null});
     let token = new_token();
-    // A reset or resume needs the confidential variables again; they are kept
-    // encrypted, which needs the operator's vault passphrase.
-    if !hosted.env.is_empty() && state.secrets.configured() {
-        state
-            .secrets
-            .set(env_secret(environment_id), json!(hosted.env))
-            .await
-            .map_err(|error| anyhow::anyhow!(error.1))?;
+    let provision_files: Vec<ProvisionFile> = hosted
+        .files
+        .into_iter()
+        .map(|file| ProvisionFile {
+            path: file.path,
+            data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, file.contents),
+        })
+        .collect();
+    let setup_count = provision_files.len() + hosted.setup_commands.len();
+    // A reset or resume needs the confidential variables again, and a reset
+    // before the first snapshot needs the files and setup commands too; they
+    // are kept encrypted, which needs the operator's vault passphrase.
+    if state.secrets.configured() {
+        if !hosted.env.is_empty() {
+            state
+                .secrets
+                .set(env_secret(environment_id), json!(hosted.env))
+                .await
+                .map_err(|error| anyhow::anyhow!(error.1))?;
+        }
+        if setup_count > 0 {
+            let setup = Setup {
+                files: provision_files.clone(),
+                setup_commands: hosted.setup_commands.clone(),
+            };
+            state
+                .secrets
+                .set(setup_secret(environment_id), serde_json::to_value(setup)?)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.1))?;
+        }
     }
-    sqlx::query("INSERT INTO environments (id, session_id, data, provider, token_sha256, workspace_directory, registry_url, env_count) VALUES (?, ?, ?, 'managed', ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO environments (id, session_id, data, provider, token_sha256, workspace_directory, registry_url, env_count, setup_count) VALUES (?, ?, ?, 'managed', ?, ?, ?, ?, ?)")
         .bind(environment_id)
         .bind(session_id)
         .bind(public.to_string())
@@ -848,6 +887,7 @@ pub(crate) async fn create(
         .bind(workspace)
         .bind(&registry_url)
         .bind(hosted.env.len() as i64)
+        .bind(setup_count as i64)
         .execute(&state.store.0)
         .await?;
     let request = ProvisionRequest {
@@ -857,17 +897,7 @@ pub(crate) async fn create(
         container_size: hosted.container_size,
         packages: hosted.packages,
         env: hosted.env,
-        files: hosted
-            .files
-            .into_iter()
-            .map(|file| ProvisionFile {
-                path: file.path,
-                data: base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    file.contents,
-                ),
-            })
-            .collect(),
+        files: provision_files,
         setup_commands: hosted.setup_commands,
         network: hosted.network,
         snapshot_id: None,

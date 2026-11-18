@@ -52,14 +52,21 @@ impl Workspace {
     pub(crate) async fn open(state: &State, environment_id: &str) -> Result<Self, ApiError> {
         // A managed environment keeps its workspace in its own column; a
         // self-hosted one in its public object.
-        let row: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT data, workspace_directory FROM environments WHERE id = ?")
-                .bind(environment_id)
-                .fetch_optional(&state.store.0)
-                .await
-                .map_err(anyhow::Error::from)?;
-        let (data, workspace) =
+        let row: Option<(String, Option<String>, bool)> = sqlx::query_as(
+            "SELECT data, workspace_directory, provider IS NOT NULL AND failed AND connected_once FROM environments WHERE id = ?",
+        )
+        .bind(environment_id)
+        .fetch_optional(&state.store.0)
+        .await
+        .map_err(anyhow::Error::from)?;
+        let (data, workspace, lost) =
             row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "environment not found".into()))?;
+        if lost {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                crate::environments::LOST.into(),
+            ));
+        }
         let data: Value = serde_json::from_str(&data).map_err(anyhow::Error::from)?;
         let workspace =
             workspace.or_else(|| data["workspace_directory"].as_str().map(str::to_owned));
@@ -204,6 +211,14 @@ pub(crate) async fn create(
         .write_file(&path, contents, options, /*sandbox*/ None)
         .await
         .map_err(unavailable)?;
+    // A file written into a managed environment is work to snapshot.
+    sqlx::query("UPDATE environments SET activity_ms = ? WHERE id = ? AND provider IS NOT NULL")
+        .bind(crate::records::now_ms())
+        .bind(&environment_id)
+        .execute(&state.store.0)
+        .await
+        .map_err(anyhow::Error::from)?;
+    state.lifecycle_wake.notify_one();
     Ok(Json(file(&environment_id, &path, size)))
 }
 

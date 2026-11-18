@@ -1205,6 +1205,8 @@ struct TestProvider {
     dead: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     executors:
         Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Snapshots fail while set, as before a sandbox's first one completes.
+    refuse_snapshots: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TestProvider {
@@ -1289,6 +1291,12 @@ impl codex_agents_api::managed::EnvironmentProvider for TestProvider {
             anyhow::ensure!(
                 !Self::lock(&provider.dead)?.contains(&sandbox_id),
                 "sandbox {sandbox_id} is gone"
+            );
+            anyhow::ensure!(
+                !provider
+                    .refuse_snapshots
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                "snapshot not ready"
             );
             let mut snapshots = Self::lock(&provider.snapshots)?;
             snapshots.push(sandbox_id);
@@ -1593,6 +1601,142 @@ async fn managed_mcp_servers_work_after_suspend_and_resume() -> anyhow::Result<(
         let expected = format!("stdio-in-{workspace_root}-with-kept-secret");
         assert!(output("before-suspend").contains(&expected), "{outputs:?}");
         assert!(output("after-resume").contains(&expected), "{outputs:?}");
+        for (_, executor) in TestProvider::lock(&provider.executors)?.drain() {
+            executor.abort();
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
+/// A sandbox lost before its first snapshot is rebuilt from the environment's
+/// original files and setup commands, which the vault keeps; without them the
+/// environment is reported lost and input is refused at once.
+#[tokio::test]
+async fn managed_environments_without_a_snapshot_are_rebuilt_or_reported_lost() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let workspace_root = workspace_path.to_string_lossy().into_owned();
+        let model = create_mock_responses_server_repeating_assistant("finished").await;
+        MockResponsesConfig::new(&model.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        let client = reqwest::Client::new();
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        api.set_managed_lifecycle(codex_agents_api::managed::Lifecycle {
+            tick: Duration::from_millis(/*millis*/ 100),
+            idle_suspend: Duration::from_secs(/*secs*/ 600),
+            snapshot_interval: Duration::from_secs(/*secs*/ 60),
+            snapshot_ttl: Duration::from_secs(/*secs*/ 600),
+            death_grace: Duration::from_millis(/*millis*/ 300),
+        });
+        let provider = TestProvider { workspace: workspace_root.clone(), ..Default::default() };
+        provider.refuse_snapshots.store(true, std::sync::atomic::Ordering::SeqCst);
+        api.configure_environment_provider(Arc::new(provider.clone()));
+        let hosted = json!({"agent":{"model":"mock-model"},"environment":{"type":"openai_hosted","packages":{"python":["pytest"]},
+            "files":[{"type":"inline","path":format!("{workspace_root}/notes.txt"),"data":"aGVsbG8="}],
+            "setup_commands":[{"command":"make setup"}]},"input":"first"});
+        let start = |hosted: Value| {
+            let client = client.clone();
+            let sessions = format!("{base}/agents/sessions");
+            async move {
+                let session = request(&client, reqwest::Method::POST, &sessions, hosted).await?;
+                let url = format!("{sessions}/{}", session["id"].as_str().context("session id")?);
+                let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
+                let stream = client.get(format!("{url}/events")).bearer_auth(TOKEN).send().await?.error_for_status()?;
+                idle(&client, &url, /*expected_turns*/ 1).await?;
+                anyhow::Ok((url, environment_id, stream))
+            }
+        };
+
+        // Without a vault passphrase the setup is not kept, so the lost
+        // sandbox cannot be rebuilt: the environment fails, and input and
+        // file writes are refused rather than waiting for an executor.
+        let (url, environment_id, mut stream) = start(hosted.clone()).await?;
+        provider.kill(&format!("sb-{environment_id}"))?;
+        let events = until_event(&mut stream, "agent.session.environment.failed").await?;
+        let failed = events.last().context("failed event")?;
+        assert_eq!(failed["environment"]["error"]["code"], json!("environment_reset_failed"));
+        assert!(failed["environment"]["error"]["message"].as_str().unwrap_or_default().contains("files and setup commands were not kept"), "{failed}");
+        let lost = "this session's environment was lost and could not be restored; create a new session";
+        let refused = client.post(format!("{url}/events")).bearer_auth(TOKEN).json(&json!({"events":[message("again")]})).send().await?;
+        assert_eq!((refused.status(), refused.json::<Value>().await?["error"]["message"].clone()), (reqwest::StatusCode::CONFLICT, json!(lost)));
+        let write = client.post(format!("{base}/agents/environments/{environment_id}/files")).bearer_auth(TOKEN)
+            .json(&json!({"type":"inline","path":format!("{workspace_root}/x.txt"),"data":"eA=="})).send().await?;
+        assert_eq!((write.status(), write.json::<Value>().await?["error"]["message"].clone()), (reqwest::StatusCode::CONFLICT, json!(lost)));
+
+        // With one, the sandbox is rebuilt from the original packages, files,
+        // and setup commands, and the session goes on.
+        api.configure_vault("test-vault-passphrase-for-managed-setup-replay".into()).await?;
+        let (url, environment_id, mut stream) = start(hosted).await?;
+        provider.kill(&format!("sb-{environment_id}"))?;
+        let events = until_event(&mut stream, "agent.session.environment.reset").await?;
+        assert_eq!(events.last().context("reset event")?["reset_count"], json!(1));
+        until_event(&mut stream, "agent.session.environment.connected").await?;
+        let rebuilt = provider.requests()?.last().cloned().context("rebuild request")?;
+        assert_eq!(
+            (&rebuilt["snapshot_id"], &rebuilt["packages"]["python"], &rebuilt["files"], &rebuilt["setup_commands"]),
+            (&Value::Null, &json!(["pytest"]), &json!([{"path":format!("{workspace_root}/notes.txt"),"data":"aGVsbG8="}]),
+                &json!([{"command":"make setup","cwd":null}]))
+        );
+        assert_eq!(send(&client, &url, message("second")).await?, reqwest::StatusCode::ACCEPTED);
+        idle(&client, &url, /*expected_turns*/ 2).await?;
+        for (_, executor) in TestProvider::lock(&provider.executors)?.drain() {
+            executor.abort();
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
+/// Snapshots follow the work: once a turn ends, and once a file is written,
+/// without waiting for the lifecycle's next tick.
+#[tokio::test]
+async fn managed_environments_are_snapshotted_when_work_ends() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 60), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let workspace_root = workspace_path.to_string_lossy().into_owned();
+        let model = create_mock_responses_server_repeating_assistant("finished").await;
+        MockResponsesConfig::new(&model.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        let client = reqwest::Client::new();
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        // A tick far longer than the test: only wakes can snapshot.
+        api.set_managed_lifecycle(codex_agents_api::managed::Lifecycle {
+            tick: Duration::from_secs(/*secs*/ 600),
+            ..Default::default()
+        });
+        let provider = TestProvider { workspace: workspace_root.clone(), ..Default::default() };
+        api.configure_environment_provider(Arc::new(provider.clone()));
+        let snapshots = |count: usize| {
+            let provider = provider.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
+                    while TestProvider::lock(&provider.snapshots)?.len() < count {
+                        tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
+                    }
+                    anyhow::Ok(())
+                })
+                .await
+                .context("no prompt snapshot")?
+            }
+        };
+        let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"),
+            json!({"agent":{"model":"mock-model"},"environment":{"type":"openai_hosted"},"input":"work"})).await?;
+        let url = format!("{base}/agents/sessions/{}", session["id"].as_str().context("session id")?);
+        let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
+        idle(&client, &url, /*expected_turns*/ 1).await?;
+        snapshots(1).await?;
+        request(&client, reqwest::Method::POST, &format!("{base}/agents/environments/{environment_id}/files"),
+            json!({"type":"inline","path":format!("{workspace_root}/later.txt"),"data":"bGF0ZXI="})).await?;
+        snapshots(2).await?;
         for (_, executor) in TestProvider::lock(&provider.executors)?.drain() {
             executor.abort();
         }

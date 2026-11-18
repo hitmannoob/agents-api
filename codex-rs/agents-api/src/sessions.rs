@@ -283,7 +283,10 @@ pub(crate) async fn delete(
         crate::environments::forget(&state, &environment_id).await;
         state
             .secrets
-            .discard(vec![crate::managed::env_secret(&environment_id)])
+            .discard(vec![
+                crate::managed::env_secret(&environment_id),
+                crate::managed::setup_secret(&environment_id),
+            ])
             .await;
         // A managed environment's sandbox goes with its session. One still
         // provisioning is destroyed when it comes up.

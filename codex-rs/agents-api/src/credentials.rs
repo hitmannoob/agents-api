@@ -189,10 +189,11 @@ pub(crate) async fn forget(state: &State, session_id: &str, labels: Vec<String>)
         .await;
 }
 
-/// Remove stored secrets that no credential, session snapshot, or webhook
-/// endpoint names: what a crash between a deletion's commit and its secret
-/// removal leaves behind. Runs once, when the passphrase is configured and
-/// before any request can store a secret. Returns how many were removed.
+/// Remove stored secrets that no credential, session snapshot, webhook
+/// endpoint, or live managed environment names: what a crash between a
+/// deletion's commit and its secret removal leaves behind. Runs once, when the
+/// passphrase is configured and before any request can store a secret. Returns
+/// how many were removed.
 pub(crate) async fn sweep(state: &State, stored: Vec<String>) -> anyhow::Result<usize> {
     let pool = &state.store.0;
     let mut referenced = std::collections::HashSet::new();
@@ -221,6 +222,16 @@ pub(crate) async fn sweep(state: &State, stored: Vec<String>) -> anyhow::Result<
         .await?
     {
         referenced.insert(crate::stdio_env::session_name(&id));
+    }
+    // Managed environments that may still be reset or resumed.
+    for id in sqlx::query_scalar::<_, String>(
+        "SELECT id FROM environments WHERE provider IS NOT NULL AND expired = 0",
+    )
+    .fetch_all(pool)
+    .await?
+    {
+        referenced.insert(crate::managed::env_secret(&id));
+        referenced.insert(crate::managed::setup_secret(&id));
     }
     for id in sqlx::query_scalar::<_, String>("SELECT id FROM webhook_endpoints")
         .fetch_all(pool)

@@ -209,12 +209,25 @@ async fn vault_credentials_authenticate_mcp_as_session_snapshots() -> anyhow::Re
         let pool = codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::from_absolute_path(&data_path)?)
             .open_read_write_pool(data_path.join("agents-api.sqlite").as_path()).await?;
         sqlx::query("DELETE FROM vault_credentials WHERE id = ?").bind(d["id"].as_str()).execute(&pool).await?;
+        // A live managed environment keeps its variables and setup for a
+        // reset or resume; an expired one's are orphans.
+        let managed = |id: &str| { let hex: String = id.bytes().map(|byte| format!("{byte:02X}")).collect();
+            [format!("MANAGED_ENV_{hex}"), format!("MANAGED_SETUP_{hex}")] };
+        for (id, expired) in [("env_live", 0), ("env_gone", 1)] {
+            sqlx::query("INSERT INTO environments (id, session_id, data, provider, expired) VALUES (?, ?, '{}', 'managed', ?)")
+                .bind(id).bind(format!("sess_{id}")).bind(expired).execute(&pool).await?;
+            for name in managed(id) {
+                sqlx::query("INSERT INTO secret_values (name, ciphertext) VALUES (?, x'00')").bind(name).execute(&pool).await?;
+            }
+        }
         pool.close().await;
         let secret_name = |credential: &Value| credential["id"].as_str().map(|id| format!("VAULT_{}", id.to_ascii_uppercase()));
         assert_eq!(stored_secrets(&data_path).await?.contains(&secret_name(&d).context("orphan")?), true);
         let api = start(true).await?;
         let stored = stored_secrets(&data_path).await?;
         assert_eq!((stored.contains(&secret_name(&d).context("orphan")?), stored.contains(&secret_name(&a).context("kept")?)), (false, true));
+        assert_eq!(managed("env_live").iter().chain(&managed("env_gone")).map(|name| stored.contains(name)).collect::<Vec<_>>(),
+            vec![true, true, false, false]);
 
         // Snapshots survive a restart under the same passphrase.
         let (base, server) = capabilities::serve(&api).await?;

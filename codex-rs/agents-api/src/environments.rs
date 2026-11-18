@@ -430,6 +430,11 @@ pub(crate) async fn attach(
     Ok(())
 }
 
+/// Why input and file operations are refused for a managed environment whose
+/// sandbox was lost and could not be replaced.
+pub(crate) const LOST: &str =
+    "this session's environment was lost and could not be restored; create a new session";
+
 /// Start a turn with this input, or hold it until the session's executor
 /// connects.
 pub(crate) async fn submit(
@@ -450,8 +455,9 @@ pub(crate) async fn submit(
     // No executor will ever reach a managed environment that failed to
     // provision or expired, so its input is refused instead of waiting; a
     // suspended one is restored for it.
-    let (unprovisionable, expired, suspended): (bool, bool, bool) = sqlx::query_as(
-        "SELECT provider IS NOT NULL AND failed AND NOT connected_once, expired, suspended_ms IS NOT NULL FROM environments WHERE id = ?",
+    let (unprovisionable, lost, expired, suspended): (bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT provider IS NOT NULL AND failed AND NOT connected_once, provider IS NOT NULL AND failed AND connected_once, \
+         expired, suspended_ms IS NOT NULL FROM environments WHERE id = ?",
     )
     .bind(&environment_id)
     .fetch_one(&state.store.0)
@@ -468,6 +474,9 @@ pub(crate) async fn submit(
             StatusCode::CONFLICT,
             "this session's environment has expired; create a new session".into(),
         ));
+    }
+    if lost {
+        return Err(ApiError(StatusCode::CONFLICT, LOST.into()));
     }
     if suspended {
         crate::lifecycle::resume(state, session_id.to_owned(), environment_id.clone());

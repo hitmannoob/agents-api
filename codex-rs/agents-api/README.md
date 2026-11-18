@@ -635,18 +635,24 @@ program that answers the JSON-lines protocol it documents.
   the token only to the executor's process, not to setup or the rest of the
   Sandbox. A reset or resume issues a new token.
 - **Lifecycle:** a connected environment is snapshotted (the provider's
-  filesystem snapshot) when it connects, after each busy spell, and every
-  5 minutes while busy. An executor that stays disconnected for 30 seconds
-  has its sandbox checked; if the sandbox is gone, a new one is provisioned
-  from the latest snapshot under the same environment ID and
-  `agent.session.environment.reset` reports the new `reset_count`
-  (conversation history survives; work since the snapshot does not). An
+  filesystem snapshot) when it connects, as soon as each turn ends or a file
+  is written through the API, and every 5 minutes while busy. An executor
+  that stays disconnected for 30 seconds has its sandbox checked; if the
+  sandbox is gone, a new one is provisioned from the latest snapshot under
+  the same environment ID and `agent.session.environment.reset` reports the
+  new `reset_count` (conversation history survives; work since the snapshot
+  does not). A sandbox lost before its first snapshot is rebuilt from its
+  original packages, files, and setup commands, which are kept encrypted for
+  that purpose when the operator configured a vault passphrase. An
+  environment that cannot be restored reports
+  `agent.session.environment.failed` (`environment_reset_failed`), and later
+  input and file operations return 409 instead of waiting for an executor. An
   environment idle for `--environment-idle-suspend-secs` (default 600) is
   snapshotted and stopped (`suspended`); the session's next input restores
   it. One suspended past `--environment-snapshot-ttl-secs` (default 7 days)
   is `expired`, and later input returns 409. Restoring needs the
   environment's `env` values, which are kept encrypted in the secrets store
-  when the operator configured a vault passphrase.
+  when the operator configured a vault passphrase, and survive restarts.
 - **MCP:** stdio and `connection_origin: "environment"` MCP servers run on
   the sandbox's executor as on a self-hosted one. Install their programs with
   `packages` or `setup_commands`. Stdio servers start with a core environment

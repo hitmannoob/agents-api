@@ -5,11 +5,13 @@
 //! [`Lifecycle::tick`](crate::managed::Lifecycle):
 //! - A connected environment is snapshotted once it connects, after a busy
 //!   spell ends, and every `snapshot_interval` while it stays busy. Turns
-//!   starting and ending record activity, so a spell shorter than a tick
-//!   still gets its snapshot.
+//!   starting and ending, and files written through the API, record activity
+//!   and wake the loop, so the snapshot follows the work at once rather than
+//!   at the next tick.
 //! - One whose executor stayed disconnected for `death_grace` is checked with
 //!   the provider; if its sandbox is gone (or never reconnects), a new sandbox
-//!   is provisioned from the latest snapshot under the same environment ID and
+//!   is provisioned from the latest snapshot (or, before the first one, from
+//!   its original setup) under the same environment ID and
 //!   `agent.session.environment.reset` reports the new `reset_count`.
 //!   Conversation history survives; work since the snapshot does not.
 //! - One idle for `idle_suspend` is snapshotted and its sandbox stopped
@@ -43,6 +45,7 @@ async fn run(state: Weak<State>) {
             return;
         };
         let tick = crate::lock(&strong.lifecycle).tick;
+        let wake = Arc::clone(&strong.lifecycle_wake);
         if let Err(error) = check(&strong).await {
             tracing::warn!(
                 error = format!("{error:#}"),
@@ -50,7 +53,11 @@ async fn run(state: Weak<State>) {
             );
         }
         drop(strong);
-        tokio::time::sleep(tick).await;
+        // A wake during the check is kept, so it runs again at once.
+        tokio::select! {
+            () = tokio::time::sleep(tick) => {}
+            () = wake.notified() => {}
+        }
     }
 }
 
@@ -222,7 +229,10 @@ async fn expire(state: &Arc<State>, session_id: &str, environment_id: &str) -> a
         .await?;
     state
         .secrets
-        .discard(vec![crate::managed::env_secret(environment_id)])
+        .discard(vec![
+            crate::managed::env_secret(environment_id),
+            crate::managed::setup_secret(environment_id),
+        ])
         .await;
     crate::environments::emit(
         state,
@@ -280,19 +290,42 @@ async fn restore(
     let provider = state
         .provider()
         .ok_or_else(|| anyhow::anyhow!("no environment provider is configured"))?;
-    let (data, snapshot_id, registry_url, env_count): (
+    let (data, snapshot_id, registry_url, env_count, setup_count): (
         String,
         Option<String>,
         Option<String>,
         i64,
+        i64,
     ) = sqlx::query_as(
-        "SELECT data, snapshot_id, registry_url, env_count FROM environments WHERE id = ?",
+        "SELECT data, snapshot_id, registry_url, env_count, setup_count FROM environments WHERE id = ?",
     )
     .bind(environment_id)
     .fetch_one(&state.store.0)
     .await?;
-    let snapshot_id =
-        snapshot_id.ok_or_else(|| anyhow::anyhow!("the environment has no snapshot to restore"))?;
+    // A sandbox lost before its first snapshot is rebuilt from scratch: the
+    // packages, files, and setup commands it was created with run again.
+    let setup = if snapshot_id.is_some() || setup_count == 0 {
+        crate::managed::Setup {
+            files: Vec::new(),
+            setup_commands: Vec::new(),
+        }
+    } else {
+        let not_kept = || {
+            anyhow::anyhow!(
+                "the environment had no snapshot yet, and its files and setup commands were not kept (the operator has no vault passphrase)"
+            )
+        };
+        if !state.secrets.configured() {
+            return Err(not_kept());
+        }
+        let stored = state
+            .secrets
+            .get(crate::managed::setup_secret(environment_id))
+            .await
+            .map_err(|error| anyhow::anyhow!(error.1))?
+            .ok_or_else(not_kept)?;
+        serde_json::from_value(stored)?
+    };
     let registry_url =
         registry_url.ok_or_else(|| anyhow::anyhow!("the environment's registry URL is unknown"))?;
     let env: BTreeMap<String, String> = if env_count > 0 {
@@ -327,10 +360,10 @@ async fn restore(
             .to_owned(),
         packages: serde_json::from_value(public["packages"].clone()).unwrap_or_default(),
         env,
-        files: Vec::new(),
-        setup_commands: Vec::new(),
+        files: setup.files,
+        setup_commands: setup.setup_commands,
         network: serde_json::from_value(public["network"].clone())?,
-        snapshot_id: Some(snapshot_id),
+        snapshot_id,
     };
     let sandbox_id = provider.provision(request).await?;
     let updated = sqlx::query(
