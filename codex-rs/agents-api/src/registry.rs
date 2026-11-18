@@ -212,6 +212,16 @@ impl Registry {
         self.with_new_slot(environment_id, |slot| slot.state.subscribe())
     }
 
+    /// Close an environment's executor socket, which a live executor answers
+    /// by registering and connecting again, and a dead one does not.
+    pub(crate) fn drop_executor(&self, environment_id: &str) {
+        self.with_slot(environment_id, |slot| {
+            if slot.executor.take().is_some() {
+                slot.set_state(ExecutorState::Registered);
+            }
+        });
+    }
+
     /// Forget an environment, closing its sockets by dropping their senders.
     pub(crate) fn remove(&self, environment_id: &str) {
         crate::lock(&self.slots).remove(environment_id);

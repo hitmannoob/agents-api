@@ -48,6 +48,11 @@ pub const LOCAL_AGENTS_MD_FILENAME: &str = "AGENTS.override.md";
 /// concatenated with the following separator.
 const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
 
+/// Longest AGENTS.md discovery waits on one environment. Discovery runs while a
+/// thread starts or resumes; an executor that cannot be reached would otherwise
+/// hold that up for as long as its connection keeps retrying.
+const AGENTS_MD_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 // Metadata probes are cheap and the exec-server transport already bounds total in-flight calls.
 // This covers typical project hierarchies in one remote round trip without monopolizing that
 // transport when independent startup discovery runs concurrently.
@@ -77,7 +82,8 @@ pub(crate) async fn load_project_instructions(
             .file_system_sandbox_policy()
             .has_full_disk_read_access())
         .then(|| turn_environment.sandbox_context(/*additional_permissions*/ None));
-        match read_agents_md(
+        match read_agents_md_within(
+            AGENTS_MD_DISCOVERY_TIMEOUT,
             config,
             filesystem.as_ref(),
             &turn_environment.selection.environment_id,
@@ -122,6 +128,33 @@ pub(crate) async fn load_project_instructions(
 /// `Ok(None)`. Unexpected I/O failures bubble up as `Err` so callers can
 /// decide how to handle them.
 #[tracing::instrument(name = "agents_md.load", skip_all, fields(max_total = max_total))]
+/// [`read_agents_md`], failing with [`io::ErrorKind::TimedOut`] when the
+/// environment does not answer within `timeout`.
+async fn read_agents_md_within(
+    timeout: std::time::Duration,
+    config: &Config,
+    fs: &dyn ExecutorFileSystem,
+    environment_id: &str,
+    cwd: &PathUri,
+    max_total: usize,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> io::Result<Option<LoadedAgentsMd>> {
+    tokio::time::timeout(
+        timeout,
+        read_agents_md(config, fs, environment_id, cwd, max_total, sandbox),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "the environment did not answer within {} seconds",
+                timeout.as_secs()
+            ),
+        ))
+    })
+}
+
 async fn read_agents_md(
     config: &Config,
     fs: &dyn ExecutorFileSystem,

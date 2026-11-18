@@ -839,6 +839,38 @@ async fn marker_search_does_not_wait_for_a_higher_ancestor() {
     );
 }
 
+/// An environment that never answers cannot hold up a thread's start or
+/// resume: discovery gives up at its deadline.
+#[tokio::test]
+async fn agents_md_discovery_gives_up_on_an_environment_that_never_answers() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+    let fs = FailingFileSystem {
+        path: tmp.path().join(DEFAULT_AGENTS_MD_FILENAME).abs(),
+        failure: InjectedFailure::MetadataPending,
+        metadata_calls: Arc::default(),
+    };
+    let cwd = PathUri::from_abs_path(&config.cwd);
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::read_agents_md_within(
+            std::time::Duration::from_millis(50),
+            &config.config,
+            &fs,
+            "remote",
+            &cwd,
+            /*max_total*/ 4096,
+            /*sandbox*/ None,
+        ),
+    )
+    .await
+    .expect("discovery should give up at its deadline")
+    .expect_err("an environment that never answers is an error");
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+}
+
 #[tokio::test]
 async fn project_root_marker_search_limits_concurrent_probes_and_preserves_order() {
     const CONCURRENCY_LIMIT: usize = 256;

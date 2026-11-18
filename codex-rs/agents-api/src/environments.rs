@@ -430,6 +430,52 @@ pub(crate) async fn attach(
     Ok(())
 }
 
+/// How long the service waits for an executor to answer before resuming a
+/// thread onto it.
+const REACHABLE_PROBE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether the session's thread exists but is not loaded in the worker, so its
+/// next turn resumes it.
+async fn needs_resume(state: &State, session_id: &str) -> Result<bool, ApiError> {
+    let thread_id: Option<String> =
+        sqlx::query_scalar("SELECT thread_id FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&state.store.0)
+            .await
+            .map_err(anyhow::Error::from)?
+            .flatten();
+    let Some(thread_id) = thread_id else {
+        return Ok(false);
+    };
+    Ok(match state.loaded_threads() {
+        Ok(loaded) => !crate::lock(&loaded).contains(&thread_id),
+        Err(_) => true,
+    })
+}
+
+/// Whether the environment's executor answers through the service's own
+/// connection within [`REACHABLE_PROBE`].
+async fn reachable(state: &State, environment_id: &str) -> bool {
+    let probe = async {
+        let workspace = crate::environment_files::Workspace::open(state, environment_id)
+            .await
+            .ok()?;
+        workspace
+            .files
+            .get_metadata(
+                &workspace.root,
+                codex_exec_server::GetMetadataOptions::default(),
+                /*sandbox*/ None,
+            )
+            .await
+            .ok()
+    };
+    matches!(
+        tokio::time::timeout(REACHABLE_PROBE, probe).await,
+        Ok(Some(_))
+    )
+}
+
 /// Why input and file operations are refused for a managed environment whose
 /// sandbox was lost and could not be replaced.
 pub(crate) const LOST: &str =
@@ -496,8 +542,24 @@ pub(crate) async fn submit(
     if suspended {
         crate::lifecycle::resume(state, session_id.to_owned(), environment_id.clone());
     }
-    let connected =
+    let mut connected =
         !suspended && *state.registry.watch(&environment_id).borrow() == ExecutorState::Connected;
+    // Resuming a thread runs under a lock the whole worker shares, and reads
+    // through the executor; one the registry still counts as connected but
+    // that no longer answers would stall every session. Such a connection is
+    // dropped, and the input waits for the executor to connect again (or, for
+    // a managed environment whose sandbox is gone, for its reset).
+    if connected
+        && needs_resume(state, session_id).await?
+        && !reachable(state, &environment_id).await
+    {
+        tracing::warn!(
+            environment_id,
+            "executor did not answer; waiting for it to reconnect"
+        );
+        state.registry.drop_executor(&environment_id);
+        connected = false;
+    }
     let generation = state.registry.next_connection();
     let ready = {
         let mut waits = crate::lock(&state.waits.inputs);
