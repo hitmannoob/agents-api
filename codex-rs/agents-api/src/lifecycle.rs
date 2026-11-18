@@ -158,7 +158,7 @@ async fn check(state: &Arc<State>) -> anyhow::Result<()> {
                 }
             }
             if !busy && fresh && now - activity_ms >= config.idle_suspend.as_millis() as i64 {
-                suspend(state, &session_id, &environment_id, sandbox_id).await?;
+                suspend(state, &session_id, &environment_id, sandbox_id, activity_ms).await?;
             }
         } else if let Some(disconnected_ms) = disconnected_ms {
             let grace = config.death_grace.as_millis() as i64;
@@ -189,19 +189,37 @@ async fn check(state: &Arc<State>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Stop an idle environment's sandbox. `idle_since` is the activity the
+/// decision saw; the snapshot before it takes seconds, so the decision is
+/// re-checked under the session's input gate, and input that arrived meanwhile
+/// (which records activity under the same gate) keeps the sandbox running.
 async fn suspend(
     state: &Arc<State>,
     session_id: &str,
     environment_id: &str,
     sandbox_id: String,
+    idle_since: i64,
 ) -> anyhow::Result<()> {
+    let admission = state.input_gates.lock(session_id).await;
     // Recorded first, so the executor dropping as the sandbox stops is not
     // taken for a death.
-    sqlx::query("UPDATE environments SET suspended_ms = ?, sandbox_id = NULL WHERE id = ?")
-        .bind(crate::records::now_ms())
-        .bind(environment_id)
-        .execute(&state.store.0)
-        .await?;
+    let suspended = sqlx::query(
+        "UPDATE environments SET suspended_ms = ?, sandbox_id = NULL WHERE id = ? AND sandbox_id = ? \
+         AND NOT waiting AND COALESCE(activity_ms, 0) <= ? AND (SELECT json_extract(data, '$.status') FROM public_sessions \
+         WHERE id = environments.session_id) NOT IN ('in_progress', 'requires_action')",
+    )
+    .bind(crate::records::now_ms())
+    .bind(environment_id)
+    .bind(&sandbox_id)
+    .bind(idle_since)
+    .execute(&state.store.0)
+    .await?
+    .rows_affected()
+        > 0;
+    drop(admission);
+    if !suspended {
+        return Ok(());
+    }
     if let Some(provider) = state.provider()
         && let Err(error) = provider.destroy(sandbox_id).await
     {

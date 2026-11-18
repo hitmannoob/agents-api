@@ -1207,6 +1207,11 @@ struct TestProvider {
         Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// Snapshots fail while set, as before a sandbox's first one completes.
     refuse_snapshots: Arc<std::sync::atomic::AtomicBool>,
+    /// While set, a snapshot announces itself on `snapshot_waiting` and waits
+    /// for `release_snapshots`, as a slow provider snapshot would.
+    hold_snapshots: Arc<std::sync::atomic::AtomicBool>,
+    snapshot_waiting: Arc<tokio::sync::Notify>,
+    release_snapshots: Arc<tokio::sync::Notify>,
 }
 
 impl TestProvider {
@@ -1298,6 +1303,13 @@ impl codex_agents_api::managed::EnvironmentProvider for TestProvider {
                     .load(std::sync::atomic::Ordering::SeqCst),
                 "snapshot not ready"
             );
+            if provider
+                .hold_snapshots
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                provider.snapshot_waiting.notify_one();
+                provider.release_snapshots.notified().await;
+            }
             let mut snapshots = Self::lock(&provider.snapshots)?;
             snapshots.push(sandbox_id);
             Ok(format!("snap-{}", snapshots.len()))
@@ -1737,6 +1749,58 @@ async fn managed_environments_are_snapshotted_when_work_ends() -> anyhow::Result
         request(&client, reqwest::Method::POST, &format!("{base}/agents/environments/{environment_id}/files"),
             json!({"type":"inline","path":format!("{workspace_root}/later.txt"),"data":"bGF0ZXI="})).await?;
         snapshots(2).await?;
+        for (_, executor) in TestProvider::lock(&provider.executors)?.drain() {
+            executor.abort();
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
+/// Input that arrives while the lifecycle is deciding to suspend an idle
+/// environment (its snapshot takes a while) keeps the sandbox running: the turn
+/// it starts is not cut off by the suspension.
+#[tokio::test]
+async fn input_during_a_suspension_decision_keeps_the_sandbox() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 60), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let model = create_mock_responses_server_repeating_assistant("finished").await;
+        MockResponsesConfig::new(&model.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        let client = reqwest::Client::new();
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        api.set_managed_lifecycle(codex_agents_api::managed::Lifecycle {
+            tick: Duration::from_millis(/*millis*/ 100),
+            idle_suspend: Duration::from_millis(/*millis*/ 500),
+            snapshot_interval: Duration::from_secs(/*secs*/ 60),
+            snapshot_ttl: Duration::from_secs(/*secs*/ 600),
+            death_grace: Duration::from_millis(/*millis*/ 300),
+        });
+        let provider = TestProvider { workspace: workspace_path.to_string_lossy().into_owned(), ..Default::default() };
+        api.configure_environment_provider(Arc::new(provider.clone()));
+        let session = request(&client, reqwest::Method::POST, &format!("{base}/agents/sessions"),
+            json!({"agent":{"model":"mock-model"},"environment":{"type":"openai_hosted"},"input":"first"})).await?;
+        let url = format!("{base}/agents/sessions/{}", session["id"].as_str().context("session id")?);
+        let environment_id = session["environment"]["id"].as_str().context("environment id")?.to_owned();
+        let mut stream = client.get(format!("{url}/events")).bearer_auth(TOKEN).send().await?.error_for_status()?;
+        // The snapshot taken once the turn ends is slow.
+        provider.hold_snapshots.store(true, std::sync::atomic::Ordering::SeqCst);
+        idle(&client, &url, /*expected_turns*/ 1).await?;
+        provider.snapshot_waiting.notified().await;
+        // Past the idle limit, the check holding that snapshot will suspend
+        // once it returns; input arrives first.
+        tokio::time::sleep(Duration::from_millis(/*millis*/ 700)).await;
+        assert_eq!(send(&client, &url, message("second")).await?, reqwest::StatusCode::ACCEPTED);
+        provider.hold_snapshots.store(false, std::sync::atomic::Ordering::SeqCst);
+        provider.release_snapshots.notify_one();
+        let events = until_idle(&mut stream).await?;
+        assert!(!events.iter().any(|event| event["type"] == "agent.session.environment.suspended"), "{events:?}");
+        assert!(!TestProvider::lock(&provider.destroyed)?.contains(&format!("sb-{environment_id}")));
+        idle(&client, &url, /*expected_turns*/ 2).await?;
         for (_, executor) in TestProvider::lock(&provider.executors)?.drain() {
             executor.abort();
         }

@@ -453,11 +453,11 @@ pub(crate) async fn submit(
         return Ok(());
     };
     // No executor will ever reach a managed environment that failed to
-    // provision or expired, so its input is refused instead of waiting; a
-    // suspended one is restored for it.
-    let (unprovisionable, lost, expired, suspended): (bool, bool, bool, bool) = sqlx::query_as(
+    // provision, was lost, or expired, so its input is refused instead of
+    // waiting; a suspended one is restored for it (below, under the gate).
+    let (unprovisionable, lost, expired): (bool, bool, bool) = sqlx::query_as(
         "SELECT provider IS NOT NULL AND failed AND NOT connected_once, provider IS NOT NULL AND failed AND connected_once, \
-         expired, suspended_ms IS NOT NULL FROM environments WHERE id = ?",
+         expired FROM environments WHERE id = ?",
     )
     .bind(&environment_id)
     .fetch_one(&state.store.0)
@@ -478,11 +478,26 @@ pub(crate) async fn submit(
     if lost {
         return Err(ApiError(StatusCode::CONFLICT, LOST.into()));
     }
+    let admission = state.input_gates.lock(session_id).await;
+    // Input is activity: recorded under the gate, it stops a suspension that
+    // decided the environment was idle before this arrived. One that already
+    // committed is seen here, under the same gate: its executor may still be
+    // connected while the sandbox stops, so the input waits for the resumed
+    // one instead.
+    let suspended: bool = sqlx::query_scalar(
+        "UPDATE environments SET activity_ms = CASE WHEN provider IS NOT NULL THEN ? ELSE activity_ms END \
+         WHERE id = ? RETURNING suspended_ms IS NOT NULL",
+    )
+    .bind(crate::records::now_ms())
+    .bind(&environment_id)
+    .fetch_one(&state.store.0)
+    .await
+    .map_err(anyhow::Error::from)?;
     if suspended {
         crate::lifecycle::resume(state, session_id.to_owned(), environment_id.clone());
     }
-    let admission = state.input_gates.lock(session_id).await;
-    let connected = *state.registry.watch(&environment_id).borrow() == ExecutorState::Connected;
+    let connected =
+        !suspended && *state.registry.watch(&environment_id).borrow() == ExecutorState::Connected;
     let generation = state.registry.next_connection();
     let ready = {
         let mut waits = crate::lock(&state.waits.inputs);
