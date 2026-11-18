@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+age = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true, features = ["http1", "json", "matched-path", "query", "tokio", "ws"] }
 base64 = { workspace = true }
@@ -17,9 +18,7 @@ codex-app-server-protocol = { workspace = true }
 codex-config = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-http-client = { workspace = true }
-codex-keyring-store = { workspace = true }
 codex-otel = { workspace = true }
-codex-secrets = { workspace = true }
 codex-skills = { workspace = true }
 codex-state = { workspace = true }
 codex-tools = { workspace = true }
@@ -53,6 +52,8 @@ tokio-tungstenite = { workspace = true }
 
 [dev-dependencies]
 app_test_support = { path = "../app-server/tests/common" }
+codex-keyring-store = { workspace = true }
+codex-secrets = { workspace = true }
 codex-api = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-feedback = { workspace = true }

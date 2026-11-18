@@ -230,6 +230,208 @@ async fn managed_worker_restarts_after_crash_and_service_continues() -> anyhow::
     Ok(())
 }
 
+/// Answers model requests, except that the ones numbered in `stall` (from 1)
+/// never answer, so their turn is still running when the worker is killed.
+struct StallSome {
+    seen: std::sync::atomic::AtomicUsize,
+    stall: &'static [usize],
+    body: String,
+}
+
+impl wiremock::Respond for StallSome {
+    fn respond(&self, _: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let number = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let answer = wiremock::ResponseTemplate::new(200)
+            .set_body_raw(self.body.clone(), "text/event-stream");
+        if self.stall.contains(&number) {
+            answer.set_delay(Duration::from_secs(/*secs*/ 600))
+        } else {
+            answer
+        }
+    }
+}
+
+/// The API's current managed worker, once it is serving model requests.
+fn current_worker(api: &Child) -> anyhow::Result<i32> {
+    let api_pid = api.id().context("API PID")?;
+    let output = std::process::Command::new("pgrep")
+        .args(["-P", &api_pid.to_string()])
+        .output()?;
+    let pids: Vec<i32> = String::from_utf8(output.stdout)?
+        .split_whitespace()
+        .filter_map(|pid| pid.parse().ok())
+        .collect();
+    anyhow::ensure!(pids.len() == 1, "expected one worker, found {pids:?}");
+    Ok(pids[0])
+}
+
+async fn requests(model: &wiremock::MockServer, count: usize) -> anyhow::Result<Vec<Value>> {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let received = model.received_requests().await.context("model requests")?;
+            if received.len() >= count {
+                return received
+                    .iter()
+                    .map(|request| Ok(serde_json::from_slice(&request.body)?))
+                    .collect();
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
+        }
+    })
+    .await?
+}
+
+async fn turn_states(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<(String, Value)>> {
+    let response: Value = client
+        .get(format!("{url}/turns?order=asc"))
+        .bearer_auth(TOKEN)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(response["data"]
+        .as_array()
+        .context("turns")?
+        .iter()
+        .map(|turn| {
+            (
+                turn["status"].as_str().unwrap_or_default().to_owned(),
+                turn["error"]["message"].clone(),
+            )
+        })
+        .collect())
+}
+
+/// By default (`--continue-interrupted-turns 1`), a turn interrupted by the
+/// worker's crash is continued on the replacement worker with the conversation so far;
+/// a continuation interrupted in turn is not continued again.
+#[tokio::test]
+async fn interrupted_turns_continue_on_the_replacement_worker() -> anyhow::Result<()> {
+    let data = tempfile::tempdir()?;
+    let home = data.path().join("codex-home");
+    std::fs::create_dir_all(&home)?;
+    let model = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path_regex(".*/responses$"))
+        .respond_with(StallSome {
+            seen: Default::default(),
+            stall: &[1, 3, 4],
+            body: app_test_support::create_final_assistant_message_sse_response("done")?,
+        })
+        .mount(&model)
+        .await;
+    MockResponsesConfig::new(&model.uri())
+        .with_root_config("features.plugins = false")
+        .write(&home)?;
+    let client = reqwest::Client::new();
+    let (api, base, _) = start_api(data.path(), /*socket*/ None).await?;
+    let session: Value = client
+        .post(format!("{base}/agents/sessions"))
+        .bearer_auth(TOKEN)
+        .json(&json!({"agent":{"model":"mock-model"},"environment":{"type":"none"},"input":"Index the plum-552 catalog"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let url = format!(
+        "{base}/agents/sessions/{}",
+        session["id"].as_str().context("session id")?
+    );
+    let kill = |pid: i32| {
+        // SAFETY: the API owns this live worker and has not reaped it.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    };
+    let lost = json!("backend connection lost");
+
+    // The first turn is running when its worker dies; the replacement worker
+    // continues it, and the model sees the original request and the notice.
+    requests(&model, 1).await?;
+    kill(current_worker(&api)?);
+    let continued = requests(&model, 2).await?;
+    let input = continued[1]["input"].to_string();
+    assert!(
+        input.contains("plum-552") && input.contains("so that turn was interrupted"),
+        "{input}"
+    );
+    tokio::time::timeout(DEADLINE, async {
+        while turn_states(&client, &url).await?
+            != vec![
+                ("failed".to_owned(), lost.clone()),
+                ("completed".to_owned(), Value::Null),
+            ]
+        {
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+
+    // A continuation that is itself interrupted is not continued again.
+    let accepted = client
+        .post(format!("{url}/events"))
+        .bearer_auth(TOKEN)
+        .json(&json!({"events":[{"type":"agent.session.input.message","input":"Now export it"}]}))
+        .send()
+        .await?;
+    assert!(accepted.status().is_success(), "{}", accepted.status());
+    requests(&model, 3).await?;
+    kill(current_worker(&api)?);
+    requests(&model, 4).await?;
+    kill(current_worker(&api)?);
+    let settled = tokio::time::timeout(DEADLINE, async {
+        loop {
+            let states = turn_states(&client, &url).await?;
+            if states.len() == 4
+                && states
+                    .iter()
+                    .all(|(status, _)| status != "in_progress" && status != "queued")
+            {
+                return anyhow::Ok(states);
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        }
+    })
+    .await??;
+    assert_eq!(
+        settled
+            .iter()
+            .map(|(status, error)| (status.as_str(), error.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("failed", lost.clone()),
+            ("completed", Value::Null),
+            ("failed", lost.clone()),
+            ("failed", lost.clone())
+        ]
+    );
+    // Give a wrongful third continuation time to show up.
+    tokio::time::sleep(Duration::from_secs(/*secs*/ 2)).await;
+    assert_eq!(
+        model
+            .received_requests()
+            .await
+            .context("model requests")?
+            .len(),
+        4
+    );
+    let failed: Value = client
+        .get(&url)
+        .bearer_auth(TOKEN)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        (&failed["status"], &failed["error"]),
+        (&json!("failed"), &lost)
+    );
+    stop_api(api).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn orphaned_worker_is_reclaimed_after_api_crash() -> anyhow::Result<()> {
     let data = tempfile::tempdir()?;

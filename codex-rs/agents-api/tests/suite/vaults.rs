@@ -41,47 +41,17 @@ async fn mcp_server() -> anyhow::Result<(
     ))
 }
 
-/// Reads the secrets store the way the service does, with its passphrase.
-#[derive(Debug)]
-struct StorePassphrase;
-
-impl codex_keyring_store::KeyringStore for StorePassphrase {
-    fn load(
-        &self,
-        _service: &str,
-        _account: &str,
-    ) -> Result<Option<String>, codex_keyring_store::CredentialStoreError> {
-        Ok(Some(PASSPHRASE.into()))
-    }
-
-    fn save(
-        &self,
-        _service: &str,
-        _account: &str,
-        _value: &str,
-    ) -> Result<(), codex_keyring_store::CredentialStoreError> {
-        Ok(())
-    }
-
-    fn delete(
-        &self,
-        _service: &str,
-        _account: &str,
-    ) -> Result<bool, codex_keyring_store::CredentialStoreError> {
-        Ok(false)
-    }
-}
-
 /// The names in the encrypted secrets store.
 async fn stored_secrets(data: &Path) -> anyhow::Result<Vec<String>> {
-    let backend =
-        codex_secrets::LocalSecretsBackend::new(data.to_path_buf(), Arc::new(StorePassphrase));
-    let entries =
-        tokio::task::spawn_blocking(move || backend.list(/*scope_filter*/ None)).await??;
-    Ok(entries
-        .into_iter()
-        .map(|entry| entry.name.as_str().to_owned())
-        .collect())
+    let pool =
+        codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::from_absolute_path(data)?)
+            .open_read_write_pool(data.join("agents-api.sqlite").as_path())
+            .await?;
+    let names = sqlx::query_scalar("SELECT name FROM secret_values")
+        .fetch_all(&pool)
+        .await?;
+    pool.close().await;
+    Ok(names)
 }
 
 pub(super) fn files_containing(directory: &Path, needle: &str) -> anyhow::Result<Vec<String>> {

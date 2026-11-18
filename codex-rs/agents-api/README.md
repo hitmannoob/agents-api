@@ -50,7 +50,17 @@ completes the initialization handshake, and reattaches it via
 Throughout the gap, saved history stays readable, mutations return 503
 `app-server disconnected`, pending function calls become `unresolvedActions`,
 and stale callbacks cannot resolve the replacement's work. Interrupted work is
-not replayed. Externally managed workers are never restarted.
+not replayed. A turn the loss cut short ends `failed` (`backend connection
+lost`), even though the replacement's history calls it interrupted; only a
+turn a caller asked to cancel ends `cancelled`. Once a worker serves again,
+each session whose latest turn was cut short is continued: the service sends
+it an input saying the turn was interrupted, that the conversation is intact,
+and that the last action may or may not have finished, so the agent checks
+before repeating it. `--continue-interrupted-turns N` (default 1, at most
+10) bounds how many consecutive interrupted turns a session is continued
+after, so a turn that keeps killing its worker stops; 0 leaves such sessions
+failed. A turn with function calls the caller still has to resolve is not
+continued. Externally managed workers are never restarted.
 
 Operational diagnostics:
 - **Logs:** go to stderr through `tracing`. `RUST_LOG` filters them (default
@@ -189,7 +199,8 @@ how projects and keys are managed.
 - **State and backup:** everything durable lives in the data directory:
   - `agents-api.sqlite` (with its WAL) for public records, queues, and
     metadata;
-  - `secrets/` for age-encrypted credential, webhook, and env values;
+  - `secrets/agents-api.key`, the passphrase-encrypted key for the
+    credential, webhook, and env values stored encrypted in the database;
   - `files/` for uploads;
   - `skills/` for skill versions, and `skill_pins/` for the versions each
     self-hosted session pinned;
@@ -656,11 +667,16 @@ supplies a passphrase of at least 32 bytes with `--vault-passphrase` (or
 501. Keep that passphrase: stored secrets cannot be read without it, and a
 start with a passphrase that cannot read them fails with an error naming the
 secrets directory.
-- **Storage:** vault and credential metadata live in the API database. Secret
-  values are encrypted with age (scrypt) in `DATA_DIRECTORY/secrets`. They are
-  never returned by the API or stored in public records, and they never reach
-  the model. The deliberately slow key derivation makes each credential write
-  take about a second.
+- **Storage:** vault and credential metadata live in the API database. At
+  startup the passphrase unlocks a random X25519 key kept in
+  `DATA_DIRECTORY/secrets/agents-api.key`, encrypted with age's scrypt mode;
+  that deliberately slow derivation (about a second and 1 GiB of memory) runs
+  once per start. Each secret value is then a database row encrypted to that
+  key with age, so reads and writes are cheap. Values are never returned by
+  the API or stored in public records, and they never reach the model. Data
+  directories from before this layout keep their values in
+  `secrets/local.age`; the first configured start moves them into the
+  database and removes that file.
 - **Credential types:** `static_bearer` and `mcp_oauth` send their token as the
   MCP server's `Authorization: Bearer` header. `mcp_server_url` must use https
   (plain http only for an operator-allowed MCP host). `mcp_oauth` refresh

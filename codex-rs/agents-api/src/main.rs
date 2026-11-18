@@ -91,6 +91,11 @@ struct Args {
     /// expires with its snapshot.
     #[arg(long, default_value_t = 7 * 24 * 60 * 60, value_parser = clap::value_parser!(u64).range(60..))]
     environment_snapshot_ttl_secs: u64,
+    /// Continue a session's turn that a worker crash or restart interrupted,
+    /// for up to this many consecutive interruptions; 0 leaves such sessions
+    /// failed.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(0..=10))]
+    continue_interrupted_turns: u32,
     /// Seconds that input waits for a disconnected self-hosted executor before
     /// it is dropped and the session fails.
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86_400))]
@@ -339,6 +344,7 @@ async fn main() -> anyhow::Result<()> {
                 ),
             ));
         }
+        api.set_interrupted_turn_continuations(args.continue_interrupted_turns);
         eprintln!("agents-api listening on {}", listener.local_addr()?);
         let (stop_http, stopping_http) = tokio::sync::oneshot::channel();
         let mut http = tokio::spawn(

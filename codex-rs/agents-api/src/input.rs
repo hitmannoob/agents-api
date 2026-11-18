@@ -279,6 +279,7 @@ async fn execute(state: &Arc<State>, id: &str, events: Vec<Event>) -> Result<(),
                     }
                 }
                 for (thread_id, turn_id, subagent) in running {
+                    crate::lock(&state.cancel_requested).insert(turn_id.clone());
                     match state
                         .rpc(
                             "turn/interrupt",
@@ -313,6 +314,7 @@ async fn cancel_started_turn(
     turn_id: String,
 ) -> Result<(), ApiError> {
     let interrupt = json!({"threadId": thread_id, "turnId": state.turn_aliases.codex(&turn_id)});
+    crate::lock(&state.cancel_requested).insert(turn_id.clone());
     if state.rpc("turn/interrupt", interrupt.clone()).await.is_ok() {
         return Ok(());
     }

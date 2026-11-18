@@ -328,6 +328,7 @@ pub(crate) async fn notification(state: &Arc<State>, raw: &Value) -> Result<(), 
                         &tags,
                     );
                 }
+                crate::lock(&state.cancel_requested).remove(turn_id);
                 tracing::info!(session_id = %id, turn_id, status, agent_type, "turn finished");
             }
             // Only the session's own turns change its status; subagent turns

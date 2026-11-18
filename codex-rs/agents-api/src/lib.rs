@@ -111,6 +111,11 @@ struct State {
     lifecycle_started: std::sync::atomic::AtomicBool,
     /// Managed environments a new sandbox is being provisioned for.
     reprovisioning: Mutex<HashSet<String>>,
+    /// How many consecutive worker-loss interruptions a session's turns are
+    /// continued after (1 by default); 0 leaves interrupted sessions failed.
+    continuations: std::sync::atomic::AtomicU32,
+    /// Sessions a pass is deciding whether to continue.
+    continuing: Mutex<HashSet<String>>,
     /// Public IDs of turns that were queued before Codex started them.
     turn_aliases: turn_aliases::TurnAliases,
     /// Each session's most recently started turn, as (thread ID, turn ID),
@@ -119,6 +124,10 @@ struct State {
     /// Turns cancelled before Codex made them active; interrupted when their
     /// start is recorded.
     pending_cancels: Mutex<HashSet<String>>,
+    /// Turns a caller asked to cancel that have not finished, so a turn that
+    /// history reports interrupted after a worker loss is known to be one the
+    /// caller stopped rather than one the loss cut short.
+    cancel_requested: Mutex<HashSet<String>>,
     /// Uploaded file contents.
     files: files::Files,
     /// Skill version contents.
@@ -290,8 +299,11 @@ impl AgentsApi {
             lifecycle: Mutex::default(),
             lifecycle_started: std::sync::atomic::AtomicBool::new(false),
             reprovisioning: Mutex::default(),
+            continuations: std::sync::atomic::AtomicU32::new(1),
+            continuing: Mutex::default(),
             started_turns: Mutex::default(),
             pending_cancels: Mutex::default(),
+            cancel_requested: Mutex::default(),
             files: files::Files(directory.join("files").to_path_buf()),
             skills: skills::Skills(directory.join("skills").to_path_buf()),
             skill_pins: directory.join("skill_pins").to_path_buf(),
@@ -383,6 +395,7 @@ impl AgentsApi {
         if let Err(error) = sessions::cleanup(&self.state).await {
             tracing::warn!(error = format!("{error:#}"), "session cleanup failed");
         }
+        reconcile::continue_interrupted(&self.state);
         Ok(())
     }
 
@@ -401,7 +414,11 @@ impl AgentsApi {
         let stored = self
             .state
             .secrets
-            .configure(self.directory.to_path_buf(), passphrase)
+            .configure(
+                self.directory.to_path_buf(),
+                self.state.store.0.clone(),
+                passphrase,
+            )
             .await?;
         let removed = credentials::sweep(&self.state, stored).await?;
         if removed > 0 {
@@ -451,6 +468,17 @@ impl AgentsApi {
     /// timing; [`managed::Lifecycle::default`] applies otherwise.
     pub fn set_managed_lifecycle(&self, lifecycle: managed::Lifecycle) {
         *lock(&self.state.lifecycle) = lifecycle;
+    }
+
+    /// Continue a session's turn that a worker loss interrupted, by sending it
+    /// [`reconcile::CONTINUE_INPUT`] once a worker serves again, for up to
+    /// `attempts` consecutive interruptions (1 by default); 0 leaves such
+    /// sessions failed. Sessions already interrupted are continued now.
+    pub fn set_interrupted_turn_continuations(&self, attempts: u32) {
+        self.state
+            .continuations
+            .store(attempts, std::sync::atomic::Ordering::Relaxed);
+        reconcile::continue_interrupted(&self.state);
     }
 
     /// How long input waits for a self-hosted executor to connect before it is
