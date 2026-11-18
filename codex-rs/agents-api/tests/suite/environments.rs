@@ -1907,6 +1907,108 @@ async fn new_sessions_are_not_held_up_while_interrupted_ones_continue_or_are_del
     }).await?
 }
 
+/// The first `first` model requests answer with `first_body`, later ones
+/// with `then_body`.
+struct FirstThen {
+    seen: std::sync::atomic::AtomicUsize,
+    first: usize,
+    first_body: String,
+    then_body: String,
+}
+
+impl wiremock::Respond for FirstThen {
+    fn respond(&self, _: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let number = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let body = if number <= self.first { &self.first_body } else { &self.then_body };
+        wiremock::ResponseTemplate::new(200).set_body_raw(body.clone(), "text/event-stream")
+    }
+}
+
+/// As the soak's worker kill did: every session is running a long command
+/// on its executor when the worker is replaced; continuations start, half of
+/// the sessions are deleted (their executors killed mid-command), and new
+/// sessions are created meanwhile. The new sessions are not held up.
+#[tokio::test]
+async fn new_sessions_are_not_held_up_while_executors_die_mid_command() -> anyhow::Result<()> {
+    // The long command is a POSIX shell script.
+    if cfg!(windows) {
+        return Ok(());
+    }
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 180), async {
+        let home = tempfile::tempdir()?;
+        let data = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = workspace.path().canonicalize()?;
+        let started_file = workspace_path.join("started.txt");
+        let long = format!("echo started >> {}; sleep 30", started_file.display());
+        let model = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex(".*/responses$"))
+            .respond_with(FirstThen { seen: Default::default(), first: 6,
+                first_body: create_command_execution_sse_response(shell(&long), /*workdir*/ None, Some(/*timeout_ms*/ 120_000), "long-call")?,
+                then_body: create_final_assistant_message_sse_response("done")? })
+            .mount(&model)
+            .await;
+        MockResponsesConfig::new(&model.uri()).with_root_config("features.plugins = false").write(home.path())?;
+        let api = AgentsApi::new(backend(home.path()).await?, AbsolutePathBuf::from_absolute_path(data.path())?, TOKEN.into()).await?;
+        let (base, _server) = capabilities::serve(&api).await?;
+        let origin = base.trim_end_matches("/v1").to_owned();
+        let client = reqwest::Client::new();
+        api.configure_environments(ENVIRONMENT_KEY.into(), format!("{origin}/registry"))?;
+        let provider = TestProvider { workspace: workspace_path.to_string_lossy().into_owned(), ..Default::default() };
+        api.configure_environment_provider(Arc::new(provider.clone()));
+        let sessions = format!("{base}/agents/sessions");
+        let create = |input: &str| request(&client, reqwest::Method::POST, &sessions,
+            json!({"agent":{"model":"mock-model"},"environment":{"type":"openai_hosted"},"input":input}));
+        let mut running = Vec::new();
+        for index in 0..6 {
+            running.push(create(&format!("long task {index}")).await?["id"].as_str().context("session id")?.to_owned());
+        }
+        while std::fs::read_to_string(&started_file).map_or(0, |text| text.lines().count()) < 6 {
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        }
+
+        api.reconnect(backend(home.path()).await?).await?;
+        let started = std::time::Instant::now();
+        let deletes = running[..3].iter().map(|id| {
+            let url = format!("{sessions}/{id}");
+            let client = &client;
+            async move {
+                loop {
+                    let deleted = client.delete(&url).bearer_auth(TOKEN).send().await?;
+                    if deleted.status() != reqwest::StatusCode::CONFLICT {
+                        deleted.error_for_status()?;
+                        return anyhow::Ok(started.elapsed());
+                    }
+                    client.post(format!("{url}/events")).bearer_auth(TOKEN)
+                        .json(&json!({"events":[{"type":"agent.session.input.cancel"}]})).send().await?;
+                    tokio::time::sleep(Duration::from_millis(/*millis*/ 100)).await;
+                }
+            }
+        });
+        let fresh = (0..4).map(|index| {
+            let create = &create;
+            let client = &client;
+            let sessions = &sessions;
+            async move {
+                let session = create(&format!("new task {index}")).await?;
+                let url = format!("{sessions}/{}", session["id"].as_str().context("session id")?);
+                idle(client, &url, /*expected_turns*/ 1).await?;
+                anyhow::Ok(started.elapsed())
+            }
+        });
+        let (deleted, fresh) = tokio::join!(futures::future::join_all(deletes), futures::future::join_all(fresh));
+        let deleted: Vec<Duration> = deleted.into_iter().collect::<anyhow::Result<_>>()?;
+        let fresh: Vec<Duration> = fresh.into_iter().collect::<anyhow::Result<_>>()?;
+        eprintln!("deletes finished after {deleted:?}; new sessions idle after {fresh:?}");
+        assert!(fresh.iter().all(|wait| *wait < Duration::from_secs(/*secs*/ 20)), "{fresh:?}");
+        for (_, executor) in TestProvider::lock(&provider.executors)?.drain() {
+            executor.abort();
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
 #[tokio::test]
 async fn managed_environments_snapshot_reset_suspend_resume_and_expire() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(/*secs*/ 120), async {
