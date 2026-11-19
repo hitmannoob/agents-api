@@ -161,7 +161,11 @@ pub(crate) async fn resolve_call(
     result: ToolResult,
 ) -> Result<Value, ApiError> {
     let (reply, received) = oneshot::channel();
-    let submissions = state.submissions().ok_or_else(crate::disconnected_error)?;
+    // The call waits on the connection of the worker the session runs on.
+    let worker = state.assigned_worker(&session_id).await?.unwrap_or(0);
+    let submissions = state
+        .submissions(worker)
+        .ok_or_else(crate::disconnected_error)?;
     submissions
         .send(Submission {
             session_id,

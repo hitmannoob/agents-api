@@ -17,10 +17,22 @@ async fn start_api(
     data: &Path,
     socket: Option<&AbsolutePathBuf>,
 ) -> anyhow::Result<(Child, String, Option<u32>)> {
+    let (child, base, pids) = start_api_with(data, socket, &[]).await?;
+    Ok((child, base, pids.last().copied()))
+}
+
+/// Start the API with extra arguments; returns the managed workers' PIDs in
+/// the order they started.
+async fn start_api_with(
+    data: &Path,
+    socket: Option<&AbsolutePathBuf>,
+    arguments: &[&str],
+) -> anyhow::Result<(Child, String, Vec<u32>)> {
     let mut command = Command::new(cargo_bin("codex-agents-api")?);
     command
         .args(["--listen", "127.0.0.1:0", "--data-directory"])
         .arg(data)
+        .args(arguments)
         .env("CODEX_AGENTS_API_TOKEN", TOKEN)
         .env("CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG", "1")
         .stdout(Stdio::null())
@@ -38,11 +50,14 @@ async fn start_api(
     }
     let mut child = command.spawn()?;
     let mut lines = BufReader::new(child.stderr.take().context("stderr")?).lines();
-    let mut worker_pid = None;
+    let mut worker_pids = Vec::new();
     let base = tokio::time::timeout(DEADLINE, async {
         while let Some(line) = lines.next_line().await? {
-            if let Some(pid) = line.strip_prefix("agents-api managed worker pid=") {
-                worker_pid = Some(pid.parse()?);
+            // `agents-api managed worker pid=N`, or `... worker I pid=N` in a pool.
+            if let Some(worker) = line.strip_prefix("agents-api managed worker ")
+                && let Some((_, pid)) = worker.split_once("pid=")
+            {
+                worker_pids.push(pid.parse()?);
             }
             if let Some(address) = line.strip_prefix("agents-api listening on ") {
                 return anyhow::Ok(format!("http://{address}/v1"));
@@ -57,7 +72,7 @@ async fn start_api(
             eprintln!("{line}");
         }
     });
-    Ok((child, base, worker_pid))
+    Ok((child, base, worker_pids))
 }
 
 async fn stop_api(mut child: Child) -> anyhow::Result<()> {
@@ -572,5 +587,139 @@ async fn startup_timeout_reaps_the_owned_process() -> anyhow::Result<()> {
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::ESRCH)
     );
+    Ok(())
+}
+
+/// Rollout files under a worker home: one per thread it holds.
+fn threads(home: &Path) -> anyhow::Result<usize> {
+    let mut count = 0;
+    let Ok(entries) = std::fs::read_dir(home) else {
+        return Ok(0);
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() {
+            count += threads(&path)?;
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("rollout-"))
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn alive(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Run mode's pool (RUN_MODE.md): `--workers 2` starts two workers with their
+/// own homes, spreads sessions over them, restarts a killed worker without
+/// disturbing the other, and stops both on SIGTERM.
+#[tokio::test]
+async fn cli_pool_restarts_one_worker_without_disturbing_the_other() -> anyhow::Result<()> {
+    let data = tempfile::tempdir()?;
+    let home = data.path().join("codex-home");
+    std::fs::create_dir_all(&home)?;
+    let model = create_mock_responses_server_repeating_assistant("finished").await;
+    // Only worker 0's home is configured; worker 1 runs a copy.
+    MockResponsesConfig::new(&model.uri())
+        .with_root_config("features.plugins = false")
+        .write(&home)?;
+    let homes = [home.clone(), data.path().join("codex-home-worker-1")];
+    let client = reqwest::Client::new();
+    let (api, base, pids) = start_api_with(
+        data.path(),
+        /*socket*/ None,
+        &["--workers", "2", "--worker-start-stagger-ms", "100"],
+    )
+    .await?;
+    assert_eq!(pids.len(), 2, "{pids:?}");
+    let mut urls = Vec::new();
+    for (index, code) in ["alpha-101", "beta-202"].into_iter().enumerate() {
+        let session: Value = client
+            .post(format!("{base}/agents/sessions"))
+            .bearer_auth(TOKEN)
+            .json(&json!({"agent":{"model":"mock-model"},"environment":{"type":"none"},"input":format!("Remember {code}")}))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let url = format!(
+            "{base}/agents/sessions/{}",
+            session["id"].as_str().context("session id")?
+        );
+        turns(&client, &url, /*count*/ 1).await?;
+        assert_eq!(
+            threads(&homes[index].join("sessions"))?,
+            1,
+            "worker {index}"
+        );
+        urls.push(url);
+    }
+    let root = base.strip_suffix("/v1").context("API root")?;
+    let health: Value = client
+        .get(format!("{root}/healthz"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(
+        health["workers"].as_array().map(Vec::len),
+        Some(2),
+        "{health}"
+    );
+
+    // SAFETY: the API owns this live worker and has not reaped it.
+    assert_eq!(unsafe { libc::kill(pids[1] as i32, libc::SIGKILL) }, 0);
+    // Worker 0's session never notices.
+    client
+        .post(format!("{}/events", urls[0]))
+        .bearer_auth(TOKEN)
+        .json(&json!({"events":[{"type":"agent.session.input.message","input":"What code did I ask you to remember?"}]}))
+        .send()
+        .await?
+        .error_for_status()?;
+    turns(&client, &urls[0], /*count*/ 2).await?;
+    // Worker 1's session is served again once its worker is replaced.
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let response = client
+                .post(format!("{}/events", urls[1]))
+                .bearer_auth(TOKEN)
+                .json(&json!({"events":[{"type":"agent.session.input.message","input":"What code did I ask you to remember?"}]}))
+                .send()
+                .await?;
+            if response.status().is_success() {
+                return anyhow::Ok(());
+            }
+            assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+        }
+    })
+    .await??;
+    turns(&client, &urls[1], /*count*/ 2).await?;
+    assert!(alive(pids[0]), "worker 0 must keep running");
+    let api_pid = api.id().context("API PID")?;
+    let output = std::process::Command::new("pgrep")
+        .args(["-P", &api_pid.to_string()])
+        .output()?;
+    let running: Vec<u32> = String::from_utf8(output.stdout)?
+        .split_whitespace()
+        .filter_map(|pid| pid.parse().ok())
+        .collect();
+    assert_eq!(running.len(), 2, "{running:?}");
+    assert!(
+        running.contains(&pids[0]) && !running.contains(&pids[1]),
+        "{running:?}"
+    );
+    stop_api(api).await?;
+    for pid in running {
+        assert!(!alive(pid), "worker {pid} outlived the API");
+    }
     Ok(())
 }

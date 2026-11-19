@@ -510,3 +510,6 @@ mod programmatic;
 
 #[path = "suite/compaction.rs"]
 mod compaction;
+
+#[path = "suite/pool.rs"]
+mod pool;

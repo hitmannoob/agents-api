@@ -199,7 +199,9 @@ how projects and keys are managed.
   a host. Executor-origin traffic uses the caller's network.
 - **Health:** `GET /healthz` needs no token. It answers 200
   `{"status":"ok","worker":"connected"}`, or 503 with `"degraded"` while the
-  worker is reconnecting; saved records stay readable meanwhile.
+  worker is reconnecting; saved records stay readable meanwhile. With a
+  worker pool it answers 200 only while every worker is connected, and lists
+  each one under `"workers"`.
 - **State and backup:** everything durable lives in the data directory:
   - `agents-api.sqlite` (with its WAL) for public records, queues, and
     metadata;
@@ -227,8 +229,14 @@ how projects and keys are managed.
 - **Resource growth:** uploads stay until deleted or expired, skill versions
   until deleted, and rollouts, records, and skill pins until their session is
   deleted. Watch the data
-  directory's disk use. One worker serves every session, and there is no
-  distributed routing.
+  directory's disk use. One worker serves every session unless
+  `--workers N` starts a pool, and there is no distributed routing.
+- **Worker pool (run mode):** `--workers N` starts N managed workers, one
+  after another with `--worker-start-stagger-ms` between them, each in its own
+  home (`<codex-home>-worker-<i>` beside worker 0's, configured from a copy of
+  worker 0's `config.toml`). Each session is assigned to the least-loaded
+  worker on its first input and stays there; a worker that exits is restarted
+  on its own, and only its sessions see the loss. See [RUN_MODE.md](RUN_MODE.md).
 - **Deployment:** SIGTERM stops accepting requests, then stops the worker
   after a grace period, interrupting running turns rather than finishing
   them. On restart:

@@ -386,7 +386,7 @@ async fn stream(
     crate::projects::require(&state, &principal.project_id, &id, Resource::PublicSession).await?;
     let receiver = state.public_events.subscribe();
     crate::records::session(&state, &id).await?;
-    if !state.connected() {
+    if !state.session_connected(&id).await? {
         return Err(crate::disconnected_error());
     }
     Ok(sse(receiver, id))
@@ -402,8 +402,16 @@ fn sse(receiver: tokio::sync::broadcast::Receiver<Value>, id: String) -> Respons
     let owner = id.clone();
     let stream = BroadcastStream::new(receiver)
         .take_while(move |v| {
-            futures::future::ready(matches!(v, Ok(v) if v["type"] != "disconnect"
-                && !(v["type"] == crate::sessions::DELETED && v["session_id"] == owner)))
+            // A pool worker's loss names its sessions; other streams go on.
+            let ends = |v: &Value| {
+                let lost = v["type"] == "disconnect"
+                    && v["session_ids"]
+                        .as_array()
+                        .is_none_or(|ids| ids.contains(&json!(owner)));
+                let deleted = v["type"] == crate::sessions::DELETED && v["session_id"] == owner;
+                lost || deleted
+            };
+            futures::future::ready(matches!(v, Ok(v) if !ends(v)))
         })
         .filter_map(move |v| {
             let event = v

@@ -6,6 +6,7 @@ use clap::Parser;
 use codex_agents_api::AgentsApi;
 use codex_app_server_client::AppServerClient;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use futures::StreamExt;
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -34,6 +35,20 @@ struct Args {
     codex_home: Option<PathBuf>,
     #[arg(long, default_value_t = 30)]
     worker_startup_timeout_secs: u64,
+    /// Managed workers to run (run mode's pool; see RUN_MODE.md). Each
+    /// session is assigned to one on its first input; 1 serves every
+    /// session on a single worker.
+    #[arg(
+        long,
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u16).range(1..=codex_agents_api::MAX_WORKERS as i64),
+        conflicts_with = "app_server_socket"
+    )]
+    workers: u16,
+    /// Milliseconds between one pool worker becoming ready and the next one
+    /// starting.
+    #[arg(long, default_value_t = 1000)]
+    worker_start_stagger_ms: u64,
     #[arg(long, required = true)]
     data_directory: Option<PathBuf>,
     /// Operator token. It authenticates as the default project with every
@@ -264,49 +279,85 @@ async fn main() -> anyhow::Result<()> {
     })?;
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     let startup_timeout = Duration::from_secs(args.worker_startup_timeout_secs);
+    let stagger = Duration::from_millis(args.worker_start_stagger_ms);
     // Register SIGTERM before starting the child, including during readiness.
     let stopping = shutdown_signal();
     tokio::pin!(stopping);
-    let mut worker = None;
-    // Managed executable/home are retained so a crashed worker can be respawned;
-    // external-socket mode leaves this `None` and is never restarted.
-    let mut managed = None;
-    let starting = Instant::now();
-    let socket = match args.app_server_socket {
-        Some(socket) => AbsolutePathBuf::relative_to_current_dir(socket)?,
-        None => {
-            let executable =
-                match args.app_server_bin {
+    // Managed workers by index; external-socket mode has none and is never
+    // restarted. A slot is `None` while its worker is being replaced.
+    let mut workers: Vec<Option<runtime::Worker>> = Vec::new();
+    let mut pool = None;
+    let serving = async {
+        let mut clients = Vec::new();
+        match args.app_server_socket {
+            Some(socket) => {
+                let socket = AbsolutePathBuf::relative_to_current_dir(socket)?;
+                let starting = Instant::now();
+                clients.push(tokio::select! {
+                    result = runtime::connect(socket, startup_timeout) => result?,
+                    result = &mut stopping => return result,
+                });
+                exporters::elapsed(
+                    exporters::WORKER_STARTUP_DURATION,
+                    starting.elapsed(),
+                    &[("reason", "start")],
+                );
+            }
+            None => {
+                let executable = match args.app_server_bin {
                     Some(path) => AbsolutePathBuf::relative_to_current_dir(path)?,
                     None => AbsolutePathBuf::try_from(std::env::current_exe()?.with_file_name(
                         format!("codex-app-server{}", std::env::consts::EXE_SUFFIX),
                     ))?,
                 };
-            let home = match args.codex_home {
-                Some(path) => AbsolutePathBuf::relative_to_current_dir(path)?,
-                None => directory.join("codex-home"),
-            };
-            let owned = runtime::Worker::spawn(executable.clone(), home.clone()).await?;
-            // This line and the listening line stay plain, outside `tracing`:
-            // supervisors read the worker PID and the address from them.
-            eprintln!(
-                "agents-api managed worker pid={}",
-                owned.id().context("worker process ID")?
-            );
-            let socket = owned.socket().clone();
-            worker = Some(owned);
-            managed = Some((executable, home));
-            socket
+                let home = match args.codex_home {
+                    Some(path) => AbsolutePathBuf::relative_to_current_dir(path)?,
+                    None => directory.join("codex-home"),
+                };
+                let managed = &*pool.insert(Pool {
+                    executable,
+                    home,
+                    size: usize::from(args.workers),
+                });
+                // Workers start one at a time, each after the previous one's
+                // handshake and the stagger, so startup memory peaks do not
+                // stack up.
+                for index in 0..managed.size {
+                    if index > 0 {
+                        tokio::select! {
+                            () = tokio::time::sleep(stagger) => {}
+                            result = &mut stopping => return result,
+                        }
+                    }
+                    let starting = Instant::now();
+                    let owned = managed.spawn(index).await?;
+                    // This line and the listening line stay plain, outside
+                    // `tracing`: supervisors read the worker PIDs and the
+                    // address from them.
+                    let pid = owned.id().context("worker process ID")?;
+                    if managed.size == 1 {
+                        eprintln!("agents-api managed worker pid={pid}");
+                    } else {
+                        eprintln!("agents-api managed worker {index} pid={pid}");
+                    }
+                    let socket = owned.socket().clone();
+                    workers.push(Some(owned));
+                    let slot = workers.last_mut().context("worker slot")?;
+                    clients.push(tokio::select! {
+                        result = runtime::connect(socket, startup_timeout) => result?,
+                        result = runtime::worker_exit(slot) => return result,
+                        result = &mut stopping => return result,
+                    });
+                    exporters::elapsed(
+                        exporters::WORKER_STARTUP_DURATION,
+                        starting.elapsed(),
+                        &[("reason", "start")],
+                    );
+                }
+            }
         }
-    };
-    let serving = async {
-        let client = tokio::select! {
-            result = runtime::connect(socket, startup_timeout) => result?,
-            result = runtime::worker_exit(&mut worker) => return result,
-            result = &mut stopping => return result,
-        };
-        exporters::elapsed(exporters::WORKER_STARTUP_DURATION, starting.elapsed(), &[("reason", "start")]);
-        let api = AgentsApi::new(AppServerClient::Remote(client), directory, token).await?;
+        let clients = clients.into_iter().map(AppServerClient::Remote).collect();
+        let api = AgentsApi::with_workers(clients, directory, token).await?;
         if let Some(public_url) = args.public_url {
             api.configure_public_url(public_url)?;
         }
@@ -349,32 +400,34 @@ async fn main() -> anyhow::Result<()> {
         let (stop_http, stopping_http) = tokio::sync::oneshot::channel();
         let mut http = tokio::spawn(
             axum::serve(listener, api.router())
-                .with_graceful_shutdown(async { let _ = stopping_http.await; })
+                .with_graceful_shutdown(async {
+                    let _ = stopping_http.await;
+                })
                 .into_future(),
         );
         // Keep serving durable reads while a crashed managed worker is replaced.
         // A lost worker no longer stops the process; only http failure, restart
-        // exhaustion, or a shutdown signal ends the loop.
+        // exhaustion, or a shutdown signal ends it. Each worker has its own
+        // supervisor, so one worker's restart never waits on another's.
         let http_result = |result: Result<std::io::Result<()>, tokio::task::JoinError>| {
             result
                 .context("HTTP server task failed")
                 .and_then(|result| result.map_err(Into::into))
         };
-        let result: anyhow::Result<()> = loop {
+        let result: anyhow::Result<()> = {
+            let mut supervisors: futures::stream::FuturesUnordered<_> = match &pool {
+                Some(managed) => workers
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(index, slot)| supervise(index, slot, &api, managed, startup_timeout))
+                    .collect(),
+                None => futures::stream::FuturesUnordered::new(),
+            };
             tokio::select! {
-                result = &mut http => break http_result(result),
-                result = &mut stopping => break result,
-                _ = runtime::worker_exit(&mut worker) => {
-                    tracing::warn!("managed worker exited; attempting restart");
-                    let restarted = tokio::select! {
-                        result = restart_worker(&mut worker, &api, &managed, startup_timeout) => result,
-                        result = &mut http => break http_result(result),
-                        result = &mut stopping => break result,
-                    };
-                    if let Err(error) = restarted {
-                        break Err(error);
-                    }
-                }
+                result = &mut http => http_result(result),
+                result = &mut stopping => result,
+                // A supervisor returns only when its worker cannot be restarted.
+                Some(result) = supervisors.next() => result,
             }
         };
         let _ = stop_http.send(());
@@ -384,15 +437,22 @@ async fn main() -> anyhow::Result<()> {
                 (&mut http).await??;
             }
             cleanup
-        }).await.context("API shutdown timed out");
+        })
+        .await
+        .context("API shutdown timed out");
         http.abort();
         let cleanup = cleanup?;
         result.and(cleanup)
-    }.await;
-    let cleanup = match worker {
-        Some(worker) => worker.shutdown().await,
-        None => Ok(()),
-    };
+    }
+    .await;
+    // Every worker gets its grace period at the same time, so a pool stops as
+    // fast as a single worker.
+    let cleanup =
+        futures::future::join_all(workers.into_iter().flatten().map(runtime::Worker::shutdown))
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<()>>>()
+            .map(drop);
     // Run both cleanups even when serving or initialization fails.
     if let Err(error) = &cleanup {
         tracing::error!(error = format!("{error:#}"), "worker cleanup failed");
@@ -401,6 +461,75 @@ async fn main() -> anyhow::Result<()> {
         telemetry.shutdown();
     }
     serving.and(cleanup)
+}
+
+/// The managed workers: one, or run mode's pool (see RUN_MODE.md).
+struct Pool {
+    executable: AbsolutePathBuf,
+    /// Worker 0's home, which the operator configures.
+    home: AbsolutePathBuf,
+    size: usize,
+}
+
+impl Pool {
+    /// Worker 0 uses the configured home, so a data directory keeps its
+    /// threads when it moves from one worker to a pool; worker `i` uses
+    /// `<home>-worker-<i>` beside it.
+    fn home(&self, index: usize) -> anyhow::Result<AbsolutePathBuf> {
+        if index == 0 {
+            return Ok(self.home.clone());
+        }
+        let name = self
+            .home
+            .as_path()
+            .file_name()
+            .context("worker home has no name")?
+            .to_string_lossy();
+        Ok(AbsolutePathBuf::try_from(
+            self.home
+                .as_path()
+                .with_file_name(format!("{name}-worker-{index}")),
+        )?)
+    }
+
+    /// Start worker `index`. Every worker runs worker 0's configuration,
+    /// copied into its own home before each start.
+    async fn spawn(&self, index: usize) -> anyhow::Result<runtime::Worker> {
+        let home = self.home(index)?;
+        if index > 0 {
+            match tokio::fs::read(self.home.join("config.toml")).await {
+                Ok(config) => {
+                    tokio::fs::create_dir_all(&home).await?;
+                    tokio::fs::write(home.join("config.toml"), config).await?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("failed to read worker configuration"),
+            }
+        }
+        runtime::Worker::spawn(self.executable.clone(), home).await
+    }
+}
+
+/// Supervise one managed worker: whenever it exits, restart it and reattach
+/// it to the API as the same worker. Returns only when restarts are exhausted.
+async fn supervise(
+    index: usize,
+    slot: &mut Option<runtime::Worker>,
+    api: &AgentsApi,
+    pool: &Pool,
+    startup_timeout: Duration,
+) -> anyhow::Result<()> {
+    loop {
+        let exit = runtime::worker_exit(slot).await;
+        tracing::warn!(
+            worker = index,
+            exit = exit.err().map(|error| format!("{error:#}")),
+            "managed worker exited; attempting restart"
+        );
+        restart_worker(index, slot, api, pool, startup_timeout)
+            .await
+            .with_context(|| format!("managed worker {index}"))?;
+    }
 }
 
 /// Bounded restarts prevent an unrecoverable worker from spinning forever;
@@ -413,23 +542,20 @@ const WORKER_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(/*secs*/ 5);
 ///
 /// The dead worker is dropped first so its home lock and socket are released
 /// before a replacement claims them. Each replacement completes the app-server
-/// initialization handshake (via `connect`) before `reconnect` routes requests
-/// to it. Only managed workers are restarted; an external worker returns an
-/// error rather than being respawned.
+/// initialization handshake (via `connect`) before `reconnect_worker` routes
+/// requests to it.
 async fn restart_worker(
+    index: usize,
     worker: &mut Option<runtime::Worker>,
     api: &AgentsApi,
-    managed: &Option<(AbsolutePathBuf, AbsolutePathBuf)>,
+    pool: &Pool,
     startup_timeout: Duration,
 ) -> anyhow::Result<()> {
-    let (executable, home) = match managed {
-        Some(managed) => managed,
-        None => anyhow::bail!("cannot restart an externally managed worker"),
-    };
     if let Some(dead) = worker.take()
         && let Err(error) = dead.shutdown().await
     {
         tracing::warn!(
+            worker = index,
             error = format!("{error:#}"),
             "reaping crashed worker failed"
         );
@@ -438,17 +564,20 @@ async fn restart_worker(
     let mut last_error = None;
     for attempt in 1..=WORKER_RESTART_ATTEMPTS {
         tokio::time::sleep(backoff).await;
-        match respawn(executable, home, startup_timeout).await {
+        match respawn(pool, index, startup_timeout).await {
             Ok((replacement, client)) => {
                 let pid = replacement.id().context("worker process ID")?;
-                api.reconnect(client).await?;
+                // Owned before the reattach, so a shutdown meanwhile stops it
+                // gracefully.
                 *worker = Some(replacement);
-                tracing::info!(pid, attempt, "managed worker restarted");
+                api.reconnect_worker(index, client).await?;
+                tracing::info!(worker = index, pid, attempt, "managed worker restarted");
                 exporters::count(exporters::WORKER_RESTART, &[("outcome", "restarted")]);
                 return Ok(());
             }
             Err(error) => {
                 tracing::warn!(
+                    worker = index,
                     attempt,
                     error = format!("{error:#}"),
                     "worker restart attempt failed"
@@ -466,12 +595,12 @@ async fn restart_worker(
 /// Spawn one replacement worker and connect an initialized client to it,
 /// failing fast if the fresh process exits before the handshake completes.
 async fn respawn(
-    executable: &AbsolutePathBuf,
-    home: &AbsolutePathBuf,
+    pool: &Pool,
+    index: usize,
     startup_timeout: Duration,
 ) -> anyhow::Result<(runtime::Worker, AppServerClient)> {
     let starting = Instant::now();
-    let mut worker = Some(runtime::Worker::spawn(executable.clone(), home.clone()).await?);
+    let mut worker = Some(pool.spawn(index).await?);
     let socket = match &worker {
         Some(worker) => worker.socket().clone(),
         None => anyhow::bail!("worker missing after spawn"),

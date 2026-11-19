@@ -52,7 +52,7 @@ impl Store {
             .await?;
         // The configured continuation applies once the service starts;
         // until then these sessions read as failed.
-        crate::records::disconnected(&pool, /*continuing*/ false).await?;
+        crate::records::disconnected(&pool, /*continuing*/ false, /*sessions*/ None).await?;
         Ok(Self(pool, lock))
     }
 

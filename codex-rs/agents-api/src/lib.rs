@@ -43,6 +43,7 @@ mod webhook_delivery;
 mod webhook_outbox;
 mod webhooks;
 
+use anyhow::Context;
 use axum::Json;
 use axum::Router;
 use axum::http::StatusCode;
@@ -55,6 +56,7 @@ use codex_app_server_protocol::ServerRequest;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -85,10 +87,17 @@ struct Backend {
 const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Worker calls at least this slow are logged.
 const SLOW_RPC: std::time::Duration = std::time::Duration::from_secs(5);
+/// The most workers one service runs (run mode's pool; see RUN_MODE.md).
+pub const MAX_WORKERS: usize = 64;
 
 struct State {
     store: store::Store,
-    backend: Mutex<Option<Backend>>,
+    /// One connection slot per worker, `None` while that worker is down. A
+    /// single worker serves every session unless run mode starts a pool.
+    backends: Mutex<Vec<Option<Backend>>>,
+    /// The worker each Codex thread lives on, as far as it has been looked up
+    /// or started. A thread never moves between workers.
+    thread_workers: Mutex<HashMap<String, usize>>,
     input_gates: gates::Gates,
     streams: streaming::Streams,
     /// Lower-case MCP hosts the operator allows to be internal or plain http.
@@ -160,11 +169,33 @@ impl State {
         lock(&self.provider).clone()
     }
 
+    /// How many workers serve this service: 1, or run mode's pool size.
+    fn workers(&self) -> usize {
+        lock(&self.backends).len()
+    }
+
+    fn backend<T>(&self, worker: usize, read: impl FnOnce(&Backend) -> T) -> Option<T> {
+        lock(&self.backends)
+            .get(worker)
+            .and_then(Option::as_ref)
+            .map(read)
+    }
+
+    /// Call the worker that owns the thread named by `params.threadId`, or,
+    /// for a call that names no thread, the first connected worker: every
+    /// worker of a pool runs the same configuration.
     async fn rpc(&self, method: &str, params: Value) -> Result<Value, ApiError> {
+        let worker = match params.get("threadId").and_then(Value::as_str) {
+            Some(thread_id) => self.thread_worker(thread_id).await?,
+            None => self.any_worker().ok_or_else(disconnected_error)?,
+        };
+        self.rpc_on(worker, method, params).await
+    }
+
+    async fn rpc_on(&self, worker: usize, method: &str, params: Value) -> Result<Value, ApiError> {
         // Clone the handle out of the lock; backend I/O must not hold it.
-        let handle = lock(&self.backend)
-            .as_ref()
-            .map(|backend| backend.handle.clone())
+        let handle = self
+            .backend(worker, |backend| backend.handle.clone())
             .ok_or_else(disconnected_error)?;
         let request = serde_json::from_value(
             json!({"id": Uuid::new_v4().to_string(), "method": method, "params": params}),
@@ -184,6 +215,7 @@ impl State {
         if took >= SLOW_RPC {
             tracing::warn!(
                 method,
+                worker,
                 took_ms = took.as_millis() as u64,
                 answered = answer.is_ok(),
                 "slow app-server request"
@@ -203,28 +235,162 @@ impl State {
             .map_err(|error| ApiError(StatusCode::BAD_GATEWAY, error.message))
     }
 
-    fn connected(&self) -> bool {
-        lock(&self.backend).is_some()
+    /// Whether each worker is connected, by worker index.
+    fn worker_states(&self) -> Vec<bool> {
+        lock(&self.backends).iter().map(Option::is_some).collect()
     }
 
-    fn loaded_threads(&self) -> Result<Arc<Mutex<HashSet<String>>>, ApiError> {
-        lock(&self.backend)
-            .as_ref()
-            .map(|backend| Arc::clone(&backend.loaded))
+    fn any_worker(&self) -> Option<usize> {
+        lock(&self.backends).iter().position(Option::is_some)
+    }
+
+    /// Whether the worker that serves this session is connected. A session
+    /// not yet on a worker needs any connected worker to start on.
+    async fn session_connected(&self, session_id: &str) -> Result<bool, ApiError> {
+        Ok(match self.assigned_worker(session_id).await? {
+            Some(worker) => self.backend(worker, |_| ()).is_some(),
+            None => self.any_worker().is_some(),
+        })
+    }
+
+    fn loaded_threads(&self, worker: usize) -> Result<Arc<Mutex<HashSet<String>>>, ApiError> {
+        self.backend(worker, |backend| Arc::clone(&backend.loaded))
             .ok_or_else(disconnected_error)
     }
 
-    fn attached_environments(&self) -> Result<Arc<Mutex<HashSet<String>>>, ApiError> {
-        lock(&self.backend)
-            .as_ref()
-            .map(|backend| Arc::clone(&backend.environments))
+    fn attached_environments(
+        &self,
+        worker: usize,
+    ) -> Result<Arc<Mutex<HashSet<String>>>, ApiError> {
+        self.backend(worker, |backend| Arc::clone(&backend.environments))
             .ok_or_else(disconnected_error)
     }
 
-    fn submissions(&self) -> Option<mpsc::Sender<actions::Submission>> {
-        lock(&self.backend)
-            .as_ref()
-            .map(|backend| backend.submissions.clone())
+    fn submissions(&self, worker: usize) -> Option<mpsc::Sender<actions::Submission>> {
+        self.backend(worker, |backend| backend.submissions.clone())
+    }
+
+    /// The worker a session's threads live on: `None` for a session in a
+    /// pool that has not started a thread yet. A session without an
+    /// assignment that has a thread belongs to worker 0.
+    async fn assigned_worker(&self, session_id: &str) -> Result<Option<usize>, ApiError> {
+        if self.workers() == 1 {
+            return Ok(Some(0));
+        }
+        let row: Option<(Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT (SELECT worker FROM session_workers WHERE session_id = ?1), \
+             (SELECT thread_id FROM sessions WHERE id = ?1)",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.store.0)
+        .await
+        .map_err(anyhow::Error::from)?;
+        Ok(match row {
+            Some((Some(worker), _)) => Some(self.worker_index(worker)?),
+            Some((None, Some(_))) => Some(0),
+            _ => None,
+        })
+    }
+
+    /// The worker a session's threads live on, assigning one first if the
+    /// session has none: the connected worker with the fewest sessions, the
+    /// lowest-numbered on a tie. One statement chooses and records the
+    /// assignment, so sessions starting together cannot take the same free
+    /// worker.
+    async fn session_worker(&self, session_id: &str) -> Result<usize, ApiError> {
+        if let Some(worker) = self.assigned_worker(session_id).await? {
+            return Ok(worker);
+        }
+        let states = self.worker_states();
+        let mut candidates: Vec<usize> = (0..states.len()).filter(|&i| states[i]).collect();
+        if candidates.is_empty() {
+            candidates = (0..states.len()).collect();
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO session_workers (session_id, worker) \
+             SELECT ?, c.value FROM json_each(?) c WHERE true \
+             ORDER BY (SELECT count(*) FROM session_workers w JOIN sessions s ON s.id = w.session_id \
+                       WHERE w.worker = c.value), c.value LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(json!(candidates).to_string())
+        .execute(&self.store.0)
+        .await
+        .map_err(anyhow::Error::from)?;
+        let worker: i64 =
+            sqlx::query_scalar("SELECT worker FROM session_workers WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_one(&self.store.0)
+                .await
+                .map_err(anyhow::Error::from)?;
+        let worker = self.worker_index(worker)?;
+        tracing::info!(session_id, worker, "session assigned to worker");
+        Ok(worker)
+    }
+
+    /// The worker a Codex thread lives on: its session's (a subagent's thread
+    /// is its session's), or, for a deleted session's thread, the one
+    /// recorded for its deletion. An unknown thread belongs to worker 0.
+    async fn thread_worker(&self, thread_id: &str) -> Result<usize, ApiError> {
+        if self.workers() == 1 {
+            return Ok(0);
+        }
+        if let Some(&worker) = lock(&self.thread_workers).get(thread_id) {
+            return Ok(worker);
+        }
+        let worker: Option<i64> = sqlx::query_scalar(
+            "SELECT worker FROM ( \
+               SELECT COALESCE((SELECT worker FROM session_workers WHERE session_id = s.id), 0) AS worker, 0 AS rank \
+                 FROM sessions s WHERE s.thread_id = ?1 \
+               UNION ALL SELECT COALESCE((SELECT worker FROM session_workers WHERE session_id = a.session_id), 0), 1 \
+                 FROM subagents a WHERE a.thread_id = ?1 \
+               UNION ALL SELECT worker, 2 FROM session_cleanup WHERE thread_id = ?1) \
+             ORDER BY rank LIMIT 1",
+        )
+        .bind(thread_id)
+        .fetch_optional(&self.store.0)
+        .await
+        .map_err(anyhow::Error::from)?;
+        let Some(worker) = worker else {
+            return Ok(0);
+        };
+        let worker = self.worker_index(worker)?;
+        self.remember_thread(thread_id, worker);
+        Ok(worker)
+    }
+
+    fn remember_thread(&self, thread_id: &str, worker: usize) {
+        if self.workers() > 1 {
+            lock(&self.thread_workers).insert(thread_id.to_owned(), worker);
+        }
+    }
+
+    /// A stored worker index, checked against the pool: a session assigned
+    /// by a larger pool than this one runs cannot be served.
+    fn worker_index(&self, worker: i64) -> Result<usize, ApiError> {
+        let workers = self.workers();
+        usize::try_from(worker)
+            .ok()
+            .filter(|&worker| worker < workers)
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "the session's worker {worker} is not running; this service runs {workers}"
+                    ),
+                )
+            })
+    }
+
+    /// The sessions served by `worker`, which a loss of that worker affects.
+    async fn worker_sessions(&self, worker: usize) -> anyhow::Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM sessions s \
+             WHERE COALESCE((SELECT worker FROM session_workers w WHERE w.session_id = s.id), 0) = ?",
+        )
+        .bind(worker as i64)
+        .fetch_all(&self.store.0)
+        .await?)
     }
 }
 
@@ -278,15 +444,18 @@ impl ApiError {
 /// tools and data-URL images. Other JSON requests are limited to 16 KiB.
 pub(crate) const LARGE_JSON_BODY: usize = 8 << 20;
 
-/// HTTP facade over a dedicated Codex app-server connection.
+/// HTTP facade over dedicated Codex app-server connections: one worker, or
+/// run mode's pool with each session on one of them.
 /// Dropping this owner requests shutdown; call `shutdown` to wait for completion.
 pub struct AgentsApi {
     state: Arc<State>,
     directory: AbsolutePathBuf,
     router: Router,
-    pump: Mutex<Option<tokio::task::JoinHandle<std::io::Result<()>>>>,
+    /// Each worker's notification pump, by worker index.
+    pumps: Mutex<Vec<Option<tokio::task::JoinHandle<std::io::Result<()>>>>>,
     dispatcher: tokio::task::JoinHandle<()>,
-    reconnect_gate: Semaphore,
+    /// Serializes replacements of each worker's connection.
+    reconnect_gates: Vec<Semaphore>,
     stop: watch::Sender<bool>,
 }
 
@@ -296,16 +465,34 @@ impl AgentsApi {
         directory: AbsolutePathBuf,
         token: String,
     ) -> anyhow::Result<Self> {
+        Self::with_workers(vec![client], directory, token).await
+    }
+
+    /// Serve sessions on a pool of workers, one connection each (run mode;
+    /// see RUN_MODE.md). Each session is assigned to one worker on its first
+    /// input and stays there; worker `i` is replaced with
+    /// [`Self::reconnect_worker`]. A pool of one is [`Self::new`].
+    pub async fn with_workers(
+        clients: Vec<AppServerClient>,
+        directory: AbsolutePathBuf,
+        token: String,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             token.len() >= 32,
             "API token must contain at least 32 bytes"
         );
+        anyhow::ensure!(
+            (1..=MAX_WORKERS).contains(&clients.len()),
+            "a service runs from 1 to {MAX_WORKERS} workers"
+        );
+        let workers = clients.len();
         let store = store::Store::open(directory.clone()).await?;
         let turn_aliases = turn_aliases::TurnAliases::load(&store.0).await?;
         let state = Arc::new(State {
             store,
             turn_aliases,
-            backend: Mutex::new(None),
+            backends: Mutex::new((0..workers).map(|_| None).collect()),
+            thread_workers: Mutex::default(),
             input_gates: gates::Gates::default(),
             streams: streaming::Streams::default(),
             mcp_hosts: Mutex::default(),
@@ -355,16 +542,23 @@ impl AgentsApi {
             state,
             directory,
             router,
-            pump: Mutex::new(None),
+            pumps: Mutex::new((0..workers).map(|_| None).collect()),
             dispatcher,
-            reconnect_gate: Semaphore::new(/*permits*/ 1),
+            reconnect_gates: (0..workers)
+                .map(|_| Semaphore::new(/*permits*/ 1))
+                .collect(),
             stop,
         };
-        api.reconnect(client).await?;
+        // Every worker serves before recovery runs, so it reaches every
+        // session's thread at once.
+        for (worker, client) in clients.into_iter().enumerate() {
+            api.attach(worker, client).await?;
+        }
+        api.recover(/*replacing*/ false).await;
         Ok(api)
     }
 
-    /// Replace the backend connection.
+    /// Replace the backend connection (worker 0's, in a pool).
     ///
     /// The previous connection is retired first: its pump exits, marks its
     /// unresolvable function calls `unavailable`, and shuts its own client
@@ -373,16 +567,43 @@ impl AgentsApi {
     /// throughout. A caller-owned worker process behind the old connection is
     /// never terminated by this API.
     pub async fn reconnect(&self, client: AppServerClient) -> anyhow::Result<()> {
-        let _replacing = self
-            .reconnect_gate
-            .acquire()
-            .await
-            .map_err(anyhow::Error::from)?;
-        let previous = lock(&self.state.backend).take();
+        self.reconnect_worker(/*worker*/ 0, client).await
+    }
+
+    /// Replace worker `worker`'s connection, as [`Self::reconnect`] does for a
+    /// single worker. Only that worker's sessions see the loss; the other
+    /// workers keep serving theirs.
+    pub async fn reconnect_worker(
+        &self,
+        worker: usize,
+        client: AppServerClient,
+    ) -> anyhow::Result<()> {
+        let gate = self
+            .reconnect_gates
+            .get(worker)
+            .with_context(|| format!("no worker {worker}"))?;
+        let _replacing = gate.acquire().await.map_err(anyhow::Error::from)?;
+        let replacing = self.attach(worker, client).await?;
+        self.recover(replacing).await;
+        Ok(())
+    }
+
+    /// The number of workers this service serves sessions on.
+    pub fn workers(&self) -> usize {
+        self.state.workers()
+    }
+
+    /// Retire worker `worker`'s connection, if any, and start serving
+    /// `client` in its place. Returns whether a connection was replaced.
+    async fn attach(&self, worker: usize, client: AppServerClient) -> anyhow::Result<bool> {
+        let previous = lock(&self.state.backends)
+            .get_mut(worker)
+            .with_context(|| format!("no worker {worker}"))?
+            .take();
         if let Some(previous) = previous {
             let _ = previous.cancel.send(true);
         }
-        let retired = lock(&self.pump).take();
+        let retired = lock(&self.pumps)[worker].take();
         let replacing = retired.is_some();
         if let Some(retired) = retired {
             retired.await??;
@@ -391,7 +612,7 @@ impl AgentsApi {
         let (submissions, submissions_rx) = mpsc::channel(/*buffer*/ 32);
         let (cancel, cancelled) = watch::channel(/*cancelled*/ false);
         let identity = submissions.clone();
-        *lock(&self.state.backend) = Some(Backend {
+        lock(&self.state.backends)[worker] = Some(Backend {
             handle,
             submissions,
             cancel,
@@ -400,18 +621,24 @@ impl AgentsApi {
         });
         let task = tokio::spawn(pump(
             Arc::clone(&self.state),
+            worker,
             client,
             self.stop.subscribe(),
             cancelled,
             submissions_rx,
             identity,
         ));
-        *lock(&self.pump) = Some(task);
+        lock(&self.pumps)[worker] = Some(task);
+        tracing::info!(worker, "backend connected");
+        telemetry::count(telemetry::BACKEND_CONNECTION, &[("event", "connected")]);
+        Ok(replacing)
+    }
+
+    /// Recovery once a connection serves.
+    async fn recover(&self, replacing: bool) {
         // Correct any turns a prior disconnect failed provisionally against the
         // now-reachable rollout history. Best-effort: a failure here must not
         // fail the reconnect, since the service is otherwise ready.
-        tracing::info!("backend connected");
-        telemetry::count(telemetry::BACKEND_CONNECTION, &[("event", "connected")]);
         if let Err(error) = reconcile::run(&self.state).await {
             tracing::warn!(error = format!("{error:#}"), "reconciliation failed");
         }
@@ -425,7 +652,6 @@ impl AgentsApi {
         if replacing {
             reconcile::continue_interrupted(&self.state);
         }
-        Ok(())
     }
 
     pub fn router(&self) -> Router {
@@ -549,9 +775,13 @@ impl AgentsApi {
         let _ = self.stop.send(true);
         // An interrupted delivery stays queued and is repeated after restart.
         self.dispatcher.abort();
-        let pump = lock(&self.pump).take();
-        if let Some(pump) = pump {
-            pump.await??;
+        let pumps: Vec<_> = lock(&self.pumps)
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect();
+        // Every connection closes at once, so a pool stops as fast as one.
+        for result in futures::future::join_all(pumps).await {
+            result??;
         }
         Ok(())
     }
@@ -569,6 +799,7 @@ impl Drop for AgentsApi {
 /// awaits that completion before a new connection may create function rows.
 async fn pump(
     state: Arc<State>,
+    worker: usize,
     mut client: AppServerClient,
     mut stopping: watch::Receiver<bool>,
     mut cancelled: watch::Receiver<bool>,
@@ -652,19 +883,20 @@ async fn pump(
     // Stop routing mutations to this connection before recording the loss.
     // A replacement may already have taken the slot; only clear our own entry.
     {
-        let mut slot = lock(&state.backend);
-        if slot
-            .as_ref()
-            .is_some_and(|backend| backend.submissions.same_channel(&identity))
+        let mut backends = lock(&state.backends);
+        if let Some(slot) = backends.get_mut(worker)
+            && slot
+                .as_ref()
+                .is_some_and(|backend| backend.submissions.same_channel(&identity))
         {
             *slot = None;
         }
     }
     if lost {
-        tracing::warn!("backend connection lost");
+        tracing::warn!(worker, "backend connection lost");
         telemetry::count(telemetry::BACKEND_CONNECTION, &[("event", "lost")]);
     }
-    if let Err(error) = disconnect_bookkeeping(&state).await {
+    if let Err(error) = disconnect_bookkeeping(&state, worker).await {
         tracing::error!(
             error = format!("{error:#}"),
             "disconnect bookkeeping failed"
@@ -682,19 +914,44 @@ async fn pump(
 /// The lost connection's JSON-RPC waiters cannot be recreated, so its pending
 /// function calls become unavailable and its interrupted public work is marked
 /// failed. Runs once per retired connection, before any replacement serves.
-async fn disconnect_bookkeeping(state: &State) -> anyhow::Result<()> {
+/// In a pool, only the lost worker's sessions are touched.
+async fn disconnect_bookkeeping(state: &State, worker: usize) -> anyhow::Result<()> {
+    let sessions = if state.workers() == 1 {
+        None
+    } else {
+        Some(state.worker_sessions(worker).await?)
+    };
+    let scope = sessions
+        .as_ref()
+        .map(|sessions| json!(sessions).to_string());
     sqlx::query(
-        "UPDATE tool_calls SET status = 'unavailable' WHERE status IN ('pending', 'submitting')",
+        "UPDATE tool_calls SET status = 'unavailable' WHERE status IN ('pending', 'submitting') \
+         AND (?1 IS NULL OR session_id IN (SELECT value FROM json_each(?1)))",
     )
+    .bind(&scope)
     .execute(&state.store.0)
     .await?;
     let continuing = state
         .continuations
         .load(std::sync::atomic::Ordering::Relaxed)
         > 0;
-    records::disconnected(&state.store.0, continuing).await?;
-    state.streams.clear();
-    let _ = state.events.send(json!({"method": "stream/disconnected"}));
-    let _ = state.public_events.send(json!({"type":"disconnect"}));
+    records::disconnected(&state.store.0, continuing, scope.as_deref()).await?;
+    match &sessions {
+        None => {
+            state.streams.clear();
+            let _ = state.events.send(json!({"method": "stream/disconnected"}));
+            let _ = state.public_events.send(json!({"type":"disconnect"}));
+        }
+        Some(sessions) => {
+            state.streams.clear_sessions(sessions);
+            let _ = state
+                .events
+                .send(json!({"method": "stream/disconnected", "params": {"worker": worker}}));
+            // Only the lost worker's sessions' streams end.
+            let _ = state
+                .public_events
+                .send(json!({"type":"disconnect", "worker": worker, "session_ids": sessions}));
+        }
+    }
     Ok(())
 }

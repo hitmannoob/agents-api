@@ -216,7 +216,7 @@ async fn prepare(state: &State, id: &str, events: &mut [Event]) -> Result<(), Ap
 }
 
 async fn check(state: &State, id: &str, events: &[Event]) -> Result<(), ApiError> {
-    if !state.connected() {
+    if !state.session_connected(id).await? {
         return Err(crate::disconnected_error());
     }
     for event in events {

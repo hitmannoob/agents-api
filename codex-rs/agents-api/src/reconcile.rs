@@ -206,6 +206,16 @@ async fn continue_sessions(state: &Arc<State>) -> anyhow::Result<()> {
         .fetch_all(&state.store.0)
         .await?;
     for session_id in sessions {
+        // In a pool, a session whose worker is still down is decided when
+        // that worker serves again, not by another worker's reconnection.
+        if state.workers() > 1
+            && !state
+                .session_connected(&session_id)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.1))?
+        {
+            continue;
+        }
         // Passes may overlap; one session is decided by one pass at a time,
         // and the decision re-reads its state, so it is continued once.
         if !crate::lock(&state.continuing).insert(session_id.clone()) {

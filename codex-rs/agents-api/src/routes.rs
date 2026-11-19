@@ -89,15 +89,31 @@ pub(crate) fn router(state: Arc<State>) -> Router {
 }
 
 /// Liveness and readiness for load balancers, without credentials: 200 while
-/// the worker is connected, 503 while it is not. Saved records stay readable
-/// either way.
+/// the worker (every worker of a pool) is connected, 503 while one is not.
+/// Saved records stay readable either way. A pool also lists its workers.
 async fn health(Extract(state): Extract<Arc<State>>) -> Response {
-    let (status, worker) = if state.connected() {
-        (StatusCode::OK, "connected")
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "disconnected")
+    let workers = state.worker_states();
+    let label = |connected: bool| {
+        if connected {
+            "connected"
+        } else {
+            "disconnected"
+        }
     };
-    (status, Json(json!({"status": if status == StatusCode::OK { "ok" } else { "degraded" }, "worker": worker}))).into_response()
+    let (status, worker) = if workers.iter().all(|&connected| connected) {
+        (StatusCode::OK, label(true))
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, label(false))
+    };
+    let mut body = json!({"status": if status == StatusCode::OK { "ok" } else { "degraded" }, "worker": worker});
+    if workers.len() > 1 {
+        body["workers"] = workers
+            .iter()
+            .enumerate()
+            .map(|(index, &connected)| json!({"index": index, "status": label(connected)}))
+            .collect();
+    }
+    (status, Json(body)).into_response()
 }
 
 async fn authorize(
@@ -585,7 +601,9 @@ pub(crate) async fn start_turn(
         &mcp_secrets,
     )
     .await?;
-    let loaded = state.loaded_threads()?;
+    // The worker this session's threads live on, chosen now if it has none.
+    let worker = state.session_worker(id).await?;
+    let loaded = state.loaded_threads(worker)?;
     let mut skills_root = None;
     if let Environment::SelfHosted {
         id: environment_id,
@@ -593,7 +611,7 @@ pub(crate) async fn start_turn(
         ..
     } = &session.environment
     {
-        crate::environments::attach(state, &project_id, environment_id).await?;
+        crate::environments::attach(state, worker, &project_id, environment_id).await?;
         crate::session_skills::install(state, id, environment_id).await?;
         skills_root = crate::session_skills::root(state, id, cwd).await?;
     }
@@ -654,7 +672,8 @@ pub(crate) async fn start_turn(
             Environment::None | Environment::Local { .. } => Vec::new(),
         };
         let response = state
-            .rpc(
+            .rpc_on(
+                worker,
                 "thread/start",
                 json!({
                     "model": session.agent.config.model,
@@ -678,9 +697,11 @@ pub(crate) async fn start_turn(
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("thread/start omitted thread id"))?
             .to_owned();
+        state.remember_thread(&thread_id, worker);
         // An explicit name materializes the thread before its ID is committed here.
         state
-            .rpc(
+            .rpc_on(
+                worker,
                 "thread/name/set",
                 json!({"threadId": thread_id, "name": format!("API session {id}")}),
             )
@@ -846,7 +867,7 @@ async fn events(
         Path(id.clone()),
     )
     .await?;
-    if !state.connected() {
+    if !state.session_connected(&id).await? {
         return Err(crate::disconnected_error());
     }
     let stream = BroadcastStream::new(receiver).filter_map(move |result| {

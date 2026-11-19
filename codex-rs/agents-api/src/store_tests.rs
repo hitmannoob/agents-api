@@ -207,6 +207,7 @@ async fn migrations_record_a_ledger_and_adopt_a_legacy_database() -> anyhow::Res
     for statement in [
         "DROP TABLE public_sessions",
         "DROP TABLE public_session_sequence",
+        "DROP TABLE session_workers",
         "DROP TABLE session_cleanup",
         "DROP TABLE input_requests",
         "DROP TABLE turn_usage",

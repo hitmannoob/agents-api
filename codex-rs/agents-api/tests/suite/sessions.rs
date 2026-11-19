@@ -20,7 +20,7 @@ async fn send(
         .status())
 }
 
-fn rollouts(directory: &Path) -> anyhow::Result<usize> {
+pub(super) fn rollouts(directory: &Path) -> anyhow::Result<usize> {
     let mut count = 0;
     for entry in std::fs::read_dir(directory)? {
         let path = entry?.path();

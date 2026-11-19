@@ -263,13 +263,19 @@ pub(crate) async fn delete(
             .map_err(anyhow::Error::from)?;
     }
     if let Some(thread_id) = &thread_id {
-        sqlx::query("INSERT INTO session_cleanup (session_id, thread_id) VALUES (?, ?)")
+        // The thread is deleted on the worker it lives on.
+        sqlx::query("INSERT INTO session_cleanup (session_id, thread_id, worker) VALUES (?1, ?2, COALESCE((SELECT worker FROM session_workers WHERE session_id = ?1), 0))")
             .bind(&id)
             .bind(thread_id)
             .execute(&mut *tx)
             .await
             .map_err(anyhow::Error::from)?;
     }
+    sqlx::query("DELETE FROM session_workers WHERE session_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .map_err(anyhow::Error::from)?;
     tx.commit().await.map_err(anyhow::Error::from)?;
     drop(admission);
     crate::credentials::forget(&state, &id, credential_labels).await;

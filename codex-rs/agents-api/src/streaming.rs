@@ -162,6 +162,11 @@ impl Streams {
         crate::lock(&self.0).clear();
     }
 
+    /// Forget these sessions' items; the pool worker that produced them is gone.
+    pub(crate) fn clear_sessions(&self, sessions: &[String]) {
+        crate::lock(&self.0).retain(|_, stream| !sessions.contains(&stream.session_id));
+    }
+
     /// Translate one delta notification into its public events.
     fn delta(&self, method: &str, params: &Value) -> Vec<Value> {
         let key = (

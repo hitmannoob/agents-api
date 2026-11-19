@@ -398,17 +398,18 @@ pub(crate) async fn recover(state: &Arc<State>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Add a session's environment to the current worker connection, once per
-/// connection.
+/// Add a session's environment to the connection of the worker its session
+/// runs on, once per connection.
 pub(crate) async fn attach(
     state: &State,
+    worker: usize,
     project_id: &str,
     environment_id: &str,
 ) -> Result<(), ApiError> {
     // Check before even the already-attached fast path; never delegate the
     // service's harness authority to a foreign or missing environment.
     crate::projects::require(state, project_id, environment_id, Resource::Environment).await?;
-    let attached = state.attached_environments()?;
+    let attached = state.attached_environments(worker)?;
     if crate::lock(&attached).contains(environment_id) {
         return Ok(());
     }
@@ -420,7 +421,8 @@ pub(crate) async fn attach(
         )
     })?;
     state
-        .rpc(
+        .rpc_on(
+            worker,
             "environment/add",
             json!({"environmentId": environment_id, "noiseRegistry": {
                 "url": url, "environmentId": environment_id, "authToken": state.registry.harness_token()}}),
@@ -447,7 +449,8 @@ async fn needs_resume(state: &State, session_id: &str) -> Result<bool, ApiError>
     let Some(thread_id) = thread_id else {
         return Ok(false);
     };
-    Ok(match state.loaded_threads() {
+    let worker = state.thread_worker(&thread_id).await?;
+    Ok(match state.loaded_threads(worker) {
         Ok(loaded) => !crate::lock(&loaded).contains(&thread_id),
         Err(_) => true,
     })
@@ -772,28 +775,31 @@ pub(crate) async fn cancel(state: &State, session_id: &str) -> Result<bool, ApiE
     Ok(waiting)
 }
 
-/// Forget a deleted session's environment: its executor sockets close and the
-/// worker stops using it. The caller's compute keeps running.
+/// Forget a deleted session's environment: its executor sockets close and
+/// every worker that had it stops using it. The caller's compute keeps running.
 pub(crate) async fn forget(state: &State, environment_id: &str) {
     state.registry.remove(environment_id);
     let _ = state.executors.remove_environment(environment_id);
-    let attached = match state.attached_environments() {
-        Ok(attached) => attached,
-        Err(_) => return,
-    };
-    if crate::lock(&attached).remove(environment_id)
-        && let Err(error) = state
-            .rpc(
-                "environment/remove",
-                json!({"environmentId": environment_id}),
-            )
-            .await
-    {
-        tracing::warn!(
-            environment_id,
-            error = error.1,
-            "worker kept a deleted environment"
-        );
+    for worker in 0..state.workers() {
+        let Ok(attached) = state.attached_environments(worker) else {
+            continue;
+        };
+        if crate::lock(&attached).remove(environment_id)
+            && let Err(error) = state
+                .rpc_on(
+                    worker,
+                    "environment/remove",
+                    json!({"environmentId": environment_id}),
+                )
+                .await
+        {
+            tracing::warn!(
+                environment_id,
+                worker,
+                error = error.1,
+                "worker kept a deleted environment"
+            );
+        }
     }
 }
 
